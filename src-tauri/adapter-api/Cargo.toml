@@ -1,0 +1,22 @@
+[package]
+name = "adapter-api"
+version = "0.1.0"
+edition = "2021"
+description = "Trait + intent types shared by every built-in database adapter"
+
+[dependencies]
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+# Only for the `mpsc::UnboundedSender` used in the subscribe sink —
+# no runtime features; this keeps the dep minimal.
+tokio = { version = "1", default-features = false, features = ["sync"] }
+# Optional: enable `From<sqlx::Error> for AdapterError` so sqlx-based
+# adapters keep the `?` ergonomics. Non-sqlx adapters skip the feature
+# and the crate stays sqlx-free.
+sqlx = { version = "0.8", default-features = false, optional = true }
+
+[features]
+default = []
+sqlx = ["dep:sqlx"]

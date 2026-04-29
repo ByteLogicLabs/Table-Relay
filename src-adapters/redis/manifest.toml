@@ -1,0 +1,105 @@
+# Authoritative manifest for the built-in Redis adapter.
+
+[adapter]
+key          = "redis"
+display_name = "Redis"
+version      = "0.1.0"
+description  = "Connects to a single-node Redis instance. Databases 0–15 show up in the sidebar only when they hold at least one key. Keys are grouped into virtual tables by type; each virtual table browses the keys of its kind with their value + TTL."
+tags = ["kv", "in-memory", "first-party"]
+
+[provenance]
+vendor  = "db-table team"
+license = "Apache-2.0"
+
+[capabilities]
+schemas           = true
+describe_schema   = true
+foreign_keys      = false
+views             = false
+routines          = false
+indexes           = false
+row_counts        = true
+
+browse            = true
+server_filter     = false
+server_sort       = false
+streaming         = false
+keyset_pagination = false
+
+update_rows       = false
+insert_rows       = false
+delete_rows       = true
+transactions      = false
+
+create_database   = false
+create_table      = false
+alter_table       = false
+drop_table        = false
+manage_indexes    = false
+
+diagram           = false
+erd_inference     = false
+query_editor      = true
+explain_plan      = false
+ssh_tunnel        = false
+
+import            = []
+export            = []
+
+realtime               = true
+realtime_kind          = "pubsub"
+glob_subscriptions     = true
+sql_dialect            = "none"
+boolean_literal_format = "one_zero"
+database_picker        = true
+hide_column_in_grid    = ""
+
+[permissions]
+network_outbound   = true
+ssh_tunnel         = false
+read_ssh_keys      = false
+store_known_hosts  = false
+read_credentials   = true
+
+[query_editor]
+label               = "Redis shell"
+placeholder         = "GET mykey"
+comment_tags        = ["#"]
+result_view_modes   = ["table", "json"]
+examples            = [
+  "GET mykey",
+  "SET mykey \"hello\"",
+  "SCAN 0 MATCH user:* COUNT 100",
+]
+data_faker_template = "SET user:${number.int} '{\"name\":\"${name.fullName}\",\"email\":\"${internet.email}\"}'"
+language            = "shell"
+statement_separator = "\n"
+
+[[connection_fields]]
+key      = "host"
+label    = "Host"
+kind     = "string"
+required = true
+default  = "localhost"
+
+[[connection_fields]]
+key      = "port"
+label    = "Port"
+kind     = "int"
+required = true
+default  = "6379"
+min      = 1
+max      = 65535
+
+[[connection_fields]]
+key      = "user"
+label    = "Username"
+kind     = "string"
+required = false
+help     = "Optional — only for Redis 6+ ACL auth."
+
+[[connection_fields]]
+key      = "password"
+label    = "Password"
+kind     = "secret"
+required = false

@@ -1,0 +1,112 @@
+# Authoritative manifest for the built-in MongoDB adapter.
+
+[adapter]
+key          = "mongo"
+display_name = "MongoDB"
+version      = "0.1.0"
+description  = "Connects to MongoDB and surfaces databases + collections for browsing and editing."
+tags = ["document", "nosql", "first-party"]
+
+[provenance]
+vendor  = "db-table team"
+license = "Apache-2.0"
+
+[capabilities]
+schemas           = true
+describe_schema   = true
+foreign_keys      = false
+views             = false
+routines          = false
+indexes           = true
+row_counts        = true
+
+browse            = true
+server_filter     = true
+server_sort       = true
+streaming         = false
+keyset_pagination = false
+
+update_rows       = true
+insert_rows       = true
+delete_rows       = true
+transactions      = false
+
+create_database   = false
+create_table      = false
+alter_table       = false
+drop_table        = false
+manage_indexes    = true
+
+diagram           = false
+erd_inference     = false
+query_editor      = true
+explain_plan      = false
+ssh_tunnel        = false
+
+import            = []
+export            = ["json", "ndjson"]
+
+realtime               = true
+realtime_kind          = "change_stream"
+glob_subscriptions     = true
+sql_dialect            = "none"
+boolean_literal_format = "one_zero"
+database_picker        = true
+hide_column_in_grid    = "_id"
+
+[permissions]
+network_outbound   = true
+ssh_tunnel         = false
+read_ssh_keys      = false
+store_known_hosts  = false
+read_credentials   = true
+
+[query_editor]
+label               = "Mongo shell"
+placeholder         = "db.getCollection('users').find({}).limit(100)"
+comment_tags        = ["//", "/* */"]
+result_view_modes   = ["table", "json"]
+examples            = [
+  "db.getCollection('users').find({}).limit(100)",
+  "db.getCollection('users').countDocuments({})",
+  "db.getCollection('users').insertOne({ name: 'Alice', email: 'alice@example.com' })",
+]
+data_faker_template = "{ \"name\": \"${name.fullName}\", \"email\": \"${internet.email}\", \"createdAt\": \"${date.recentIso}\" }"
+language            = "mongo"
+statement_separator = ";"
+
+[[connection_fields]]
+key      = "host"
+label    = "Host"
+kind     = "string"
+required = true
+default  = "localhost"
+
+[[connection_fields]]
+key      = "port"
+label    = "Port"
+kind     = "int"
+required = true
+default  = "27017"
+min      = 1
+max      = 65535
+
+[[connection_fields]]
+key      = "user"
+label    = "User"
+kind     = "string"
+required = false
+help     = "Optional username for authenticated clusters."
+
+[[connection_fields]]
+key      = "password"
+label    = "Password"
+kind     = "secret"
+required = false
+
+[[connection_fields]]
+key      = "database"
+label    = "Database"
+kind     = "string"
+required = false
+help     = "Optional default database for query-editor commands."

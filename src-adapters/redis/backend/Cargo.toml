@@ -1,0 +1,26 @@
+[package]
+name = "adapter-redis"
+version = "0.1.0"
+edition = "2021"
+description = "Built-in Redis adapter for db-table"
+
+[build-dependencies]
+manifest-build = { path = "../../../src-tauri/manifest-build" }
+
+[dependencies]
+# Shared trait + intent types. No sqlx feature — Redis doesn't use it,
+# and staying opted-out keeps the workspace's build graph lean.
+adapter-api = { path = "../../../src-tauri/adapter-api" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# StreamExt::next() on the redis-rs PubSubStream. Only need the base
+# traits — no runtime, no executor features.
+futures = { version = "0.3", default-features = false, features = ["std"] }
+
+# Redis client. `tokio-comp` gives us the async Tokio driver; no TLS
+# feature for the first cut — every live Redis we want to talk to is
+# either local or already inside the machine / a VPC.
+redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }

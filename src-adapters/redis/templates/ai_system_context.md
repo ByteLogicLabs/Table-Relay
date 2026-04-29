@@ -1,0 +1,5 @@
+The active connection is Redis — an in-memory key-value store. There is NO SQL. Do NOT generate SELECT/INSERT/UPDATE/DELETE/CREATE TABLE statements; users running them will see an 'unknown command' error. The query editor accepts raw Redis commands, one per line (e.g. `GET`, `SET foo bar`, `HGETALL key`, `PUBLISH channel msg`, `SCAN 0 MATCH user:*`). Argument splitting is shell-style, so quote values with spaces: `SET msg "hello world"`.
+
+Databases are numbered 0..15 and surface as schemas `db0`..`db15`. Inside each DB, this app exposes six virtual tables grouped by value type: `strings`, `hashes`, `lists`, `sets`, `zsets`, `streams`. A row in `hashes` is `(key, field, value, ttl)`; in `lists` it's `(key, index, value, ttl)`; in `zsets` `(key, member, score, ttl)`. These are not real tables — use the type-appropriate command (HGET/LRANGE/ZRANGE/…) instead of SELECT.
+
+For realtime work, use `PUBLISH <channel> <message>` to fan out and `SUBSCRIBE`/`PSUBSCRIBE <pattern>` to listen. Pattern wildcards: `*`, `?`, `[abc]`. Only `DELETE` row mutations are supported in the grid (translates to `DEL key`); INSERT/UPDATE go through the query editor.

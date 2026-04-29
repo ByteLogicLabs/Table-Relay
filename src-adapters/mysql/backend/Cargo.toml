@@ -1,0 +1,33 @@
+[package]
+name = "adapter-mysql"
+version = "0.1.0"
+edition = "2021"
+description = "Built-in MySQL adapter for db-table"
+
+[build-dependencies]
+manifest-build = { path = "../../../src-tauri/manifest-build" }
+
+[dependencies]
+# Shared trait + intent types + SSH known-hosts trait.
+adapter-api = { path = "../../../src-tauri/adapter-api", features = ["sqlx"] }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+chrono = { version = "0.4", features = ["serde"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
+
+# MySQL driver.
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "mysql",
+    "chrono",
+    "uuid",
+    "json",
+    "bigdecimal",
+] }
+
+# SSH tunnel support is provided by the shared `adapter-ssh` crate;
+# the adapter just re-exports `SshConfig` + `Tunnel`.
+adapter-ssh = { path = "../../../src-tauri/adapter-ssh" }

@@ -1,0 +1,92 @@
+# Authoritative manifest for the built-in SQLite adapter.
+
+column_types = [
+  "integer", "real", "text", "blob", "numeric",
+  "boolean", "date", "datetime", "timestamp", "time",
+  "varchar(255)", "char", "decimal", "double", "float",
+  "int", "bigint", "smallint", "tinyint", "json",
+]
+
+[adapter]
+key          = "sqlite"
+display_name = "SQLite"
+version      = "0.1.0"
+description  = "Opens a local SQLite 3 database file. The file itself is the connection; there is no host/port/user/password. The single attached database is surfaced as the `main` schema."
+tags = ["sql", "relational", "embedded", "first-party"]
+
+[provenance]
+vendor  = "db-table team"
+license = "Apache-2.0"
+
+[capabilities]
+schemas           = true
+describe_schema   = true
+foreign_keys      = true
+views             = true
+routines          = false
+indexes           = true
+row_counts        = true
+
+browse            = true
+server_filter     = true
+server_sort       = true
+streaming         = false
+keyset_pagination = false
+
+update_rows       = true
+insert_rows       = true
+delete_rows       = true
+transactions      = true
+
+create_database   = false
+create_table      = true
+alter_table       = true
+drop_table        = true
+manage_indexes    = false
+
+diagram           = true
+erd_inference     = true
+query_editor      = true
+explain_plan      = true
+ssh_tunnel        = false
+
+import            = ["sql", "ddl", "txt"]
+export            = ["csv", "json", "sql"]
+
+realtime               = false
+realtime_kind          = "none"
+glob_subscriptions     = false
+sql_dialect            = "sqlite"
+boolean_literal_format = "one_zero"
+database_picker        = false
+hide_column_in_grid    = ""
+
+[permissions]
+network_outbound   = false
+ssh_tunnel         = false
+read_ssh_keys      = false
+store_known_hosts  = false
+read_credentials   = false
+
+[query_editor]
+label               = "SQL editor"
+placeholder         = "SELECT * FROM sqlite_schema;"
+comment_tags        = ["--", "#", "/* */"]
+result_view_modes   = ["table", "json"]
+examples            = [
+  "SELECT * FROM sqlite_schema;",
+  "SELECT name FROM sqlite_master WHERE type = 'table';",
+  "SELECT COUNT(*) AS total FROM users;",
+]
+data_faker_template = "INSERT INTO users (name, email) VALUES ('${name.fullName}', '${internet.email}');"
+language            = "sql"
+statement_separator = ";"
+
+[[connection_fields]]
+key          = "database"
+label        = "Database file"
+kind         = "file"
+extensions   = ["db", "sqlite", "sqlite3"]
+allow_create = true
+required     = true
+help         = "Pick an existing .db / .sqlite file, or choose a new path to create one. Use ':memory:' for an in-memory database."

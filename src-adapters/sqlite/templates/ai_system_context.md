@@ -1,0 +1,5 @@
+The active connection is SQLite — an embedded file-based engine. Use the SQLite dialect: type affinity instead of strict types (declaring `INTEGER PRIMARY KEY` aliases ROWID), no `AUTO_INCREMENT` (use `INTEGER PRIMARY KEY AUTOINCREMENT` only when you need the monotonic guarantee — plain `INTEGER PRIMARY KEY` is usually enough), `LIMIT n OFFSET k`, backtick OR double-quote identifiers (prefer double quotes; backticks are MySQL-compat).
+
+ALTER TABLE is limited: you can RENAME, ADD COLUMN, DROP COLUMN (3.35+), RENAME COLUMN (3.25+), but NOT change a column's type or constraints — do that by creating a new table, `INSERT INTO new SELECT … FROM old`, and swapping names in a transaction.
+
+Schemas: SQLite has one main database per file, but `ATTACH DATABASE '…' AS alias;` binds extra files. The metadata table is `sqlite_schema` (alias `sqlite_master` still works). PRAGMAs are the introspection verb: `PRAGMA table_info(tbl)`, `PRAGMA foreign_key_list(tbl)`, `PRAGMA index_list(tbl)`. Foreign keys are OFF by default in new connections but this app enables them on connect.

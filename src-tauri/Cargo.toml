@@ -1,0 +1,78 @@
+[package]
+name = "db-table"
+version = "0.1.0"
+description = "Database table viewer built with Tauri"
+authors = ["you"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "db_table_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# Parse `adapters.toml` at build time and generate the registration code.
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+serde = { version = "1", features = ["derive"] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Plain connection store (no encryption — dev mode; see store/mod.rs)
+rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite_migration = "1"
+
+# Async runtime + errors (used by M0 auto-lock + every milestone after)
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "net", "fs"] }
+thiserror = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Multi-adapter plumbing. Shared trait + intent types; every adapter
+# the host links against implements this contract.
+adapter-api = { path = "adapter-api" }
+# Built-in adapters. Each lives at `../src-adapters/<name>/` (package
+# root with `manifest.toml`, `templates/`, `assets/`, `frontend/`); the
+# rust crate is in the `backend/` subdirectory. Add a new built-in by
+# dropping a folder into `src-adapters/`, listing it as a path-dep here,
+# and enrolling its name in `adapters.toml`.
+adapter-mysql    = { path = "../src-adapters/mysql/backend" }
+adapter-sqlite   = { path = "../src-adapters/sqlite/backend" }
+adapter-redis    = { path = "../src-adapters/redis/backend" }
+adapter-postgres = { path = "../src-adapters/postgres/backend" }
+adapter-mongo    = { path = "../src-adapters/mongo/backend" }
+
+async-trait = "0.1"
+
+# AI module (M8.0 plumbing + M8.2 hosted providers + M8.4 streaming)
+futures = "0.3"
+# rustls-tls matches sqlx's TLS backend so we don't link two crypto stacks.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# Used for the tiny "overwrite with zeros on drop" wrapper we put around API keys.
+zeroize = { version = "1", features = ["derive"] }
+async-stream = "0.3"
+bytes = "1"
+# SHA256 verification for downloaded GGUF weights (M8.1).
+sha2 = "0.10"
+# Locate the `llama-server` binary on PATH / known install dirs (M8.1 local).
+which = "6"
+
+# Local Llama runtime (M8.1 Stage B) is deferred. `llama-cpp-2` builds
+# cleanly with the `metal` feature but writing a correct sampler loop on
+# top of it is a substantial task (the upstream README is explicit that
+# the crate is not "simple to use" and is not UB-safe). Until we land a
+# proper streaming sampler, local chat starts surface a clear
+# "runtime not yet wired" error. Downloads still work via the UI.
+# See ai-plan.md — M8.1 Stage B — for the re-visit.
+# [target.'cfg(target_os = "macos")'.dependencies]
+# llama-cpp-2 = { version = "0.1", features = ["metal"] }

@@ -1,0 +1,34 @@
+[package]
+name = "adapter-postgres"
+version = "0.1.0"
+edition = "2021"
+description = "Built-in PostgreSQL adapter for db-table"
+
+[build-dependencies]
+manifest-build = { path = "../../../src-tauri/manifest-build" }
+
+[dependencies]
+# Shared trait + intent types + sqlx error bridge.
+adapter-api = { path = "../../../src-tauri/adapter-api", features = ["sqlx"] }
+# Shared SSH port-forwarder (same code the MySQL adapter uses).
+adapter-ssh = { path = "../../../src-tauri/adapter-ssh" }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+chrono = { version = "0.4", features = ["serde"] }
+bigdecimal = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["serde"] }
+
+# PostgreSQL driver. Mirrors the MySQL adapter's feature set (rustls TLS,
+# chrono, uuid, json, bigdecimal) so row decoders don't need a special
+# case per type.
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "postgres",
+    "chrono",
+    "uuid",
+    "json",
+    "bigdecimal",
+] }

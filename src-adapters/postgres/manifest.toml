@@ -1,0 +1,146 @@
+# Authoritative manifest for the built-in PostgreSQL adapter. Read at
+# build time by `manifest-build` and turned into the static
+# `adapter_postgres::MANIFEST`. No hand-maintained Rust manifest mirror.
+
+# Types offered in the "add column" picker. Free-text input still
+# accepts anything (geometry, hstore, custom domains).
+column_types = [
+  "bigint", "bigserial", "boolean", "bytea", "char", "character varying",
+  "date", "double precision", "inet", "integer", "json", "jsonb",
+  "numeric", "real", "serial", "smallint", "smallserial", "text",
+  "time", "timestamp", "timestamptz", "uuid", "varchar(255)", "xml",
+]
+
+[adapter]
+key          = "postgres"
+display_name = "PostgreSQL"
+version      = "0.1.0"
+description  = """
+Connects to PostgreSQL 12+ and compatible forks (RDS, Cloud SQL,
+Supabase, Neon, Timescale). Standard SQL dialect with `$N` parameter
+binding and double-quoted identifiers.
+"""
+tags = ["sql", "relational", "first-party"]
+
+[provenance]
+vendor  = "db-table team"
+license = "Apache-2.0"
+
+[capabilities]
+schemas           = true
+describe_schema   = true
+foreign_keys      = true
+views             = true
+routines          = true
+indexes           = true
+row_counts        = true
+
+browse            = true
+server_filter     = true
+server_sort       = true
+streaming         = false
+keyset_pagination = false
+
+update_rows       = true
+insert_rows       = true
+delete_rows       = true
+transactions      = true
+
+# `CREATE DATABASE` runs on a fresh single connection to the maintenance
+# db (see PostgresDriver::create_schema).
+create_database   = true
+create_table      = true
+alter_table       = true
+drop_table        = true
+manage_indexes    = false
+
+diagram           = true
+erd_inference     = true
+query_editor      = true
+explain_plan      = true
+ssh_tunnel        = true
+
+import            = ["sql", "ddl", "txt"]
+export            = ["csv", "json", "sql"]
+
+# Realtime + SQL dialect + value coercion. These replace the frontend's
+# `connection.driver === 'PostgreSQL'` checks.
+realtime               = true
+realtime_kind          = "listen_notify"
+glob_subscriptions     = false
+sql_dialect            = "postgres"
+boolean_literal_format = "true_false"
+database_picker        = true
+hide_column_in_grid    = ""
+
+[permissions]
+network_outbound   = true
+ssh_tunnel         = true
+read_ssh_keys      = true
+store_known_hosts  = true
+read_credentials   = true
+
+[query_editor]
+label               = "SQL editor"
+placeholder         = "SELECT * FROM pg_catalog.pg_tables LIMIT 100;"
+comment_tags        = ["--", "/* */"]
+result_view_modes   = ["table", "json"]
+examples            = [
+  "SELECT * FROM pg_catalog.pg_tables LIMIT 100;",
+  "SELECT now();",
+  "SELECT COUNT(*) AS total FROM public.users;",
+]
+data_faker_template = "INSERT INTO public.users (name, email) VALUES ('${name.fullName}', '${internet.email}') RETURNING id;"
+language            = "sql"
+statement_separator = ";"
+
+[[connection_fields]]
+key      = "host"
+label    = "Host"
+kind     = "string"
+required = true
+default  = "localhost"
+
+[[connection_fields]]
+key      = "port"
+label    = "Port"
+kind     = "int"
+required = true
+default  = "5432"
+min      = 1
+max      = 65535
+
+[[connection_fields]]
+key      = "user"
+label    = "User"
+kind     = "string"
+required = true
+default  = "postgres"
+
+[[connection_fields]]
+key      = "password"
+label    = "Password"
+kind     = "secret"
+required = false
+
+[[connection_fields]]
+key      = "database"
+label    = "Database"
+kind     = "string"
+required = true
+default  = "postgres"
+help     = "Postgres requires a database name at connect time."
+
+[[connection_fields]]
+key      = "ssl_mode"
+label    = "SSL Mode"
+kind     = "enum"
+required = false
+default  = "Preferred"
+options  = [
+  { value = "Disable",     label = "Disable" },
+  { value = "Preferred",   label = "Preferred" },
+  { value = "Required",    label = "Required" },
+  { value = "Verify-CA",   label = "Verify CA" },
+  { value = "Verify-Full", label = "Verify Full" },
+]

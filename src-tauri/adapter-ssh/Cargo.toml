@@ -1,0 +1,16 @@
+[package]
+name = "adapter-ssh"
+version = "0.1.0"
+edition = "2021"
+description = "Shared SSH tunnel module used by database adapters (MySQL, PostgreSQL, …)"
+
+[dependencies]
+adapter-api = { path = "../adapter-api" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+
+# SSH transport. Same feature set the MySQL adapter used when the module
+# lived inside it, kept here so every consuming adapter gets identical
+# auth + crypto support.
+russh = { version = "0.60", default-features = false, features = ["ring", "flate2", "rsa"] }
+dirs = "5"

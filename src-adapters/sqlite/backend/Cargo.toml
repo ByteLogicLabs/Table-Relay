@@ -1,0 +1,28 @@
+[package]
+name = "adapter-sqlite"
+version = "0.1.0"
+edition = "2021"
+description = "Built-in SQLite adapter for db-table"
+
+[build-dependencies]
+manifest-build = { path = "../../../src-tauri/manifest-build" }
+
+[dependencies]
+adapter-api = { path = "../../../src-tauri/adapter-api", features = ["sqlx"] }
+
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# SQLite driver via sqlx. `bundled` ships the libsqlite3 C sources so users
+# don't need a system sqlite on build hosts.
+sqlx = { version = "0.8", features = [
+    "runtime-tokio-rustls",
+    "sqlite",
+    "chrono",
+    "uuid",
+    "json",
+] }
+libsqlite3-sys = { version = "0.28", features = ["bundled"] }

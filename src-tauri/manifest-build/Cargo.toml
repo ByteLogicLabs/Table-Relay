@@ -1,0 +1,12 @@
+[package]
+name = "manifest-build"
+version = "0.1.0"
+edition = "2021"
+description = "Build-time helper that turns a manifest.toml + optional templates/ folder into a Rust manifest static."
+
+# Used as a build-dependency by every adapter crate's `build.rs`. Not a
+# runtime crate — the host never links it.
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = { version = "0.8", default-features = false, features = ["parse"] }

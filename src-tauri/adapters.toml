@@ -1,0 +1,33 @@
+# Single source of truth for the built-in adapters this binary ships with.
+#
+# `build.rs` reads this file at compile time and generates
+# `$OUT_DIR/registered_adapters.rs`, which `src/db/builtin.rs` includes.
+# Adding a new built-in adapter = one entry here + one path-dep in
+# `Cargo.toml` (cargo reads that itself; build.rs can't rewrite it
+# safely). The build will hard-fail if the two drift apart.
+#
+# Fields:
+#   name              required — folder under `adapters/` and manifest key.
+#                                build.rs derives the crate name (`adapter-<name>`)
+#                                and the factory type (`<Name>Factory`, PascalCase).
+#   factory           optional — override the derived factory type name.
+#   needs_known_hosts optional, default false — pass `Arc<dyn KnownHostsStore>`
+#                                to the factory constructor. Set for adapters
+#                                that open SSH tunnels.
+
+[[adapter]]
+name              = "mysql"
+needs_known_hosts = true
+
+[[adapter]]
+name = "sqlite"
+
+[[adapter]]
+name = "redis"
+
+[[adapter]]
+name              = "postgres"
+needs_known_hosts = true
+
+[[adapter]]
+name = "mongo"

@@ -1,0 +1,292 @@
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { ConnectionProfile } from './types';
+import WorkspaceView from './features/workspace/workspace-view';
+import WelcomeView from './features/workspace/welcome-view';
+import { Toaster } from './components/ui/sonner';
+import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
+import { isDbError } from './lib/db';
+import { connectAndLoad, disconnect as disconnectDb } from './state/connections';
+import { getRailSnapshot, useRail } from './state/rail';
+import { listen } from '@tauri-apps/api/event';
+import { toast } from 'sonner';
+
+const LEGACY_STORAGE_KEY = 'db_connections';
+const LEGACY_MIGRATED_KEY = 'db_connections_migrated_v1';
+
+function fromRecord(p: ConnectionProfileRecord): ConnectionProfile {
+  return {
+    id: p.id,
+    name: p.name,
+    driver: p.driver,
+    host: p.host,
+    port: p.port,
+    user: p.user ?? '',
+    password: p.password ?? undefined,
+    database: p.database ?? undefined,
+    sslMode: (p.sslMode ?? undefined) as ConnectionProfile['sslMode'],
+    sshEnabled: p.sshEnabled,
+    sshHost: p.sshHost ?? undefined,
+    sshPort: p.sshPort ?? undefined,
+    sshUser: p.sshUser ?? undefined,
+    sshAuthKind: p.sshAuthKind ?? undefined,
+    sshKeyPath: p.sshKeyPath ?? undefined,
+    sshPassword: p.sshPassword ?? undefined,
+    sshKeyPassphrase: p.sshKeyPassphrase ?? undefined,
+    color: p.color ?? undefined,
+    isFavorite: p.isFavorite,
+  };
+}
+
+export default function App() {
+  const [connections, setConnections] = useState<ConnectionProfile[]>([]);
+  const [activeConnectionIds, setActiveConnectionIds] = useState<string[]>([]);
+  const rail = useRail();
+  // Stable reference to the current list so the reconnect listener (attached
+  // once at mount) can still resolve a connection name without re-subscribing.
+  const connectionsRef = useRef<ConnectionProfile[]>([]);
+  useEffect(() => { connectionsRef.current = connections; }, [connections]);
+  // Track the toast id per connection so we can replace "Reconnecting..." with
+  // the success/failure variant instead of stacking three unrelated toasts.
+  const reconnectToastIds = useRef<Map<string, string | number>>(new Map());
+
+  const reload = useCallback(async () => {
+    try {
+      const list = await connectionsStore.list();
+      setConnections(list.map(fromRecord));
+    } catch (e) {
+      console.error('Failed to load connections from store', e);
+    }
+  }, []);
+
+  // Match system dark-mode preference.
+  useEffect(() => {
+    if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
+      document.documentElement.classList.add('dark');
+    }
+  }, []);
+
+  // Listen for reconnect lifecycle events emitted by the Rust supervisor. On
+  // `connection:lost` we drop the id from the active set so the rail tile and
+  // tabs flip to a disconnected state automatically.
+  useEffect(() => {
+    interface ReconnectEvent {
+      connectionId: string;
+      attempt: number;
+      maxAttempts: number;
+      error?: string;
+    }
+    const nameOf = (id: string) =>
+      connectionsRef.current.find(c => c.id === id)?.name ?? id;
+
+    const unlisteners: Array<() => void> = [];
+    void (async () => {
+      const unA = await listen<ReconnectEvent>('connection:reconnecting', (ev) => {
+        const { connectionId, attempt, maxAttempts } = ev.payload;
+        const name = nameOf(connectionId);
+        const existing = reconnectToastIds.current.get(connectionId);
+        const id = toast.loading(`Reconnecting to ${name} (${attempt}/${maxAttempts})…`, {
+          id: existing,
+        });
+        reconnectToastIds.current.set(connectionId, id);
+      });
+      const unB = await listen<ReconnectEvent>('connection:reconnected', (ev) => {
+        const { connectionId } = ev.payload;
+        const name = nameOf(connectionId);
+        const existing = reconnectToastIds.current.get(connectionId);
+        toast.success(`Reconnected to ${name}`, { id: existing });
+        reconnectToastIds.current.delete(connectionId);
+      });
+      const unC = await listen<ReconnectEvent>('connection:lost', (ev) => {
+        const { connectionId, error } = ev.payload;
+        const name = nameOf(connectionId);
+        const existing = reconnectToastIds.current.get(connectionId);
+        toast.error(`Connection to ${name} lost`, {
+          id: existing,
+          description: error,
+        });
+        reconnectToastIds.current.delete(connectionId);
+        setActiveConnectionIds(prev => prev.filter(cId => cId !== connectionId));
+      });
+      unlisteners.push(unA, unB, unC);
+    })();
+    return () => { unlisteners.forEach(u => u()); };
+  }, []);
+
+  // On boot, auto-reconnect to every server referenced by a persisted rail
+  // pin so the user lands right back on the databases they had open. If the
+  // rail is empty we intentionally do nothing — the WelcomeView takes over
+  // and the user explicitly picks a connection.
+  useEffect(() => {
+    if (connections.length === 0) return;
+    const tiles = getRailSnapshot();
+    if (tiles.length === 0) return;
+    const serverIds = Array.from(new Set(tiles.map(t => t.serverId)));
+    void (async () => {
+      for (const sid of serverIds) {
+        if (!connections.find(c => c.id === sid)) continue;
+        try {
+          await connectAndLoad(sid);
+          setActiveConnectionIds(prev => (prev.includes(sid) ? prev : [...prev, sid]));
+        } catch (err) {
+          // Don't toast for every failure on cold-boot — the rail tile will
+          // just render in a disconnected state and the user can retry.
+          console.warn('Auto-reconnect failed', sid, err);
+        }
+      }
+    })();
+    // Only fires when the connections list first becomes available; we don't
+    // want to re-reconnect on every store change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connections.length > 0]);
+
+  // One-time import of any legacy localStorage seed into the SQLite store.
+  useEffect(() => {
+    void (async () => {
+      const migrated = localStorage.getItem(LEGACY_MIGRATED_KEY);
+      if (!migrated) {
+        const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+        if (raw) {
+          try {
+            const parsed: ConnectionProfile[] = JSON.parse(raw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              for (const c of parsed) {
+                await connectionsStore.save({
+                  name: c.name,
+                  driver: c.driver,
+                  host: c.host,
+                  port: Number(c.port),
+                  user: c.user,
+                  password: typeof c.password === 'string' && c.password !== '***' ? c.password : undefined,
+                  database: c.database,
+                  sshEnabled: !!c.sshEnabled,
+                  color: c.color,
+                  isFavorite: !!c.isFavorite,
+                });
+              }
+              toast.success(`Imported ${parsed.length} connection${parsed.length === 1 ? '' : 's'}`);
+            }
+          } catch (e) {
+            console.warn('Legacy connections migration skipped', e);
+          }
+        }
+        localStorage.setItem(LEGACY_MIGRATED_KEY, '1');
+        localStorage.removeItem(LEGACY_STORAGE_KEY);
+      }
+      await reload();
+    })();
+  }, [reload]);
+
+  const handleConnect = async (id: string) => {
+    try {
+      await connectAndLoad(id);
+      setActiveConnectionIds(prev => (prev.includes(id) ? prev : [...prev, id]));
+    } catch (err) {
+      toast.error(isDbError(err) ? err.message : String(err));
+    }
+  };
+
+  const handleDisconnect = async (id: string) => {
+    await disconnectDb(id);
+    setActiveConnectionIds(prev => prev.filter(cId => cId !== id));
+  };
+
+  const handleAddConnection = async (conn: ConnectionProfile) => {
+    // Save first — if that fails we never reach the connect step. The
+    // saved record carries the canonical id (persisted + validated by
+    // the store), which is what `connectAndLoad` needs.
+    let savedId: string;
+    try {
+      const saved = await connectionsStore.save({
+        id: conn.id,
+        name: conn.name,
+        driver: conn.driver,
+        host: conn.host,
+        port: Number(conn.port),
+        user: conn.user,
+        password: conn.password,
+        database: conn.database,
+        sslMode: conn.sslMode,
+        sshEnabled: !!conn.sshEnabled,
+        sshHost: conn.sshHost || undefined,
+        sshPort: conn.sshPort !== undefined && conn.sshPort !== '' ? Number(conn.sshPort) : undefined,
+        sshUser: conn.sshUser || undefined,
+        sshAuthKind: conn.sshAuthKind,
+        sshKeyPath: conn.sshKeyPath || undefined,
+        sshPassword: conn.sshPassword || undefined,
+        sshKeyPassphrase: conn.sshKeyPassphrase || undefined,
+        color: conn.color,
+        isFavorite: !!conn.isFavorite,
+      });
+      savedId = saved.id;
+      await reload();
+    } catch (e) {
+      toast.error(`Failed to save connection: ${String(e)}`);
+      return;
+    }
+
+    // Auto-connect the freshly-saved profile — that's what "Save & Connect"
+    // in the modal implies. Keep the failure path noisy but non-fatal: the
+    // row is saved and visible in the sidebar, so the user can retry via
+    // the connect action without re-entering credentials.
+    //
+    // Push the id into `activeConnectionIds` BEFORE awaiting `connectAndLoad`
+    // so the sidebar mounts for this connection immediately and sees
+    // `isConnecting=true` → renders the "Connecting to X…" spinner. If we
+    // wait for `connectAndLoad` to resolve first, fast adapters (SQLite,
+    // local MySQL) finish the connect + first schema fetch before the
+    // sidebar has a chance to render any loading UI, and the user perceives
+    // an unexplained blank pane for those seconds.
+    setActiveConnectionIds(prev => (prev.includes(savedId) ? prev : [...prev, savedId]));
+    try {
+      await connectAndLoad(savedId);
+    } catch (err) {
+      toast.error(isDbError(err) ? err.message : String(err));
+    }
+  };
+
+  const handleEditConnection = async (conn: ConnectionProfile) => {
+    await handleAddConnection(conn);
+  };
+
+  const handleDeleteConnection = async (id: string) => {
+    try {
+      await connectionsStore.remove(id);
+      setActiveConnectionIds(prev => prev.filter(cId => cId !== id));
+      await reload();
+    } catch (e) {
+      toast.error(`Failed to delete connection: ${String(e)}`);
+    }
+  };
+
+  const activeConnections = connections.filter(c => activeConnectionIds.includes(c.id));
+  // Home rule: when there are no active connections and no pinned tiles,
+  // return to the welcome screen even if saved profiles still exist.
+  const showWorkspace = activeConnectionIds.length > 0 || rail.tiles.length > 0;
+
+  return (
+    <div className="h-screen w-screen bg-background text-foreground flex flex-col overflow-hidden">
+      <div className="flex-1 flex overflow-hidden relative">
+        {showWorkspace ? (
+          <WorkspaceView
+            activeConnections={activeConnections}
+            activeConnectionIds={activeConnectionIds}
+            onDisconnect={handleDisconnect}
+            connections={connections}
+            onConnect={handleConnect}
+            onAddConnection={handleAddConnection}
+            onEditConnection={handleEditConnection}
+          />
+        ) : (
+          <WelcomeView
+            connections={connections}
+            onConnect={handleConnect}
+            onAddConnection={handleAddConnection}
+            onEditConnection={handleEditConnection}
+            onDeleteConnection={handleDeleteConnection}
+          />
+        )}
+      </div>
+      <Toaster position="top-right" />
+    </div>
+  );
+}

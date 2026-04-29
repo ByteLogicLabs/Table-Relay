@@ -1,0 +1,20 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+*.env
+!.env.example
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+
+# Downloaded AI model weights (M8.1). See ai-plan.md.
+ai-models/
+target
+.claude
+./*.md
+!./README.md

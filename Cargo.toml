@@ -1,0 +1,26 @@
+# Top-level virtual workspace.
+#
+# Two trees of crates live in this repo:
+#
+#   src-tauri/   — host application + shared crates (`adapter-api`,
+#                  `adapter-ssh`, `manifest-build`).
+#   src-adapters/ — one folder per built-in adapter; the rust crate
+#                   lives in `<name>/backend/`, alongside the
+#                   adapter's `manifest.toml`, `templates/`, `assets/`,
+#                   and `frontend/` siblings.
+#
+# Members are listed explicitly so a stray `Cargo.toml` (e.g. inside
+# `target/` or `node_modules/`) can't accidentally enroll itself.
+[workspace]
+resolver = "2"
+members = [
+    "src-tauri",
+    "src-tauri/adapter-api",
+    "src-tauri/adapter-ssh",
+    "src-tauri/manifest-build",
+    "src-adapters/mysql/backend",
+    "src-adapters/sqlite/backend",
+    "src-adapters/redis/backend",
+    "src-adapters/postgres/backend",
+    "src-adapters/mongo/backend",
+]

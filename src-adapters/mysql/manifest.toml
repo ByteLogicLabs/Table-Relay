@@ -1,0 +1,134 @@
+# Authoritative manifest for the built-in MySQL/MariaDB adapter.
+
+column_types = [
+  "bigint", "binary", "bit", "blob", "boolean", "char", "date", "datetime",
+  "decimal", "double", "enum", "float", "geometry", "geometrycollection",
+  "int", "json", "linestring", "longblob", "longtext", "mediumblob",
+  "mediumint", "mediumtext", "multilinestring", "multipoint", "multipolygon",
+  "point", "polygon", "smallint", "text", "time", "timestamp", "tinyblob",
+  "tinyint", "tinytext", "varchar(255)", "year",
+]
+
+[adapter]
+key          = "mysql"
+display_name = "MySQL / MariaDB"
+version      = "0.1.0"
+description  = "Connects to MySQL 5.7+, MySQL 8+, MariaDB 10+, Percona, and most managed variants (RDS, Cloud SQL, PlanetScale, Vitess). Supports SSH tunnels with key or password auth."
+tags = ["sql", "relational", "first-party"]
+
+[provenance]
+vendor  = "db-table team"
+license = "Apache-2.0"
+
+[capabilities]
+schemas           = true
+describe_schema   = true
+foreign_keys      = true
+views             = true
+routines          = true
+indexes           = true
+row_counts        = true
+
+browse            = true
+server_filter     = true
+server_sort       = true
+streaming         = false
+keyset_pagination = false
+
+update_rows       = true
+insert_rows       = true
+delete_rows       = true
+transactions      = true
+
+create_database   = true
+create_table      = true
+alter_table       = true
+drop_table        = true
+manage_indexes    = false
+
+diagram           = true
+erd_inference     = true
+query_editor      = true
+explain_plan      = true
+ssh_tunnel        = true
+
+import            = ["sql", "ddl", "txt"]
+export            = ["csv", "json", "sql"]
+
+realtime               = false
+realtime_kind          = "none"
+glob_subscriptions     = false
+sql_dialect            = "mysql"
+boolean_literal_format = "one_zero"
+database_picker        = true
+hide_column_in_grid    = ""
+
+[permissions]
+network_outbound   = true
+ssh_tunnel         = true
+read_ssh_keys      = true
+store_known_hosts  = true
+read_credentials   = true
+
+[query_editor]
+label               = "SQL editor"
+placeholder         = "SELECT * FROM users LIMIT 100;"
+comment_tags        = ["--", "#", "/* */"]
+result_view_modes   = ["table", "json"]
+examples            = [
+  "SELECT * FROM users LIMIT 100;",
+  "SHOW TABLES;",
+  "SELECT COUNT(*) AS total FROM users;",
+]
+data_faker_template = "INSERT INTO users (name, email) VALUES ('${name.fullName}', '${internet.email}');"
+language            = "sql"
+statement_separator = ";"
+
+[[connection_fields]]
+key      = "host"
+label    = "Host"
+kind     = "string"
+required = true
+default  = "localhost"
+
+[[connection_fields]]
+key      = "port"
+label    = "Port"
+kind     = "int"
+required = true
+default  = "3306"
+min      = 1
+max      = 65535
+
+[[connection_fields]]
+key      = "user"
+label    = "User"
+kind     = "string"
+required = true
+default  = "root"
+
+[[connection_fields]]
+key      = "password"
+label    = "Password"
+kind     = "secret"
+required = false
+
+[[connection_fields]]
+key      = "database"
+label    = "Database"
+kind     = "string"
+required = false
+help     = "Optional default schema"
+
+[[connection_fields]]
+key      = "ssl_mode"
+label    = "SSL Mode"
+kind     = "enum"
+required = false
+default  = "Preferred"
+options  = [
+  { value = "Disable",   label = "Disable" },
+  { value = "Preferred", label = "Preferred" },
+  { value = "Required",  label = "Required" },
+  { value = "Verify-CA", label = "Verify CA" },
+]
