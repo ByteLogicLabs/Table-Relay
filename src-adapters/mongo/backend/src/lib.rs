@@ -2,6 +2,7 @@
 //! from `adapter.toml` + `templates/ai_system_context.md`.
 
 pub mod adapter;
+pub mod analyze;
 pub mod execute;
 pub mod factory;
 pub mod index;

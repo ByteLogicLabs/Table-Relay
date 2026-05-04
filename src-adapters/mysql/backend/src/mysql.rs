@@ -8,9 +8,9 @@
 use std::time::Instant;
 
 use adapter_api::{
-    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, QueryResult, RoutineDefinition,
-    RoutineInfo, RoutineParam, SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind,
-    TableStructure, ViewInfo,
+    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
+    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SchemaInfo, ServerInfo,
+    StatementResult, TableInfo, TableKind, TableStructure, ViewInfo,
 };
 use adapter_api::log_line;
 use bigdecimal::BigDecimal;
@@ -694,6 +694,35 @@ impl MysqlDriver {
         statement: &str,
         row_limit: Option<u32>,
     ) -> Result<QueryResult, AdapterError> {
+        self.run_query_scoped(statement, row_limit, None).await
+    }
+
+    pub async fn run_query_scoped(
+        &self,
+        statement: &str,
+        row_limit: Option<u32>,
+        scope_db: Option<&str>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.run_query_scoped_with_sink(statement, row_limit, scope_db, None).await
+    }
+
+    pub async fn run_query_scoped_stream(
+        &self,
+        statement: &str,
+        row_limit: Option<u32>,
+        scope_db: Option<&str>,
+        sink: tokio::sync::mpsc::UnboundedSender<StatementResult>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.run_query_scoped_with_sink(statement, row_limit, scope_db, Some(sink)).await
+    }
+
+    async fn run_query_scoped_with_sink(
+        &self,
+        statement: &str,
+        row_limit: Option<u32>,
+        scope_db: Option<&str>,
+        sink: Option<tokio::sync::mpsc::UnboundedSender<StatementResult>>,
+    ) -> Result<QueryResult, AdapterError> {
         let statements = split_statements(statement);
         let mut results = Vec::with_capacity(statements.len());
 
@@ -707,6 +736,14 @@ impl MysqlDriver {
             acquire_ms,
             self.pool.size(),
         );
+
+        // Ensure the connection is using the right database. The pool may
+        // have been created without a default database (profile has none),
+        // but the user selected one via the sidebar picker later.
+        if let Some(db) = scope_db.or(self.default_db.as_deref()) {
+            use sqlx::Executor;
+            let _ = conn.execute(format!("USE `{db}`").as_str()).await;
+        }
 
         for sql in statements {
             let trimmed = sql.trim();
@@ -731,6 +768,9 @@ impl MysqlDriver {
                 Ok(mut r) => {
                     r.sql = trimmed.to_string();
                     r.duration_ms = duration_ms;
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(r.clone());
+                    }
                     results.push(r);
                 }
                 Err(e) => {
@@ -743,14 +783,18 @@ impl MysqlDriver {
                             msg = format!("{msg}\n\nLATEST FOREIGN KEY ERROR:\n{detail}");
                         }
                     }
-                    results.push(StatementResult {
+                    let r = StatementResult {
                         sql: trimmed.to_string(),
                         duration_ms,
                         columns: Vec::new(),
                         rows: Vec::new(),
                         rows_affected: None,
                         error: Some(msg),
-                    });
+                    };
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(r.clone());
+                    }
+                    results.push(r);
                 }
             }
         }
@@ -1137,7 +1181,7 @@ fn has_limit_clause(sql: &str) -> bool {
 }
 
 
-fn split_statements(input: &str) -> Vec<String> {
+pub(crate) fn split_statements(input: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
     let mut in_single = false;
@@ -1515,6 +1559,134 @@ pub(crate) fn bind_json<'q>(
         JsonValue::Array(_) | JsonValue::Object(_) => {
             q.bind(serde_json::to_string(v).unwrap_or_default())
         }
+    }
+}
+
+// ---- Process list / kill ----
+
+impl MysqlDriver {
+    pub async fn process_list(&self) -> Result<Vec<ProcessInfo>, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        let rows = sqlx::query("SHOW FULL PROCESSLIST")
+            .fetch_all(&mut *conn)
+            .await?;
+
+        let mut processes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let cols = row.columns();
+            let mut id_str = String::new();
+            let mut user = String::new();
+            let mut host = String::new();
+            let mut db: Option<String> = None;
+            let mut command = String::new();
+            let mut time: i64 = 0;
+            let mut state: Option<String> = None;
+            let mut info: Option<String> = None;
+
+            for (i, col) in cols.iter().enumerate() {
+                let name = col.name().to_ascii_lowercase();
+                match name.as_str() {
+                    "id" => {
+                        if let Ok(v) = row.try_get::<i64, _>(i) {
+                            id_str = v.to_string();
+                        } else if let Ok(v) = row.try_get::<String, _>(i) {
+                            id_str = v;
+                        }
+                    }
+                    "user" => {
+                        user = row.try_get::<String, _>(i).unwrap_or_default();
+                    }
+                    "host" => {
+                        host = row.try_get::<String, _>(i).unwrap_or_default();
+                    }
+                    "db" => {
+                        db = row.try_get::<String, _>(i).ok();
+                    }
+                    "command" => {
+                        command = row.try_get::<String, _>(i).unwrap_or_default();
+                    }
+                    "time" => {
+                        time = row.try_get::<i64, _>(i).unwrap_or(0);
+                    }
+                    "state" => {
+                        state = row.try_get::<String, _>(i).ok();
+                    }
+                    "info" => {
+                        info = row.try_get::<String, _>(i).ok();
+                    }
+                    _ => {}
+                }
+            }
+
+            if id_str.is_empty() {
+                continue;
+            }
+
+            let kind = match command.to_ascii_uppercase().as_str() {
+                "QUERY" => ProcessKind::Query,
+                "SLEEP" => ProcessKind::Sleep,
+                _ => ProcessKind::Other(command.clone()),
+            };
+
+            processes.push(ProcessInfo {
+                id: id_str,
+                user: Some(user),
+                host: Some(host),
+                database: db,
+                command: Some(command),
+                time: Some(time.max(0) as u64),
+                state,
+                info,
+                kind,
+            });
+        }
+
+        Ok(processes)
+    }
+
+    pub async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
+        let _id: u64 = id.parse().map_err(|_| {
+            AdapterError::Other(format!("invalid process id: {id}"))
+        })?;
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&format!("KILL {_id}"))
+            .execute(&mut *conn)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn kill_processes(&self, ids: &[String]) -> Result<Vec<KillResult>, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let parsed: u64 = match id.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    results.push(KillResult {
+                        id: id.clone(),
+                        success: false,
+                        error: Some(format!("invalid process id: {id}")),
+                    });
+                    continue;
+                }
+            };
+            match sqlx::query(&format!("KILL {parsed}"))
+                .execute(&mut *conn)
+                .await
+            {
+                Ok(_) => results.push(KillResult {
+                    id: id.clone(),
+                    success: true,
+                    error: None,
+                }),
+                Err(e) => results.push(KillResult {
+                    id: id.clone(),
+                    success: false,
+                    error: Some(e.to_string()),
+                }),
+            }
+        }
+        Ok(results)
     }
 }
 

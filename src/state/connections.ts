@@ -45,8 +45,16 @@ export function useConnections() {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-export async function connectAndLoad(connectionId: string): Promise<ConnectionMeta | null> {
-  if (state.activeById.has(connectionId)) return state.activeById.get(connectionId)!;
+export async function connectAndLoad(connectionId: string, force?: boolean): Promise<ConnectionMeta | null> {
+  if (!force && state.activeById.has(connectionId)) return state.activeById.get(connectionId)!;
+  // Clear stale state when force-reconnecting
+  if (force) {
+    mutate(s => {
+      const activeById = new Map(s.activeById);
+      activeById.delete(connectionId);
+      return { ...s, activeById };
+    });
+  }
   mutate(s => {
     const next = { ...s, connectingIds: new Set(s.connectingIds) };
     next.connectingIds.add(connectionId);
@@ -97,6 +105,19 @@ export async function disconnect(connectionId: string): Promise<void> {
     const tableStructuresById = new Map(s.tableStructuresById);
     tableStructuresById.delete(connectionId);
     return { ...s, activeById, schemasById, loadingSchemasById, lastErrorById, tableStructuresById };
+  });
+}
+
+/** Mark a connection as lost (server dropped it, network timeout, etc.).
+ *  Clears the active flag so the next `connectAndLoad` actually reconnects
+ *  instead of short-circuiting on the stale entry. */
+export function markConnectionLost(connectionId: string): void {
+  mutate(s => {
+    const activeById = new Map(s.activeById);
+    activeById.delete(connectionId);
+    const lastErrorById = new Map(s.lastErrorById);
+    lastErrorById.set(connectionId, 'Connection lost');
+    return { ...s, activeById, lastErrorById };
   });
 }
 

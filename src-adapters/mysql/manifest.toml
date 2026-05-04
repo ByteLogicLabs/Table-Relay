@@ -51,6 +51,7 @@ erd_inference     = true
 query_editor      = true
 explain_plan      = true
 ssh_tunnel        = true
+process_list      = true
 
 import            = ["sql", "ddl", "txt"]
 export            = ["csv", "json", "sql"]

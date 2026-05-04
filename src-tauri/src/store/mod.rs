@@ -9,6 +9,7 @@
 
 pub mod repo;
 pub mod repo_ai;
+pub mod repo_ai_conv;
 pub mod repo_rail;
 pub mod schema;
 

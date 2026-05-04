@@ -149,6 +149,73 @@ pub struct QueryResult {
     pub statements: Vec<StatementResult>,
 }
 
+// ---- Process list / kill ----
+
+/// One active process/connection on the database server.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessInfo {
+    pub id: String,
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub host: Option<String>,
+    #[serde(default)]
+    pub database: Option<String>,
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Seconds the process has been in its current state.
+    #[serde(default)]
+    pub time: Option<u64>,
+    #[serde(default)]
+    pub state: Option<String>,
+    /// The SQL / command text currently executing (may be truncated).
+    #[serde(default)]
+    pub info: Option<String>,
+    pub kind: ProcessKind,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ProcessKind {
+    Connection,
+    Query,
+    Sleep,
+    Other(String),
+}
+
+/// Result of a single kill attempt.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KillResult {
+    pub id: String,
+    pub success: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ---- Command warnings (destructive query detection) ----
+
+/// A structured warning about a command before execution.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandWarning {
+    pub kind: WarningKind,
+    pub message: String,
+    /// The specific statement that triggered the warning.
+    pub statement: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WarningKind {
+    DestructiveNoWhere,
+    DropObject,
+    TruncateTable,
+    BulkUpdate,
+    Custom(String),
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatementResult {

@@ -1299,6 +1299,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "flate2",
  "futures",
  "reqwest 0.12.28",
  "rusqlite",

@@ -13,9 +13,9 @@ use std::time::Instant;
 
 use adapter_api::log_line;
 use adapter_api::{
-    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, QueryResult, RoutineDefinition,
-    RoutineInfo, RoutineParam, SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind,
-    TableStructure, ViewInfo,
+    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
+    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SchemaInfo, ServerInfo,
+    StatementResult, TableInfo, TableKind, TableStructure, ViewInfo,
 };
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -732,6 +732,24 @@ impl PostgresDriver {
         statement: &str,
         row_limit: Option<u32>,
     ) -> Result<QueryResult, AdapterError> {
+        self.run_query_with_sink(statement, row_limit, None).await
+    }
+
+    pub async fn run_query_stream(
+        &self,
+        statement: &str,
+        row_limit: Option<u32>,
+        sink: tokio::sync::mpsc::UnboundedSender<StatementResult>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.run_query_with_sink(statement, row_limit, Some(sink)).await
+    }
+
+    async fn run_query_with_sink(
+        &self,
+        statement: &str,
+        row_limit: Option<u32>,
+        sink: Option<tokio::sync::mpsc::UnboundedSender<StatementResult>>,
+    ) -> Result<QueryResult, AdapterError> {
         let statements = split_statements(statement);
         let mut results = Vec::with_capacity(statements.len());
 
@@ -768,17 +786,24 @@ impl PostgresDriver {
                 Ok(mut r) => {
                     r.sql = trimmed.to_string();
                     r.duration_ms = duration_ms;
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(r.clone());
+                    }
                     results.push(r);
                 }
                 Err(e) => {
-                    results.push(StatementResult {
+                    let r = StatementResult {
                         sql: trimmed.to_string(),
                         duration_ms,
                         columns: Vec::new(),
                         rows: Vec::new(),
                         rows_affected: None,
                         error: Some(e.to_string()),
-                    });
+                    };
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(r.clone());
+                    }
+                    results.push(r);
                     // Postgres aborts the current (implicit) transaction
                     // on any error and rejects every subsequent statement
                     // with "current transaction is aborted, commands
@@ -835,6 +860,108 @@ impl PostgresDriver {
 
     pub async fn shutdown(&self) {
         self.pool.close().await;
+    }
+
+    pub async fn process_list(&self) -> Result<Vec<ProcessInfo>, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        let rows = sqlx::query(
+            "SELECT pid, usename, datname, client_addr::text, state, query,
+                    EXTRACT(EPOCH FROM (now() - query_start))::bigint AS time,
+                    wait_event_type, wait_event
+             FROM pg_stat_activity
+             WHERE state IS NOT NULL
+             ORDER BY query_start DESC",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+
+        let mut processes = Vec::with_capacity(rows.len());
+        for row in rows {
+            let pid: i32 = row.try_get::<i32, _>(0).unwrap_or(0);
+            let usename: Option<String> = row.try_get::<Option<String>, _>(1).unwrap_or(None);
+            let datname: Option<String> = row.try_get::<Option<String>, _>(2).unwrap_or(None);
+            let client_addr: Option<String> = row.try_get::<Option<String>, _>(3).unwrap_or(None);
+            let state: Option<String> = row.try_get::<Option<String>, _>(4).unwrap_or(None);
+            let query: Option<String> = row.try_get::<Option<String>, _>(5).unwrap_or(None);
+            let time: Option<i64> = row.try_get::<Option<i64>, _>(6).unwrap_or(None);
+
+            let kind = match state.as_deref() {
+                Some("active") => ProcessKind::Query,
+                Some("idle") => ProcessKind::Sleep,
+                _ => ProcessKind::Other(state.clone().unwrap_or_default()),
+            };
+
+            processes.push(ProcessInfo {
+                id: pid.to_string(),
+                user: usename,
+                host: client_addr,
+                database: datname,
+                command: state.clone(),
+                time: time.map(|t| t.max(0) as u64),
+                state,
+                info: query,
+                kind,
+            });
+        }
+
+        Ok(processes)
+    }
+
+    pub async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
+        let pid: i32 = id.parse().map_err(|_| {
+            AdapterError::Other(format!("invalid process id: {id}"))
+        })?;
+        let mut conn = self.pool.acquire().await?;
+        let terminated: bool = sqlx::query_scalar("SELECT pg_terminate_backend($1)")
+            .bind(pid)
+            .fetch_one(&mut *conn)
+            .await?;
+        if !terminated {
+            return Err(AdapterError::Other(format!(
+                "could not terminate process {pid}"
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn kill_processes(&self, ids: &[String]) -> Result<Vec<KillResult>, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            let pid: i32 = match id.parse() {
+                Ok(n) => n,
+                Err(_) => {
+                    results.push(KillResult {
+                        id: id.clone(),
+                        success: false,
+                        error: Some(format!("invalid process id: {id}")),
+                    });
+                    continue;
+                }
+            };
+            match sqlx::query_scalar::<_, bool>("SELECT pg_terminate_backend($1)")
+                .bind(pid)
+                .fetch_one(&mut *conn)
+                .await
+            {
+                Ok(true) => results.push(KillResult {
+                    id: id.clone(),
+                    success: true,
+                    error: None,
+                }),
+                Ok(false) => results.push(KillResult {
+                    id: id.clone(),
+                    success: false,
+                    error: Some(format!("could not terminate process {pid}")),
+                }),
+                Err(e) => results.push(KillResult {
+                    id: id.clone(),
+                    success: false,
+                    error: Some(e.to_string()),
+                }),
+            }
+        }
+        Ok(results)
     }
 }
 
@@ -992,7 +1119,7 @@ fn has_limit_clause(sql: &str) -> bool {
 /// `/* */` comments. Postgres dollar-quoted strings make this more
 /// involved than MySQL's version because the delimiter is arbitrary
 /// (`$$`, `$tag$`, `$function$` …).
-fn split_statements(input: &str) -> Vec<String> {
+pub(crate) fn split_statements(input: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
     let mut in_single = false;

@@ -104,6 +104,9 @@ pub struct Capabilities {
     pub query_editor: bool,
     pub explain_plan: bool,
     pub ssh_tunnel: bool,
+    /// Adapter supports `process_list` / `kill_process` — the UI shows
+    /// a "Processes" panel when set.
+    pub process_list: bool,
     // file-level I/O — lists of file-format tokens the adapter can
     // ingest / emit. Empty slice = the operation is unsupported. Token
     // vocabulary is deliberately adapter-neutral ("sql", "csv", "json",

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type SetStateAction } from 'react';
 import {
   ReactFlow,
   Background,
@@ -16,7 +16,7 @@ import '@xyflow/react/dist/style.css';
 import dagre from 'dagre';
 import { Key, KeyRound, Link2, Hash, Shield, Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import { db, type TableStructure, type ForeignKey, isDbError } from '../../lib/db';
-import { ensureTableStructure, primeTableStructure, refreshSchemas } from '../../state/connections';
+import { ensureTableStructure, primeTableStructure } from '../../state/connections';
 
 export interface DiagramViewProps {
   connectionId: string;
@@ -216,6 +216,35 @@ interface LoadedGraph {
   focusName: string;
   structures: TableStructure[];
   relations: ForeignKey[];
+}
+
+function fkKey(fk: ForeignKey): string {
+  return `${fk.fromSchema}.${fk.fromTable}.${fk.fromColumns.join(',')}->${fk.toSchema}.${fk.toTable}.${fk.toColumns.join(',')}`;
+}
+
+function mergeStructures(existing: TableStructure[], incoming: TableStructure[]): TableStructure[] {
+  const byName = new Map(existing.map(s => [s.name, s]));
+  for (const s of incoming) byName.set(s.name, s);
+  return Array.from(byName.values());
+}
+
+function mergeRelations(existing: ForeignKey[], incoming: ForeignKey[]): ForeignKey[] {
+  const byKey = new Map(existing.map(fk => [fkKey(fk), fk]));
+  for (const fk of incoming) byKey.set(fkKey(fk), fk);
+  return Array.from(byKey.values());
+}
+
+function graphWith(
+  focusName: string,
+  existing: LoadedGraph | null,
+  structures: TableStructure[],
+  relations: ForeignKey[],
+): LoadedGraph {
+  return {
+    focusName,
+    structures: mergeStructures(existing?.structures ?? [], structures),
+    relations: mergeRelations(existing?.relations ?? [], relations),
+  };
 }
 
 // Irregular English plurals we see regularly in schemas. Extend as needed.
@@ -502,43 +531,219 @@ async function loadSchemaGraph(connectionId: string, schema: string): Promise<Lo
 export default function DiagramView({ connectionId, scope, schemaName, tableName }: DiagramViewProps) {
   const [graph, setGraph] = useState<LoadedGraph | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadingDetail, setLoadingDetail] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
+  const graphRef = useRef<LoadedGraph | null>(null);
+  const lastLoadKeyRef = useRef<string>('');
   // Bumping this triggers a reload. Driven by the user-facing Retry button
   // and the `dbtable:reload` event listener.
   const [reloadTick, setReloadTick] = useState(0);
   const requestReload = () => setReloadTick(t => t + 1);
 
   useEffect(() => {
+    graphRef.current = graph;
+  }, [graph]);
+
+  useEffect(() => {
     let cancelled = false;
-    // Timeouts on large schemas are usually transient — a backed-up connection
-    // pool or a slow information_schema query. One quick retry on timeout
-    // typically succeeds and saves the user from hitting Retry manually.
-    const load = async () => {
-      const attempt = async () => scope === 'schema'
-        ? await loadSchemaGraph(connectionId, schemaName)
-        : await loadTableGraph(connectionId, schemaName, tableName ?? '');
-      setLoading(true);
-      setError(null);
+    const loadKey = `${connectionId}|${scope}|${schemaName}|${tableName ?? ''}`;
+    const softReload = lastLoadKeyRef.current === loadKey && graphRef.current !== null;
+    lastLoadKeyRef.current = loadKey;
+    const setGraphSafe = (next: SetStateAction<LoadedGraph | null>) => {
+      if (!cancelled) setGraph(next);
+    };
+
+    const loadSchemaProgressive = async () => {
+      if (!softReload) {
+        setLoading(true);
+        setLoadingDetail('Loading table list…');
+        setError(null);
+        setGraph(null);
+      }
       try {
-        let loaded: LoadedGraph;
-        try {
-          loaded = await attempt();
-        } catch (err) {
-          if (isDbError(err) && err.kind === 'Timeout' && !cancelled) {
-            await new Promise(r => setTimeout(r, 400));
-            loaded = await attempt();
-          } else {
-            throw err;
-          }
+        const schemas = await db.listSchemas(connectionId).catch(() => []);
+        const schemaInfo = schemas.find(s => s.name === schemaName);
+        const names = schemaInfo?.tables.map(t => t.name) ?? [];
+        let nextGraph: LoadedGraph = { focusName: schemaName, structures: [], relations: [] };
+        if (!softReload) {
+          setGraphSafe(nextGraph);
+          if (!cancelled) setLoading(false);
         }
-        if (!cancelled) setGraph(loaded);
+
+        const CHUNK = 6;
+        for (let i = 0; i < names.length; i += CHUNK) {
+          const batch = names.slice(i, i + CHUNK);
+          if (!cancelled && !softReload) {
+            setLoading(true);
+            setLoadingDetail(`Loading tables ${Math.min(i + batch.length, names.length)} / ${names.length}…`);
+          }
+          const structures = (await Promise.all(
+            batch.map(name => ensureTableStructure(connectionId, schemaName, name).catch(() => null)),
+          )).filter((s): s is TableStructure => !!s);
+          if (cancelled) return;
+          for (const s of structures) primeTableStructure(connectionId, s);
+          const relations = structures.flatMap(s => s.foreignKeys);
+          nextGraph = graphWith(schemaName, nextGraph, structures, relations);
+          if (!softReload) setGraph(nextGraph);
+          // Yield to the browser between batches so ReactFlow can paint.
+          await new Promise(r => setTimeout(r, 0));
+        }
+        if (softReload && !cancelled) setGraph(nextGraph);
       } catch (err) {
-        if (!cancelled) setError(isDbError(err) ? err.message : String(err));
+        if (!cancelled && !softReload) setError(isDbError(err) ? err.message : String(err));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled && !softReload) {
+          setLoading(false);
+          setLoadingDetail('');
+        }
       }
     };
-    void load();
+
+    const loadTableProgressive = async () => {
+      const focusTable = tableName ?? '';
+      if (!softReload) {
+        setLoading(true);
+        setLoadingDetail('Loading focus table…');
+        setError(null);
+        setGraph(null);
+      }
+      try {
+        const [focus, schemaRelations, allSchemas] = await Promise.all([
+          ensureTableStructure(connectionId, schemaName, focusTable),
+          db.listRelations(connectionId, schemaName).catch(() => [] as ForeignKey[]),
+          db.listSchemas(connectionId).catch(() => []),
+        ]);
+        if (cancelled) return;
+        let nextGraph: LoadedGraph = { focusName: focusTable, structures: [focus], relations: focus.foreignKeys };
+        if (!softReload) {
+          setGraphSafe(nextGraph);
+          setLoading(false);
+        }
+
+        const schemaTables = allSchemas.find(s => s.name === schemaName)?.tables ?? [];
+        const schemaTableNames = new Set(schemaTables.map(t => t.name));
+        const schemaPrefixes = detectSchemaPrefixes(schemaTables.map(t => t.name));
+        const relationMap = new Map<string, ForeignKey>();
+        for (const fk of focus.foreignKeys) relationMap.set(fkKey(fk), fk);
+        for (const fk of schemaRelations) {
+          if (fk.fromTable === focusTable || fk.toTable === focusTable) relationMap.set(fkKey(fk), fk);
+        }
+
+        for (const col of focus.columns) {
+          if (!col.name.endsWith('_id') || col.name === 'id') continue;
+          const alreadyLinked = Array.from(relationMap.values()).some(fk =>
+            fk.fromTable === focusTable && fk.fromColumns.includes(col.name),
+          );
+          if (alreadyLinked) continue;
+          const match = guessTableFromFkColumn(col.name, schemaPrefixes)
+            .find(c => schemaTableNames.has(c) && c !== focusTable) ?? null;
+          if (!match) continue;
+          const inferred: ForeignKey = {
+            name: `inferred:${focusTable}.${col.name}->${match}.id`,
+            fromSchema: schemaName,
+            fromTable: focusTable,
+            fromColumns: [col.name],
+            toSchema: schemaName,
+            toTable: match,
+            toColumns: ['id'],
+          };
+          relationMap.set(fkKey(inferred), inferred);
+        }
+
+        nextGraph = graphWith(focusTable, nextGraph, [], Array.from(relationMap.values()));
+        if (!softReload) setGraphSafe(nextGraph);
+
+        const neighbourNames = new Set<string>();
+        for (const fk of relationMap.values()) {
+          if (fk.fromTable === focusTable) neighbourNames.add(fk.toTable);
+          if (fk.toTable === focusTable) neighbourNames.add(fk.fromTable);
+        }
+        neighbourNames.delete(focusTable);
+
+        if (neighbourNames.size > 0 && !softReload) {
+          setLoading(true);
+          setLoadingDetail(`Loading related tables 0 / ${neighbourNames.size}…`);
+        }
+        let loadedNeighbours = 0;
+        for (const name of neighbourNames) {
+          const s = await ensureTableStructure(connectionId, schemaName, name).catch(() => null);
+          if (cancelled) return;
+          loadedNeighbours += 1;
+          if (s) {
+            nextGraph = graphWith(focusTable, nextGraph, [s], Array.from(relationMap.values()));
+            if (!softReload) setGraph(nextGraph);
+          }
+          if (!softReload) setLoadingDetail(`Loading related tables ${loadedNeighbours} / ${neighbourNames.size}…`);
+          await new Promise(r => setTimeout(r, 0));
+        }
+
+        const focusSingulars = singularCandidates(focusTable)
+          .flatMap(s => {
+            const variants = [s];
+            for (const prefix of schemaPrefixes) {
+              if (s.startsWith(prefix)) variants.push(s.slice(prefix.length));
+            }
+            return variants;
+          })
+          .filter(s => s && s !== focusTable);
+        const expectedFkColumns = new Set(focusSingulars.map(s => `${s}_id`));
+        const candidates = [...schemaTableNames].filter((t): t is string => typeof t === 'string' && t !== focusTable);
+        const CHUNK = 6;
+        for (let i = 0; i < candidates.length; i += CHUNK) {
+          const batch = candidates.slice(i, i + CHUNK);
+          if (!softReload) {
+            setLoading(true);
+            setLoadingDetail(`Scanning inbound tables ${Math.min(i + batch.length, candidates.length)} / ${candidates.length}…`);
+          }
+          const structures = (await Promise.all(
+            batch.map(name => ensureTableStructure(connectionId, schemaName, name).catch(() => null)),
+          )).filter((s): s is TableStructure => !!s);
+          if (cancelled) return;
+          const matched: TableStructure[] = [];
+          for (const other of structures) {
+            let touchesFocus = false;
+            for (const col of other.columns) {
+              if (!expectedFkColumns.has(col.name)) continue;
+              const alreadyLinked = Array.from(relationMap.values()).some(fk =>
+                fk.fromTable === other.name && fk.fromColumns.includes(col.name) && fk.toTable === focusTable,
+              );
+              if (alreadyLinked) continue;
+              touchesFocus = true;
+              const inferred: ForeignKey = {
+                name: `inferred:${other.name}.${col.name}->${focusTable}.id`,
+                fromSchema: schemaName,
+                fromTable: other.name,
+                fromColumns: [col.name],
+                toSchema: schemaName,
+                toTable: focusTable,
+                toColumns: ['id'],
+              };
+              relationMap.set(fkKey(inferred), inferred);
+            }
+            if (touchesFocus) matched.push(other);
+          }
+          if (matched.length > 0) {
+            nextGraph = graphWith(focusTable, nextGraph, matched, Array.from(relationMap.values()));
+            if (!softReload) setGraph(nextGraph);
+          }
+          await new Promise(r => setTimeout(r, 0));
+        }
+        if (softReload && !cancelled) setGraph(nextGraph);
+      } catch (err) {
+        if (!cancelled && !softReload) setError(isDbError(err) ? err.message : String(err));
+      } finally {
+        if (!cancelled && !softReload) {
+          setLoading(false);
+          setLoadingDetail('');
+        }
+      }
+    };
+
+    if (scope === 'schema') {
+      void loadSchemaProgressive();
+    } else {
+      void loadTableProgressive();
+    }
     // Rebuild the diagram when WorkspaceView (or any caller) broadcasts that
     // this connection's schema may have changed — e.g. Generate ERD fires
     // this, and so does saving a table structure.
@@ -634,11 +839,11 @@ export default function DiagramView({ connectionId, scope, schemaName, tableName
 
   const scopeLabel = scope === 'schema' ? 'Schema diagram' : 'Table diagram';
 
-  if (loading) {
+  if (loading && !graph) {
     return (
       <div className="w-full h-full flex flex-col items-center justify-center text-muted-foreground text-sm gap-2">
         <Loader2 className="w-4 h-4 animate-spin" />
-        <span>Loading diagram…</span>
+        <span>{loadingDetail || 'Loading diagram…'}</span>
         <span className="text-[11px] opacity-70">Large schemas may take up to a minute</span>
       </div>
     );
@@ -670,18 +875,18 @@ export default function DiagramView({ connectionId, scope, schemaName, tableName
           <span className="font-medium text-foreground">{focusName}</span>
           <span className="opacity-60">·</span>
           <span>{scopeLabel}</span>
+          {loading && (
+            <>
+              <span className="opacity-60">·</span>
+              <span className="inline-flex items-center gap-1">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                {loadingDetail || 'Loading…'}
+              </span>
+            </>
+          )}
           <button
             type="button"
-            onClick={() => {
-              // Kick the connections-store schema cache so any subsequent
-              // read sees the fresh list, then broadcast a reload so the
-              // diagram itself and siblings (sidebar, autocomplete, etc.)
-              // rebuild from current server state.
-              void refreshSchemas(connectionId);
-              window.dispatchEvent(new CustomEvent('dbtable:reload', {
-                detail: { connectionId },
-              }));
-            }}
+            onClick={requestReload}
             className="ml-1 p-1 rounded hover:bg-muted hover:text-foreground"
             title="Regenerate diagram from fresh schema"
             aria-label="Reload diagram"

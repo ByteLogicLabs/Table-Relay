@@ -32,9 +32,10 @@ pub use manifest::{
     FieldKind, Permissions, Provenance, QueryEditorInfo, RealtimeKind, SqlDialect,
 };
 pub use types::{
-    BrowseResult, ColumnInfo, ColumnMeta, ConnectionProfile, ForeignKey, IndexInfo, QueryResult,
-    RoutineDefinition, RoutineInfo, RoutineParam, SchemaInfo, ServerInfo, StatementResult,
-    TableInfo, TableKind, TableStructure, ViewInfo,
+    BrowseResult, ColumnInfo, ColumnMeta, CommandWarning, ConnectionProfile, ForeignKey, IndexInfo,
+    KillResult, ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam,
+    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, ViewInfo,
+    WarningKind,
 };
 
 /// Contract every built-in adapter implements.
@@ -217,6 +218,88 @@ pub trait Adapter: Send + Sync {
         command: &str,
         row_limit: Option<u32>,
     ) -> Result<QueryResult, AdapterError>;
+
+    /// Run an adapter-native command with an optional schema/database scope
+    /// supplied by the UI. Adapters that do not have a per-command database
+    /// switch can ignore `schema`; SQL adapters can use it to make query-tab
+    /// execution follow the database selected in the workspace rail.
+    async fn execute_raw_scoped(
+        &self,
+        command: &str,
+        row_limit: Option<u32>,
+        _schema: Option<&str>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.execute_raw(command, row_limit).await
+    }
+
+    /// Streaming variant of `execute_raw_scoped`. Implementations that can
+    /// execute a batch statement-by-statement on one session should send each
+    /// `StatementResult` as soon as it is available and still return the full
+    /// `QueryResult` at the end. The default preserves compatibility for
+    /// adapters that only expose a batch result.
+    async fn execute_raw_scoped_stream(
+        &self,
+        command: &str,
+        row_limit: Option<u32>,
+        schema: Option<&str>,
+        sink: tokio::sync::mpsc::UnboundedSender<StatementResult>,
+    ) -> Result<QueryResult, AdapterError> {
+        let result = self.execute_raw_scoped(command, row_limit, schema).await?;
+        for statement in &result.statements {
+            let _ = sink.send(statement.clone());
+        }
+        Ok(result)
+    }
+
+    // ---- command analysis -----------------------------------------------
+
+    /// Return structured warnings for a raw command before execution.
+    /// Default returns empty vec (no warnings). Adapters override to
+    /// flag destructive patterns in their native query language.
+    async fn analyze_command(&self, _command: &str) -> Vec<CommandWarning> {
+        Vec::new()
+    }
+
+    // ---- process list ---------------------------------------------------
+
+    /// List active processes/connections on the server. Default returns
+    /// Unsupported — adapters opt in by overriding and flipping
+    /// `Capabilities::process_list` in the manifest.
+    async fn process_list(&self) -> Result<Vec<ProcessInfo>, AdapterError> {
+        Err(AdapterError::Unsupported(
+            "process_list not supported by this adapter".into(),
+        ))
+    }
+
+    /// Kill a single process/connection by its identifier. Default
+    /// returns Unsupported.
+    async fn kill_process(&self, _id: &str) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "kill_process not supported by this adapter".into(),
+        ))
+    }
+
+    /// Kill multiple processes/connections at once. Default loops
+    /// `kill_process`; adapters can override for efficiency (e.g.
+    /// MySQL can batch KILL statements).
+    async fn kill_processes(&self, ids: &[String]) -> Result<Vec<KillResult>, AdapterError> {
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            match self.kill_process(id).await {
+                Ok(()) => results.push(KillResult {
+                    id: id.clone(),
+                    success: true,
+                    error: None,
+                }),
+                Err(e) => results.push(KillResult {
+                    id: id.clone(),
+                    success: false,
+                    error: Some(e.to_string()),
+                }),
+            }
+        }
+        Ok(results)
+    }
 
     // ---- realtime ------------------------------------------------------
 

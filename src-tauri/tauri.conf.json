@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "db-table",
+  "productName": "Table Relay",
   "version": "0.1.0",
   "identifier": "com.dbtable.app",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "db-table",
+        "title": "Table Relay",
         "width": 1280,
         "height": 800,
         "minWidth": 900,

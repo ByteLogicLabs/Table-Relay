@@ -186,9 +186,10 @@ pub struct IndexColumn {
     pub direction: Option<IndexKeyValue>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum IndexKeyValue {
+    #[default]
     Asc,
     Desc,
     Text,
@@ -201,12 +202,6 @@ pub enum IndexKeyValue {
     /// `*` / empty → `$**` (whole document), `path.*` → `path.$**`,
     /// `path` → `path.$**`.
     Wildcard,
-}
-
-impl Default for IndexKeyValue {
-    fn default() -> Self {
-        IndexKeyValue::Asc
-    }
 }
 
 /// Backward-compat alias — older intent traffic used `IndexDirection`.

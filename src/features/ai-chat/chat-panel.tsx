@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { X, Sparkles, Square, Loader2, AlertCircle, Eye, EyeOff, RefreshCw, History, Plus, ArrowUp, Shield } from 'lucide-react';
+import { X, Sparkles, Square, Loader2, AlertCircle, Eye, EyeOff, RefreshCw, Plus, ArrowUp, Shield } from 'lucide-react';
+import { ConversationHistory } from './conversation-history';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
@@ -35,6 +36,8 @@ interface ProviderOption {
   defaultModel?: string;
   /** Does this provider require an API key on Start? */
   needsKey: boolean;
+  /** Does this provider optionally accept an API key? */
+  optionalKey?: boolean;
   /** Does this provider require a base URL (OpenAI-compatible only)? */
   needsBaseUrl?: boolean;
 }
@@ -74,7 +77,7 @@ const PROVIDERS: ProviderOption[] = [
   { kind: 'openai', label: 'OpenAI', sublabel: 'chat/completions', available: true, needsKey: true, defaultModel: 'gpt-4o-mini' },
   { kind: 'anthropic', label: 'Anthropic', sublabel: 'messages API', available: true, needsKey: true, defaultModel: 'claude-3-5-haiku-latest' },
   { kind: 'gemini', label: 'Google', sublabel: 'generativelanguage', available: true, needsKey: true, defaultModel: 'gemini-2.5-pro' },
-  { kind: 'openai_compatible', label: 'OpenAI-compatible', sublabel: 'Ollama / Groq / LM Studio', available: true, needsKey: false, needsBaseUrl: true, defaultModel: 'llama3.1' },
+  { kind: 'openai_compatible', label: 'OpenAI-compatible', sublabel: 'Ollama / Groq / LM Studio', available: true, needsKey: false, optionalKey: true, needsBaseUrl: true, defaultModel: 'llama3.1' },
   { kind: 'llama_local', label: 'Local Llama', sublabel: 'GGUF · on-device', available: true, needsKey: false },
 ];
 
@@ -113,7 +116,7 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
   }, []);
 
   return (
-    <div className="h-full flex flex-col bg-background min-w-0">
+    <div className="h-full flex flex-col bg-background min-w-0 relative">
       <div className="h-12 shrink-0 border-b border-border flex items-center justify-between px-3 bg-muted/10">
         <div className="flex items-center gap-2 min-w-0">
           <Sparkles className="w-4 h-4 text-primary shrink-0" />
@@ -121,19 +124,10 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
           {showActive && <ActiveModelPicker providerKind={s.providerKind} model={s.model} />}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
+          <ConversationHistory />
           {showActive && (
             <>
               <PermissionsButton />
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7"
-                title="History (coming soon)"
-                aria-label="History"
-                disabled
-              >
-                <History className="w-3.5 h-3.5" />
-              </Button>
               <Button
                 variant="ghost"
                 size="icon"
@@ -558,7 +552,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
     setModelsError(null);
     try {
       const list = await ai.listModels(selected, {
-        apiKey: provider.needsKey ? apiKey : undefined,
+      apiKey: (provider.needsKey || (provider.optionalKey && apiKey.trim().length > 0)) ? apiKey : undefined,
         baseUrl: provider.needsBaseUrl ? baseUrl.trim() : undefined,
       });
       // Promote the current model to the list so the Select shows it even if
@@ -600,7 +594,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
     const input = {
       kind: selected,
       model: model.trim(),
-      apiKey: provider.needsKey ? apiKey : undefined,
+      apiKey: (provider.needsKey || (provider.optionalKey && apiKey.trim().length > 0)) ? apiKey : undefined,
       baseUrl: provider.needsBaseUrl ? baseUrl.trim() : undefined,
     };
     try {
@@ -715,10 +709,10 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
               />
             </div>
           )}
-          {provider.needsKey && (
+          {(provider.needsKey || provider.optionalKey) && (
             <div className="space-y-1">
               <label className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">
-                API Key
+                API Key {provider.optionalKey && <span className="normal-case text-muted-foreground/60">(optional)</span>}
               </label>
               <div className="relative">
                 <Input
@@ -735,6 +729,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
                     selected === 'openai' ? 'sk-…'
                     : selected === 'anthropic' ? 'sk-ant-…'
                     : selected === 'gemini' ? 'AIza…'
+                    : selected === 'openai_compatible' ? 'Bearer token (optional)'
                     : 'API key'
                   }
                   className="h-8 text-xs pr-8 font-mono"
@@ -919,7 +914,7 @@ function ActiveSession({
 
   return (
     <>
-      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto p-3 space-y-3">
+      <div ref={scrollRef} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-3 space-y-3">
         {messages.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-muted-foreground text-xs gap-2 px-4 text-center">
             <Sparkles className="w-6 h-6 opacity-50" />
@@ -1421,9 +1416,9 @@ function AssistantOrUserBubble({ message: m }: { message: StoreChatMessage }) {
   );
 
   return (
-    <div className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`flex min-w-0 ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`max-w-[85%] rounded-lg px-3 py-2 wrap-break-word ${
+        className={`min-w-0 max-w-[85%] overflow-hidden rounded-lg px-3 py-2 wrap-break-word ${
           isUser
             ? 'bg-primary text-primary-foreground text-sm whitespace-pre-wrap'
             : 'bg-muted text-foreground'

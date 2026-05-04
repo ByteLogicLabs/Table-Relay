@@ -12,6 +12,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
         M::up(include_str!("migrations/0002_marks.sql")),
         M::up(include_str!("migrations/0003_rail_tiles.sql")),
         M::up(include_str!("migrations/0004_ai_settings.sql")),
+        M::up(include_str!("migrations/0005_ai_conversations.sql")),
     ]);
     migrations
         .to_latest(conn)

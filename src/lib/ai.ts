@@ -35,6 +35,29 @@ export interface AiSettings {
   updatedAt: string;
 }
 
+// ---- Conversation persistence ----
+
+export interface Conversation {
+  id: string;
+  title: string;
+  connectionId?: string | null;
+  providerKind?: string | null;
+  model?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  messages?: ConversationMessage[];
+}
+
+export interface ConversationMessage {
+  id: string;
+  role: string;
+  content: string;
+  toolCallsJson?: string | null;
+  toolCallId?: string | null;
+  kind?: string | null;
+  createdAt: string;
+}
+
 interface AiSettingsRaw {
   kind: string;
   apiKey?: string | null;
@@ -459,4 +482,46 @@ export const ai = {
         });
       },
     ),
+
+  // ---- Conversation persistence ----
+
+  conversationList: (limit?: number) =>
+    invoke<Conversation[]>('ai_conversation_list', { limit }),
+
+  conversationGet: (id: string) =>
+    invoke<Conversation | null>('ai_conversation_get', { id }),
+
+  conversationCreate: (id: string, opts?: { connectionId?: string; providerKind?: string; model?: string }) =>
+    invoke<Conversation>('ai_conversation_create', {
+      id,
+      connectionId: opts?.connectionId,
+      providerKind: opts?.providerKind,
+      model: opts?.model,
+    }),
+
+  conversationDelete: (id: string) =>
+    invoke<void>('ai_conversation_delete', { id }),
+
+  conversationUpdateTitle: (id: string, title: string) =>
+    invoke<void>('ai_conversation_update_title', { id, title }),
+
+  conversationSaveMessage: (
+    conversationId: string,
+    msgId: string,
+    role: string,
+    content: string,
+    opts?: { toolCallsJson?: string; toolCallId?: string; kind?: string },
+  ) =>
+    invoke<void>('ai_conversation_save_message', {
+      conversationId,
+      msgId,
+      role,
+      content,
+      toolCallsJson: opts?.toolCallsJson,
+      toolCallId: opts?.toolCallId,
+      kind: opts?.kind,
+    }),
+
+  conversationClearMessages: (conversationId: string) =>
+    invoke<void>('ai_conversation_clear_messages', { conversationId }),
 };

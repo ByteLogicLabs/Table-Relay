@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    Adapter, AdapterError, BrowseRequest, BrowseResult, CountRequest, MutateRequest, Mutation,
-    QueryResult, SchemaInfo, ServerInfo, SubscribeEvent, SubscribeRequest, SubscriptionHandle,
-    TableStructure,
+    Adapter, AdapterError, BrowseRequest, BrowseResult, CountRequest, KillResult, MutateRequest,
+    Mutation, ProcessInfo, QueryResult, SchemaInfo, ServerInfo, SubscribeEvent, SubscribeRequest,
+    SubscriptionHandle, TableStructure,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -77,6 +77,18 @@ impl Adapter for RedisAdapter {
         row_limit: Option<u32>,
     ) -> Result<QueryResult, AdapterError> {
         execute::execute_raw(&self.driver, command, row_limit).await
+    }
+
+    async fn process_list(&self) -> Result<Vec<ProcessInfo>, AdapterError> {
+        self.driver.process_list().await
+    }
+
+    async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
+        self.driver.kill_process(id).await
+    }
+
+    async fn kill_processes(&self, ids: &[String]) -> Result<Vec<KillResult>, AdapterError> {
+        self.driver.kill_processes(ids).await
     }
 
     async fn subscribe(

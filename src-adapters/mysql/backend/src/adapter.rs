@@ -5,9 +5,9 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    Adapter, AdapterError, BrowseRequest, BrowseResult, CountRequest, ForeignKey, MutateRequest,
-    Mutation, QueryResult, RoutineDefinition, RoutineInfo, SchemaInfo, ServerInfo, TableStructure,
-    ViewInfo,
+    Adapter, AdapterError, BrowseRequest, BrowseResult, CommandWarning, CountRequest, ForeignKey,
+    KillResult, MutateRequest, Mutation, ProcessInfo, QueryResult, RoutineDefinition, RoutineInfo,
+    SchemaInfo, ServerInfo, TableStructure, ViewInfo,
 };
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -123,6 +123,41 @@ impl Adapter for MysqlAdapter {
         row_limit: Option<u32>,
     ) -> Result<QueryResult, AdapterError> {
         self.driver.run_query(command, row_limit).await
+    }
+
+    async fn execute_raw_scoped(
+        &self,
+        command: &str,
+        row_limit: Option<u32>,
+        schema: Option<&str>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.driver.run_query_scoped(command, row_limit, schema).await
+    }
+
+    async fn execute_raw_scoped_stream(
+        &self,
+        command: &str,
+        row_limit: Option<u32>,
+        schema: Option<&str>,
+        sink: tokio::sync::mpsc::UnboundedSender<adapter_api::StatementResult>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.driver.run_query_scoped_stream(command, row_limit, schema, sink).await
+    }
+
+    async fn analyze_command(&self, command: &str) -> Vec<CommandWarning> {
+        crate::analyze::analyze_command(command)
+    }
+
+    async fn process_list(&self) -> Result<Vec<ProcessInfo>, AdapterError> {
+        self.driver.process_list().await
+    }
+
+    async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
+        self.driver.kill_process(id).await
+    }
+
+    async fn kill_processes(&self, ids: &[String]) -> Result<Vec<KillResult>, AdapterError> {
+        self.driver.kill_processes(ids).await
     }
 
     async fn shutdown(&self) {

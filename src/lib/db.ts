@@ -163,6 +163,43 @@ export interface SubscribeEvent {
   extras: Record<string, unknown>;
 }
 
+// ---- Process list / kill ----
+
+export type ProcessKind = 'connection' | 'query' | 'sleep' | { other: string };
+
+export interface ProcessInfo {
+  id: string;
+  user?: string | null;
+  host?: string | null;
+  database?: string | null;
+  command?: string | null;
+  time?: number | null;
+  state?: string | null;
+  info?: string | null;
+  kind: ProcessKind;
+}
+
+export interface KillResult {
+  id: string;
+  success: boolean;
+  error?: string | null;
+}
+
+// ---- Command warnings ----
+
+export type WarningKind =
+  | 'destructiveNoWhere'
+  | 'dropObject'
+  | 'truncateTable'
+  | 'bulkUpdate'
+  | { custom: string };
+
+export interface CommandWarning {
+  kind: WarningKind;
+  message: string;
+  statement: string;
+}
+
 export interface SubscribeResponse {
   subscriptionId: string;
 }
@@ -260,6 +297,9 @@ export interface Capabilities {
   queryEditor: boolean;
   explainPlan: boolean;
   sshTunnel: boolean;
+  /** Adapter supports process_list / kill_process — the UI shows a
+   *  "Processes" panel when set. */
+  processList: boolean;
   // file I/O — lists of file-format tokens the adapter can ingest / emit.
   // Empty list = the operation is unsupported by this adapter.
   // Tokens are adapter-neutral ("sql", "csv", "json", "ndjson", "ddl", …)
@@ -409,8 +449,25 @@ export const db = {
     invoke<TableStructure[]>('db_describe_schema', { connectionId, schema }),
   listRelations: (connectionId: string, schema: string) =>
     invoke<ForeignKey[]>('db_list_relations', { connectionId, schema }),
-  runQuery: (connectionId: string, statement: string, rowLimit?: number) =>
-    invoke<QueryResult>('db_run_query', { connectionId, statement, rowLimit }),
+  runQuery: (connectionId: string, statement: string, rowLimit?: number, schema?: string) =>
+    invoke<QueryResult>('db_run_query', { connectionId, statement, rowLimit, schema }),
+  runQueryStream: (
+    connectionId: string,
+    statement: string,
+    onStatement: (statement: StatementResult) => void,
+    rowLimit?: number,
+    schema?: string,
+  ) => {
+    const channel = new Channel<StatementResult>();
+    channel.onmessage = onStatement;
+    return invoke<QueryResult>('db_run_query_stream', {
+      connectionId,
+      statement,
+      rowLimit,
+      schema,
+      onStatement: channel,
+    });
+  },
   insertRows: (connectionId: string, request: InsertRowsRequest) =>
     invoke<InsertRowsResult>('db_insert_rows', { connectionId, request }),
   updateRows: (connectionId: string, request: UpdateRowsRequest) =>
@@ -474,4 +531,14 @@ export const db = {
   /** Intent-driven browse. Frontend declares schema/table/filters/sort/page; adapter generates the SQL. */
   browse: (connectionId: string, request: BrowseRequest) =>
     invoke<BrowseResult>('db_browse', { connectionId, request }),
+  // Process list / kill
+  processList: (connectionId: string) =>
+    invoke<ProcessInfo[]>('db_process_list', { connectionId }),
+  killProcess: (connectionId: string, processId: string) =>
+    invoke<void>('db_kill_process', { connectionId, processId }),
+  killProcesses: (connectionId: string, processIds: string[]) =>
+    invoke<KillResult[]>('db_kill_processes', { connectionId, processIds }),
+  // Command analysis (destructive warning)
+  analyzeCommand: (connectionId: string, command: string) =>
+    invoke<CommandWarning[]>('db_analyze_command', { connectionId, command }),
 };

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react';
-import { ai, isAiError, type AiProviderKind, type ChatFocus, type ChatKind, type StartInput } from '../lib/ai';
+import { ai, isAiError, type AiProviderKind, type ChatFocus, type ChatKind, type Conversation, type StartInput } from '../lib/ai';
 
 export interface ChatMessage {
   id: string;
@@ -40,6 +40,8 @@ export interface ConnectionChat {
   messages: ChatMessage[];
   pendingRequestId?: string;
   lastError?: string;
+  /** Persistent conversation id — set when the first message is saved. */
+  conversationId?: string;
 }
 
 interface AiState {
@@ -169,6 +171,12 @@ async function ensureWired() {
         // reconcile if any chunk events got dropped.
         content: ev.content || next[idx].content,
       };
+      // Save assistant message to persistent storage
+      if (chat.conversationId && ev.content) {
+        void ai.conversationSaveMessage(
+          chat.conversationId, ev.requestId, 'assistant', ev.content,
+        ).catch(() => {});
+      }
       return setChat(s, conn, { ...chat, messages: next, pendingRequestId: undefined });
     });
   });
@@ -322,6 +330,36 @@ export function newChat() {
   });
 }
 
+/** Load a saved conversation into the current chat view. */
+export async function loadConversation(conversationId: string) {
+  const conv = await ai.conversationGet(conversationId);
+  if (!conv || !conv.messages) return;
+  const connKey = conv.connectionId ?? state.focusedConnectionId ?? GLOBAL_KEY;
+  const messages: ChatMessage[] = conv.messages
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({
+      id: m.id,
+      role: m.role as 'user' | 'assistant',
+      content: m.content,
+      streaming: false,
+    }));
+  mutate(s => setChat(s, connKey, {
+    ...chatOf(s, connKey),
+    conversationId: conv.id,
+    messages,
+  }));
+}
+
+/** List saved conversations. */
+export async function listConversations(limit?: number) {
+  return ai.conversationList(limit);
+}
+
+/** Delete a saved conversation. */
+export async function deleteConversation(id: string) {
+  return ai.conversationDelete(id);
+}
+
 export async function end() {
   // Reset UI state immediately so the StartScreen appears without waiting
   // on backend teardown. The backend unload is fire-and-forget: local llama
@@ -366,10 +404,28 @@ export async function sendMessage(
   const displayed = context?.kind && context.kind !== 'chat'
     ? kindLabel(context.kind, context.sql, trimmed)
     : trimmed;
+
+  // Auto-create conversation on first message
+  let convId = state.byConnection[connKey]?.conversationId;
+  if (!convId) {
+    convId = crypto.randomUUID();
+    try {
+      await ai.conversationCreate(convId, {
+        connectionId: context?.connectionId,
+        providerKind: state.providerKind,
+        model: state.model,
+      });
+      // Auto-name from first user message
+      const title = trimmed.length > 80 ? trimmed.slice(0, 80) + '…' : trimmed;
+      void ai.conversationUpdateTitle(convId, title);
+    } catch { /* non-fatal */ }
+  }
+
   mutate(s => {
     const chat = chatOf(s, connKey);
     return setChat(s, connKey, {
       ...chat,
+      conversationId: convId,
       pendingRequestId: requestId,
       messages: [
         ...chat.messages,
@@ -378,6 +434,14 @@ export async function sendMessage(
       ],
     });
   });
+
+  // Save user message to persistent storage
+  if (convId) {
+    void ai.conversationSaveMessage(convId, userId, 'user', trimmed, {
+      kind: context?.kind,
+    }).catch(() => {});
+  }
+
   try {
     await ai.chatSend(requestId, trimmed, context);
   } catch (e) {

@@ -182,6 +182,27 @@ export default function WorkspaceView({
     };
   }, []);
 
+  // Listen for AI tool query executions and log them.
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    import('@tauri-apps/api/event').then(({ listen: tauriListen }) => {
+      tauriListen<{
+        connection_id: string; statement: string; source: string;
+        duration_ms: number; status: string; message: string | null;
+      }>('ai://query_log', (ev) => {
+        appendQueryLog({
+          connectionId: ev.payload.connection_id,
+          statement: ev.payload.statement,
+          source: 'ai' as any,
+          durationMs: ev.payload.duration_ms,
+          status: ev.payload.status as any,
+          message: ev.payload.message ?? undefined,
+        });
+      }).then(fn => { unlisten = fn; });
+    });
+    return () => { unlisten?.(); };
+  }, []);
+
   // Native menu → webview bridge. The Rust side emits `menu:file.*` Tauri
   // events when the user clicks an item in the File menu; we translate
   // into the app's existing dialog state + custom DOM events so the
@@ -722,11 +743,6 @@ export default function WorkspaceView({
   };
 
   const handleOpenErd = (connectionId: string, schemaName: string, tableName?: string) => {
-    // Refresh the schema list + FK metadata so any consumer reflects tables /
-    // columns / foreign keys added since the last cache read.
-    void refreshSchemas(connectionId);
-    window.dispatchEvent(new CustomEvent('dbtable:reload', { detail: { connectionId } }));
-
     if (tableName) {
       // Table-scoped ERD: reuse the table's data tab and flip its internal
       // view mode to 'diagram'. Mirrors how "Open Schema" reuses the data

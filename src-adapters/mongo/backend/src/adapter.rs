@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    Adapter, AdapterError, BrowseRequest, BrowseResult, CountRequest, ModifyIndexesRequest,
-    MutateRequest, Mutation, QueryResult, SchemaInfo, ServerInfo, TableStructure,
+    Adapter, AdapterError, BrowseRequest, BrowseResult, CommandWarning, CountRequest,
+    ModifyIndexesRequest, MutateRequest, Mutation, ProcessInfo, QueryResult, SchemaInfo, ServerInfo,
+    TableStructure,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -78,6 +79,18 @@ impl Adapter for MongoAdapter {
         row_limit: Option<u32>,
     ) -> Result<QueryResult, AdapterError> {
         execute::execute_raw(&self.driver, command, row_limit).await
+    }
+
+    async fn analyze_command(&self, command: &str) -> Vec<CommandWarning> {
+        crate::analyze::analyze_command(command)
+    }
+
+    async fn process_list(&self) -> Result<Vec<ProcessInfo>, AdapterError> {
+        self.driver.process_list().await
+    }
+
+    async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
+        self.driver.kill_process(id).await
     }
 
     async fn subscribe(

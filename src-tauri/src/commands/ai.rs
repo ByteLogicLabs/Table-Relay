@@ -18,6 +18,8 @@ use crate::ai::openai::OpenAiProvider;
 use crate::ai::session::{self, AiSession, SessionSlot};
 use crate::ai::{AiError, AiProvider, ChatMessage, ChatRole, CompletionRequest, ProviderKind};
 
+const DEFAULT_AI_MAX_TOKENS: u32 = 16_384;
+
 #[derive(Debug, Serialize)]
 pub struct AiStatus {
     pub active: bool,
@@ -595,7 +597,7 @@ async fn ai_chat_send_inner(
     let req = CompletionRequest {
         request_id: input.request_id.clone(),
         messages: history,
-        max_tokens: None,
+        max_tokens: Some(DEFAULT_AI_MAX_TOKENS),
         temperature: None,
         stop: None,
     };
@@ -961,6 +963,87 @@ fn repair_orphan_tool_calls(history: &[ChatMessage]) -> Vec<ChatMessage> {
         }
     }
     out
+}
+
+// ---- Conversation persistence ----
+
+use crate::store::repo_ai_conv as conv_repo;
+
+#[tauri::command]
+pub async fn ai_conversation_list(
+    store: State<'_, Arc<crate::store::Store>>,
+    limit: Option<i64>,
+) -> Result<Vec<conv_repo::Conversation>, AiError> {
+    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
+    conv_repo::list(&db, limit).map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn ai_conversation_get(
+    store: State<'_, Arc<crate::store::Store>>,
+    id: String,
+) -> Result<Option<conv_repo::Conversation>, AiError> {
+    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
+    conv_repo::get(&db, &id).map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn ai_conversation_create(
+    store: State<'_, Arc<crate::store::Store>>,
+    id: String,
+    connection_id: Option<String>,
+    provider_kind: Option<String>,
+    model: Option<String>,
+) -> Result<conv_repo::Conversation, AiError> {
+    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
+    conv_repo::create(&db, conv_repo::CreateConversationInput { id, connection_id, provider_kind, model })
+        .map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn ai_conversation_delete(
+    store: State<'_, Arc<crate::store::Store>>,
+    id: String,
+) -> Result<(), AiError> {
+    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
+    conv_repo::delete(&db, &id).map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn ai_conversation_update_title(
+    store: State<'_, Arc<crate::store::Store>>,
+    id: String,
+    title: String,
+) -> Result<(), AiError> {
+    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
+    conv_repo::update_title(&db, &id, &title).map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn ai_conversation_save_message(
+    store: State<'_, Arc<crate::store::Store>>,
+    conversation_id: String,
+    msg_id: String,
+    role: String,
+    content: String,
+    tool_calls_json: Option<String>,
+    tool_call_id: Option<String>,
+    kind: Option<String>,
+) -> Result<(), AiError> {
+    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
+    conv_repo::add_message(
+        &db, &conversation_id, &msg_id, &role, &content,
+        tool_calls_json.as_deref(), tool_call_id.as_deref(), kind.as_deref(),
+    ).map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn ai_conversation_clear_messages(
+    store: State<'_, Arc<crate::store::Store>>,
+    conversation_id: String,
+) -> Result<(), AiError> {
+    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
+    conv_repo::clear_messages(&db, &conversation_id).map_err(|e| AiError::Other(e.to_string()))
 }
 
 #[cfg(test)]

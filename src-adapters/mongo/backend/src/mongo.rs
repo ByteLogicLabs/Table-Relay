@@ -366,6 +366,67 @@ impl MongoDriver {
 
     pub async fn shutdown(&self) {}
 
+    pub async fn process_list(&self) -> Result<Vec<adapter_api::ProcessInfo>, AdapterError> {
+        use mongodb::bson::doc;
+        let db = self.client.database("admin");
+        let res = db.run_command(doc! { "currentOp": 1, "$all": true }, None).await.map_err(map_err)?;
+        let inprog = res.get_array("inprog").map_err(|e| AdapterError::Other(e.to_string()))?;
+
+        let mut processes = Vec::with_capacity(inprog.len());
+        for op in inprog {
+            let doc = match op.as_document() {
+                Some(d) => d,
+                None => continue,
+            };
+            let opid = match doc.get("opid") {
+                Some(mongodb::bson::Bson::Int32(n)) => n.to_string(),
+                Some(mongodb::bson::Bson::Int64(n)) => n.to_string(),
+                Some(mongodb::bson::Bson::String(s)) => s.clone(),
+                Some(other) => format!("{}", other),
+                None => String::new(),
+            };
+            if opid.is_empty() {
+                continue;
+            }
+            let ns = doc.get_str("ns").ok().map(|s| s.to_string());
+            let op_type = doc.get_str("op").ok().unwrap_or("unknown");
+            let secs_running = doc.get_i64("secs_running").ok().map(|s| s.max(0) as u64);
+            let desc = doc.get_str("desc").ok().map(|s| s.to_string());
+
+            let kind = match op_type {
+                "query" | "getmore" => adapter_api::ProcessKind::Query,
+                "none" => adapter_api::ProcessKind::Sleep,
+                other => adapter_api::ProcessKind::Other(other.to_string()),
+            };
+
+            processes.push(adapter_api::ProcessInfo {
+                id: opid,
+                user: doc.get_str("user").ok().map(|s| s.to_string()),
+                host: doc.get_str("client").ok().map(|s| s.to_string()),
+                database: ns.and_then(|n| n.split('.').next().map(|s| s.to_string())),
+                command: Some(op_type.to_string()),
+                time: secs_running,
+                state: doc.get_str("type").ok().map(|s| s.to_string()),
+                info: desc,
+                kind,
+            });
+        }
+
+        Ok(processes)
+    }
+
+    pub async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
+        use mongodb::bson::{Bson, doc};
+        let op: Bson = if let Ok(n) = id.parse::<i64>() {
+            Bson::Int64(n)
+        } else {
+            Bson::String(id.to_string())
+        };
+        let db = self.client.database("admin");
+        db.run_command(doc! { "killOp": 1, "op": op }, None).await.map_err(map_err)?;
+        Ok(())
+    }
+
     fn remember_db(&self, schema: &str) {
         if schema.trim().is_empty() {
             return;

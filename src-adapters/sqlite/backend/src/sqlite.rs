@@ -439,6 +439,24 @@ impl SqliteDriver {
         statement: &str,
         row_limit: Option<u32>,
     ) -> Result<QueryResult, AdapterError> {
+        self.run_query_with_sink(statement, row_limit, None).await
+    }
+
+    pub async fn run_query_stream(
+        &self,
+        statement: &str,
+        row_limit: Option<u32>,
+        sink: tokio::sync::mpsc::UnboundedSender<StatementResult>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.run_query_with_sink(statement, row_limit, Some(sink)).await
+    }
+
+    async fn run_query_with_sink(
+        &self,
+        statement: &str,
+        row_limit: Option<u32>,
+        sink: Option<tokio::sync::mpsc::UnboundedSender<StatementResult>>,
+    ) -> Result<QueryResult, AdapterError> {
         let statements = split_statements(statement);
         let mut results = Vec::with_capacity(statements.len());
 
@@ -476,17 +494,24 @@ impl SqliteDriver {
                 Ok(mut r) => {
                     r.sql = trimmed.to_string();
                     r.duration_ms = duration_ms;
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(r.clone());
+                    }
                     results.push(r);
                 }
                 Err(e) => {
-                    results.push(StatementResult {
+                    let r = StatementResult {
                         sql: trimmed.to_string(),
                         duration_ms,
                         columns: Vec::new(),
                         rows: Vec::new(),
                         rows_affected: None,
                         error: Some(e.to_string()),
-                    });
+                    };
+                    if let Some(sink) = &sink {
+                        let _ = sink.send(r.clone());
+                    }
+                    results.push(r);
                 }
             }
         }

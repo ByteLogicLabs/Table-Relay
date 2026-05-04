@@ -523,8 +523,31 @@ pub async fn dispatch(
             // ended with `\nLIMIT X`. We still cap the rows shipped back to
             // the model to 25 below, so context stays small even if the
             // query returns thousands of rows.
-            match adapter.execute_raw(&sql, None).await {
+            let mut final_sql = sql.clone();
+            if let Some(schema) = &ctx.default_schema {
+                if !sql.trim_start().to_ascii_uppercase().starts_with("USE ") {
+                    final_sql = format!("USE `{schema}`;\n{sql}");
+                }
+            }
+            match adapter.execute_raw(&final_sql, None).await {
                 Ok(res) => {
+                    // Emit a query-log event so the frontend can record this
+                    let first = res.statements.first();
+                    let (status, message, duration_ms) = match first {
+                        Some(stmt) if stmt.error.is_none() => ("ok", None, stmt.duration_ms),
+                        Some(stmt) => ("error", stmt.error.clone(), stmt.duration_ms),
+                        None => ("error", Some("no statements".to_string()), 0.0),
+                    };
+                    use tauri::Emitter;
+                    let _ = app.emit("ai://query_log", json!({
+                        "connection_id": ctx.connection_id,
+                        "statement": sql,
+                        "source": "ai",
+                        "duration_ms": duration_ms,
+                        "status": status,
+                        "message": message,
+                    }));
+
                     // Compact representation — first statement's first 25 rows.
                     // Keeps the feedback to the model under a few KB even on
                     // wide tables.

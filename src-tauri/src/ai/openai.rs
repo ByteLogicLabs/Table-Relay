@@ -21,6 +21,8 @@ use super::{
     AiError, AiProvider, ChatRole, CompletionRequest, FinishReason, ProviderKind, TokenChunk,
 };
 
+const DEFAULT_TOOL_MAX_TOKENS: u32 = 16_384;
+
 pub struct OpenAiProvider {
     base_url: String,
     // Zeroizing<String> overwrites the buffer with zeros when dropped, so
@@ -92,23 +94,22 @@ impl OpenAiProvider {
         Ok(ids)
     }
 
-    /// 1-token probe so an invalid key fails up front instead of during the
+    /// Tiny probe so an invalid key fails up front instead of during the
     /// first user turn. Called from `ai_start` before the session is installed.
+    /// Do not cap output here: reasoning models can fail the request before
+    /// producing any text if the completion budget is too small.
     pub async fn probe(&self) -> Result<(), AiError> {
-        // NB: no `max_tokens` / `max_completion_tokens` in the probe. Some
-        // newer models (o1, o3, gpt-5) reject `max_tokens` and the
-        // Responses-only ones reject `max_completion_tokens` too when set to
-        // 1. A bare 2-message ping is the widest-compatible shape.
         let body = ChatRequest {
             model: &self.model,
-            messages: &[ChatMsg { role: "user", content: "ping" }],
+            messages: &[ChatMsg { role: "user", content: "hi" }],
             stream: false,
             max_tokens: None,
             max_completion_tokens: None,
             temperature: None,
         };
         let key = self.api_key.lock().await.to_string();
-        let res = client()?
+        let http = client()?;
+        let res = http
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&key)
             .json(&body)
@@ -117,9 +118,37 @@ impl OpenAiProvider {
             .map_err(map_reqwest)?;
         let status = res.status();
         if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
+            let body = res.text().await.unwrap_or_else(|e| format!("(could not read error body: {e})"));
+            log_upstream_error("probe", &self.model, &self.base_url, status, &body);
+            if Self::should_retry_with_max_completion_tokens(status, &body) {
+                let retry_body = ChatRequest {
+                    model: &self.model,
+                    messages: &[ChatMsg { role: "user", content: "hi" }],
+                    stream: false,
+                    max_tokens: None,
+                    max_completion_tokens: Some(DEFAULT_TOOL_MAX_TOKENS),
+                    temperature: None,
+                };
+                let retry = http
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .bearer_auth(&key)
+                    .json(&retry_body)
+                    .send()
+                    .await
+                    .map_err(map_reqwest)?;
+                let retry_status = retry.status();
+                if retry_status.is_success() {
+                    let _ = retry.bytes().await;
+                    return Ok(());
+                }
+                let retry_body = retry.text().await.unwrap_or_default();
+                log_upstream_error("probe_retry", &self.model, &self.base_url, retry_status, &retry_body);
+                return Err(map_status(retry_status, &retry_body));
+            }
             return Err(map_status(status, &body));
         }
+        // Drain the body so the connection is properly recycled.
+        let _ = res.bytes().await;
         Ok(())
     }
 
@@ -183,6 +212,13 @@ impl OpenAiProvider {
             "messages": msgs,
             "stream": false,
         });
+        let token_params = self.token_limit_params(Some(DEFAULT_TOOL_MAX_TOKENS));
+        if let Some(max_tokens) = token_params.max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+        if let Some(max_completion_tokens) = token_params.max_completion_tokens {
+            body["max_completion_tokens"] = serde_json::json!(max_completion_tokens);
+        }
         if let Some(tools) = tools {
             body["tools"] = serde_json::to_value(tools).unwrap_or(serde_json::Value::Null);
             body["tool_choice"] = serde_json::Value::String("auto".into());
@@ -211,9 +247,119 @@ impl OpenAiProvider {
             .map_err(map_reqwest)?;
         let status = res.status();
         if !status.is_success() {
-            let body = res.text().await.unwrap_or_default();
-            return Err(map_status(status, &body));
+            let error_body = res.text().await.unwrap_or_default();
+            log_upstream_error("tool_once", &self.model, &self.base_url, status, &error_body);
+            if Self::should_retry_with_max_completion_tokens(status, &error_body) {
+                let mut retry_body = body.clone();
+                if let Some(obj) = retry_body.as_object_mut() {
+                    obj.remove("max_tokens");
+                }
+                retry_body["max_completion_tokens"] = serde_json::json!(DEFAULT_TOOL_MAX_TOKENS);
+                let retry = client()?
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .bearer_auth(&key)
+                    .json(&retry_body)
+                    .send()
+                    .await
+                    .map_err(map_reqwest)?;
+                let retry_status = retry.status();
+                if retry_status.is_success() {
+                    return parse_tool_turn_response(retry, tools).await;
+                }
+                let retry_body = retry.text().await.unwrap_or_default();
+                log_upstream_error("tool_once_retry", &self.model, &self.base_url, retry_status, &retry_body);
+                return Err(map_status(retry_status, &retry_body));
+            }
+            return Err(map_status(status, &error_body));
         }
+
+        parse_tool_turn_response(res, tools).await
+    }
+
+    /// Reasoning-era OpenAI models (o1 / o3 / o4 / gpt-5 family) replaced
+    /// `max_tokens` with `max_completion_tokens`. Third-party OpenAI-compatible
+    /// backends (Ollama, Groq, vLLM…) still accept `max_tokens`, so we only
+    /// swap the field when talking to the real OpenAI endpoint against a
+    /// known reasoning-model prefix.
+    fn uses_max_completion_tokens(&self) -> bool {
+        if !self.is_real_openai_endpoint() {
+            return false;
+        }
+        let m = self.model.to_ascii_lowercase();
+        m.starts_with("o1")
+            || m.starts_with("o3")
+            || m.starts_with("o4")
+            || m.starts_with("gpt-5")
+    }
+
+    fn is_real_openai_endpoint(&self) -> bool {
+        self.kind == ProviderKind::Openai
+            || self.base_url == "https://api.openai.com/v1"
+            || self.base_url.starts_with("https://api.openai.com/")
+    }
+
+    fn token_limit_params(&self, limit: Option<u32>) -> TokenLimitParams {
+        if self.uses_max_completion_tokens() {
+            TokenLimitParams { max_tokens: None, max_completion_tokens: limit }
+        } else {
+            TokenLimitParams { max_tokens: limit, max_completion_tokens: None }
+        }
+    }
+
+    fn should_retry_with_max_completion_tokens(status: reqwest::StatusCode, body: &str) -> bool {
+        status.as_u16() == 400
+            && body.contains("max_tokens")
+            && body.contains("max_completion_tokens")
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TokenLimitParams {
+    max_tokens: Option<u32>,
+    max_completion_tokens: Option<u32>,
+}
+
+async fn parse_tool_turn_response(
+    res: reqwest::Response,
+    tools: Option<&[crate::ai::tools::ToolDef]>,
+) -> Result<ToolTurn, AiError> {
+        // Read the body as raw bytes first — some OpenAI-compatible
+        // endpoints return SSE even when stream=false, or send gzip
+        // bodies regardless of Accept-Encoding. We decode as UTF-8
+        // lossy so a few stray bytes don't kill the whole response.
+        let raw_bytes = res.bytes().await.map_err(|e| {
+            AiError::Upstream(format!("read response body: {e}"))
+        })?;
+        // Some servers always gzip even when we don't ask for it.
+        // Detect the gzip magic bytes (1f 8b) and decompress.
+        let decoded_bytes = if raw_bytes.len() >= 2 && raw_bytes[0] == 0x1f && raw_bytes[1] == 0x8b {
+            use std::io::Read;
+            let mut decoder = flate2::read::GzDecoder::new(&raw_bytes[..]);
+            let mut decompressed = Vec::new();
+            match decoder.read_to_end(&mut decompressed) {
+                Ok(_) => decompressed,
+                Err(e) => {
+                    crate::log_line!("ai_tools_resp", "gzip decompress failed: {e}, using raw bytes");
+                    raw_bytes.to_vec()
+                }
+            }
+        } else {
+            raw_bytes.to_vec()
+        };
+        let raw_body = String::from_utf8_lossy(&decoded_bytes).to_string();
+
+        let json_text = if raw_body.trim_start().starts_with("data:") {
+            // SSE format — extract the last non-empty data line
+            raw_body
+                .lines()
+                .filter_map(|l| l.strip_prefix("data:").map(|s| s.trim()))
+                .filter(|s| !s.is_empty() && *s != "[DONE]")
+                .last()
+                .unwrap_or(raw_body.trim())
+                .to_string()
+        } else {
+            raw_body.trim().to_string()
+        };
 
         #[derive(Deserialize)]
         struct Resp {
@@ -230,7 +376,7 @@ impl OpenAiProvider {
             #[serde(default)]
             content: Option<String>,
             #[serde(default)]
-            tool_calls: Vec<RespToolCall>,
+            tool_calls: Option<Vec<RespToolCall>>,
         }
         #[derive(Deserialize)]
         struct RespToolCall {
@@ -244,16 +390,17 @@ impl OpenAiProvider {
             arguments: String,
         }
 
-        let parsed: Resp = res
-            .json()
-            .await
-            .map_err(|e| AiError::Upstream(format!("parse response: {e}")))?;
+        let parsed: Resp = serde_json::from_str(&json_text).map_err(|e| {
+            crate::log_line!("ai_tools_resp", "body_len={} first200={}", json_text.len(), &json_text[..json_text.len().min(200)]);
+            AiError::Upstream(format!("parse response: {e}"))
+        })?;
         let Some(choice) = parsed.choices.into_iter().next() else {
             return Err(AiError::Upstream("response had no choices".into()));
         };
         let mut tool_calls: Vec<crate::ai::ToolCall> = choice
             .message
             .tool_calls
+            .unwrap_or_default()
             .into_iter()
             .map(|c| crate::ai::ToolCall {
                 id: c.id,
@@ -300,23 +447,6 @@ impl OpenAiProvider {
             tool_calls,
             finish_reason: choice.finish_reason.unwrap_or_default(),
         })
-    }
-
-    /// Reasoning-era OpenAI models (o1 / o3 / o4 / gpt-5 family) replaced
-    /// `max_tokens` with `max_completion_tokens`. Third-party OpenAI-compatible
-    /// backends (Ollama, Groq, vLLM…) still accept `max_tokens`, so we only
-    /// swap the field when talking to the real OpenAI endpoint against a
-    /// known reasoning-model prefix.
-    fn uses_max_completion_tokens(&self) -> bool {
-        if self.kind != ProviderKind::Openai {
-            return false;
-        }
-        let m = self.model.to_ascii_lowercase();
-        m.starts_with("o1")
-            || m.starts_with("o3")
-            || m.starts_with("o4")
-            || m.starts_with("gpt-5")
-    }
 }
 
 #[derive(Serialize)]
@@ -385,11 +515,7 @@ impl AiProvider for OpenAiProvider {
             .iter()
             .map(|m| ChatMsg { role: role_str(m.role), content: &m.content })
             .collect();
-        let (max_tokens, max_completion_tokens) = if self.uses_max_completion_tokens() {
-            (None, req.max_tokens)
-        } else {
-            (req.max_tokens, None)
-        };
+        let token_params = self.token_limit_params(req.max_tokens);
         // Reasoning-era OpenAI models also reject a custom `temperature`;
         // they only accept the default. Send `None` in that case.
         let temperature = if self.uses_max_completion_tokens() {
@@ -401,12 +527,13 @@ impl AiProvider for OpenAiProvider {
             model: &self.model,
             messages: &messages,
             stream: true,
-            max_tokens,
-            max_completion_tokens,
+            max_tokens: token_params.max_tokens,
+            max_completion_tokens: token_params.max_completion_tokens,
             temperature,
         };
         let key = self.api_key.lock().await.to_string();
-        let res = client()?
+        let http = client()?;
+        let res = http
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&key)
             .json(&body)
@@ -416,61 +543,35 @@ impl AiProvider for OpenAiProvider {
         let status = res.status();
         if !status.is_success() {
             let body = res.text().await.unwrap_or_default();
+            log_upstream_error("stream", &self.model, &self.base_url, status, &body);
+            if Self::should_retry_with_max_completion_tokens(status, &body) {
+                let retry_body = ChatRequest {
+                    model: &self.model,
+                    messages: &messages,
+                    stream: true,
+                    max_tokens: None,
+                    max_completion_tokens: req.max_tokens,
+                    temperature: None,
+                };
+                let retry = http
+                    .post(format!("{}/chat/completions", self.base_url))
+                    .bearer_auth(&key)
+                    .json(&retry_body)
+                    .send()
+                    .await
+                    .map_err(map_reqwest)?;
+                let retry_status = retry.status();
+                if retry_status.is_success() {
+                    return stream_openai_response(retry, req.request_id.clone()).await;
+                }
+                let retry_body = retry.text().await.unwrap_or_default();
+                log_upstream_error("stream_retry", &self.model, &self.base_url, retry_status, &retry_body);
+                return Err(map_status(retry_status, &retry_body));
+            }
             return Err(map_status(status, &body));
         }
 
-        let byte_stream = res.bytes_stream();
-        let request_id = req.request_id.clone();
-        let lines = data_lines(byte_stream);
-
-        // Map each decoded `data:` line to a TokenChunk. Parse errors fold
-        // into a final Error chunk so the UI always gets a terminator.
-        let out = async_stream::stream! {
-            let mut lines = Box::pin(lines);
-            while let Some(line) = lines.next().await {
-                match line {
-                    Err(e) => {
-                        yield TokenChunk {
-                            request_id: request_id.clone(),
-                            delta: String::new(),
-                            finish_reason: Some(FinishReason::Error),
-                        };
-                        tracing_fallback(&e);
-                        return;
-                    }
-                    Ok(json) => {
-                        match serde_json::from_str::<StreamPayload>(&json) {
-                            Ok(p) => {
-                                for choice in p.choices {
-                                    let delta = choice.delta.content.unwrap_or_default();
-                                    let finish = choice.finish_reason.as_deref().map(map_finish);
-                                    if delta.is_empty() && finish.is_none() {
-                                        continue;
-                                    }
-                                    yield TokenChunk {
-                                        request_id: request_id.clone(),
-                                        delta,
-                                        finish_reason: finish,
-                                    };
-                                }
-                            }
-                            Err(e) => {
-                                tracing_fallback(&format!("openai parse: {e}"));
-                                continue;
-                            }
-                        }
-                    }
-                }
-            }
-            // Upstream ended without a finish_reason — synthesize one so the
-            // UI's `done` handler always fires.
-            yield TokenChunk {
-                request_id,
-                delta: String::new(),
-                finish_reason: Some(FinishReason::Stop),
-            };
-        };
-        Ok(out.boxed())
+        stream_openai_response(res, req.request_id.clone()).await
     }
 
     async fn cancel(&self, _request_id: &str) {
@@ -590,6 +691,81 @@ fn try_match_tool(
         name: parsed.name,
         arguments: args,
     })
+}
+
+async fn stream_openai_response(
+    res: reqwest::Response,
+    request_id: String,
+) -> Result<BoxStream<'static, TokenChunk>, AiError> {
+    let byte_stream = res.bytes_stream();
+    let lines = data_lines(byte_stream);
+
+    // Map each decoded `data:` line to a TokenChunk. Parse errors fold
+    // into a final Error chunk so the UI always gets a terminator.
+    let out = async_stream::stream! {
+        let mut lines = Box::pin(lines);
+        while let Some(line) = lines.next().await {
+            match line {
+                Err(e) => {
+                    yield TokenChunk {
+                        request_id: request_id.clone(),
+                        delta: String::new(),
+                        finish_reason: Some(FinishReason::Error),
+                    };
+                    tracing_fallback(&e);
+                    return;
+                }
+                Ok(json) => {
+                    match serde_json::from_str::<StreamPayload>(&json) {
+                        Ok(p) => {
+                            for choice in p.choices {
+                                let delta = choice.delta.content.unwrap_or_default();
+                                let finish = choice.finish_reason.as_deref().map(map_finish);
+                                if delta.is_empty() && finish.is_none() {
+                                    continue;
+                                }
+                                yield TokenChunk {
+                                    request_id: request_id.clone(),
+                                    delta,
+                                    finish_reason: finish,
+                                };
+                            }
+                        }
+                        Err(e) => {
+                            tracing_fallback(&format!("openai parse: {e}"));
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+        // Upstream ended without a finish_reason — synthesize one so the
+        // UI's `done` handler always fires.
+        yield TokenChunk {
+            request_id,
+            delta: String::new(),
+            finish_reason: Some(FinishReason::Stop),
+        };
+    };
+    Ok(out.boxed())
+}
+
+fn log_upstream_error(
+    phase: &str,
+    model: &str,
+    base_url: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+) {
+    crate::log_line!(
+        "ai_openai_error",
+        "phase={} status={} model={} base_url={} body={}",
+        phase,
+        status.as_u16(),
+        model,
+        base_url,
+        body.chars().take(1000).collect::<String>()
+    );
 }
 
 fn map_finish(raw: &str) -> FinishReason {

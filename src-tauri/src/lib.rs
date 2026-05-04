@@ -164,6 +164,7 @@ pub fn run() {
             commands::db::db_describe_schema,
             commands::db::db_list_relations,
             commands::db::db_run_query,
+            commands::db::db_run_query_stream,
             commands::db::db_insert_rows,
             commands::db::db_update_rows,
             commands::db::db_modify_indexes,
@@ -180,6 +181,11 @@ pub fn run() {
             // Realtime (pub/sub, LISTEN/NOTIFY, change streams)
             commands::db::db_subscribe,
             commands::db::db_unsubscribe,
+            // Process list + kill
+            commands::db::db_process_list,
+            commands::db::db_kill_process,
+            commands::db::db_kill_processes,
+            commands::db::db_analyze_command,
             // Rail tiles (pinned server + database pairs).
             commands::rail::rail_list,
             commands::rail::rail_pin,
@@ -202,6 +208,14 @@ pub fn run() {
             commands::ai::ai_approve_tool_call,
             commands::ai::ai_get_auto_approvals,
             commands::ai::ai_set_auto_approvals,
+            // Conversation persistence
+            commands::ai::ai_conversation_list,
+            commands::ai::ai_conversation_get,
+            commands::ai::ai_conversation_create,
+            commands::ai::ai_conversation_delete,
+            commands::ai::ai_conversation_update_title,
+            commands::ai::ai_conversation_save_message,
+            commands::ai::ai_conversation_clear_messages,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

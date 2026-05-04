@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use adapter_api::log_line;
 use adapter_api::{
-    AdapterError, ColumnInfo, ColumnMeta, QueryResult, SchemaInfo, ServerInfo, StatementResult,
-    TableInfo, TableKind, TableStructure,
+    AdapterError, ColumnInfo, ColumnMeta, KillResult, ProcessInfo, ProcessKind, QueryResult,
+    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
 };
 use redis::aio::MultiplexedConnection;
 use redis::{Cmd, RedisError, Value};
@@ -282,12 +282,104 @@ impl RedisDriver {
 
     /// Close the multiplexed connection. `Drop` handles this cleanly on
     /// its own; we provide an explicit call so the registry lifecycle
+    pub async fn process_list(&self) -> Result<Vec<ProcessInfo>, AdapterError> {
+        let mut conn = self.conn.lock().await;
+        let raw: String = redis::cmd("CLIENT")
+            .arg("LIST")
+            .query_async(&mut *conn)
+            .await
+            .map_err(map_err)?;
+
+        let mut processes = Vec::new();
+        for line in raw.lines() {
+            let map = parse_client_list_line(line);
+            let id = map.get("id").cloned().unwrap_or_default();
+            let addr = map.get("addr").cloned();
+            let db_str = map.get("db").cloned();
+            let cmd = map.get("cmd").cloned();
+            let age: Option<u64> = map.get("age").and_then(|s| s.parse().ok());
+            let state = map.get("state").cloned();
+
+            let kind = match cmd.as_deref() {
+                Some("CLIENT") | Some("WAIT") | Some("SUBSCRIBE") | Some("PSUBSCRIBE") => {
+                    ProcessKind::Other(cmd.clone().unwrap_or_default())
+                }
+                Some("PING") | Some("COMMAND") | Some("INFO") => ProcessKind::Connection,
+                Some(_) => ProcessKind::Query,
+                None => ProcessKind::Other("unknown".into()),
+            };
+
+            processes.push(ProcessInfo {
+                id,
+                user: map.get("user").cloned(),
+                host: addr,
+                database: db_str,
+                command: cmd,
+                time: age,
+                state,
+                info: None,
+                kind,
+            });
+        }
+
+        Ok(processes)
+    }
+
+    pub async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
+        let mut conn = self.conn.lock().await;
+        redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ID")
+            .arg(id)
+            .query_async::<()>(&mut *conn)
+            .await
+            .map_err(map_err)?;
+        Ok(())
+    }
+
+    pub async fn kill_processes(&self, ids: &[String]) -> Result<Vec<KillResult>, AdapterError> {
+        let mut conn = self.conn.lock().await;
+        let mut results = Vec::with_capacity(ids.len());
+        for id in ids {
+            match redis::cmd("CLIENT")
+                .arg("KILL")
+                .arg("ID")
+                .arg(id.as_str())
+                .query_async::<()>(&mut *conn)
+                .await
+            {
+                Ok(_) => results.push(KillResult {
+                    id: id.clone(),
+                    success: true,
+                    error: None,
+                }),
+                Err(e) => results.push(KillResult {
+                    id: id.clone(),
+                    success: false,
+                    error: Some(e.to_string()),
+                }),
+            }
+        }
+        Ok(results)
+    }
+
     /// matches the other adapters' shapes.
     pub async fn shutdown(&self) {
         // No-op: dropping the `MultiplexedConnection` tears down the
         // underlying TCP connection. Kept for symmetry with other
         // adapters' explicit `shutdown()` call.
     }
+}
+
+/// Parse one line of `CLIENT LIST` output into a key=value map.
+fn parse_client_list_line(line: &str) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for part in line.split_whitespace() {
+        if let Some((k, v)) = part.split_once('=') {
+            map.insert(k.to_string(), v.to_string());
+        }
+    }
+    map
 }
 
 /// Parse the `version` field returned by `INFO server`. Handles the

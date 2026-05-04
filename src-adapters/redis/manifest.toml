@@ -42,6 +42,7 @@ erd_inference     = false
 query_editor      = true
 explain_plan      = false
 ssh_tunnel        = false
+process_list      = true
 
 import            = []
 export            = []

@@ -5,9 +5,10 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    AdapterError, BrowseRequest, BrowseResult, ForeignKey, IndexColumn, IndexKeyValue, IndexSpec,
-    ModifyIndexesRequest, MutateRequest, Page, PrimaryKeyValue, QueryResult, RoutineDefinition,
-    RoutineInfo, SchemaInfo, ServerInfo, SubscribeEvent, SubscribeRequest, TableStructure, ViewInfo,
+    AdapterError, BrowseRequest, BrowseResult, CommandWarning, ForeignKey, IndexColumn,
+    IndexKeyValue, IndexSpec, KillResult, ModifyIndexesRequest, MutateRequest, Page,
+    PrimaryKeyValue, ProcessInfo, QueryResult, RoutineDefinition, RoutineInfo, SchemaInfo,
+    ServerInfo, StatementResult, SubscribeEvent, SubscribeRequest, TableStructure, ViewInfo,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -409,14 +410,51 @@ pub async fn db_run_query(
     connection_id: String,
     statement: String,
     row_limit: Option<u32>,
+    schema: Option<String>,
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<QueryResult, AdapterError> {
     with_retry(&app, &registry, &factories, &connection_id, |a| {
         let statement = statement.clone();
-        async move { a.execute_raw(&statement, row_limit).await }
+        let schema = schema.clone();
+        async move { a.execute_raw_scoped(&statement, row_limit, schema.as_deref()).await }
     })
     .await
+}
+
+#[tauri::command]
+pub async fn db_run_query_stream(
+    app: AppHandle,
+    connection_id: String,
+    statement: String,
+    row_limit: Option<u32>,
+    schema: Option<String>,
+    on_statement: Channel<StatementResult>,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<QueryResult, AdapterError> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StatementResult>();
+    let forwarder = tokio::spawn(async move {
+        while let Some(statement) = rx.recv().await {
+            if on_statement.send(statement).is_err() {
+                break;
+            }
+        }
+    });
+
+    let result = with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let statement = statement.clone();
+        let schema = schema.clone();
+        let sink = tx.clone();
+        async move {
+            a.execute_raw_scoped_stream(&statement, row_limit, schema.as_deref(), sink).await
+        }
+    })
+    .await;
+
+    drop(tx);
+    let _ = forwarder.await;
+    result
 }
 
 /// Wire shape for `db_update_rows`. Kept as a host-side alias so the
@@ -835,4 +873,62 @@ pub async fn db_unsubscribe(
 ) -> Result<(), AdapterError> {
     let _ = subscriptions.cancel(&subscription_id).await;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn db_process_list(
+    app: AppHandle,
+    connection_id: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<Vec<ProcessInfo>, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| async move {
+        a.process_list().await
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_kill_process(
+    app: AppHandle,
+    connection_id: String,
+    process_id: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<(), AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let pid = process_id.clone();
+        async move { a.kill_process(&pid).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_kill_processes(
+    app: AppHandle,
+    connection_id: String,
+    process_ids: Vec<String>,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<Vec<KillResult>, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let pids = process_ids.clone();
+        async move { a.kill_processes(&pids).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_analyze_command(
+    app: AppHandle,
+    connection_id: String,
+    command: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<Vec<CommandWarning>, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let cmd = command.clone();
+        async move { Ok(a.analyze_command(&cmd).await) }
+    })
+    .await
 }

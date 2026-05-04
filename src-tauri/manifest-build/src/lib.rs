@@ -99,6 +99,7 @@ struct CapabilitiesSection {
     #[serde(default)] query_editor: bool,
     #[serde(default)] explain_plan: bool,
     #[serde(default)] ssh_tunnel: bool,
+    #[serde(default)] process_list: bool,
     // file i/o
     #[serde(default)] import: Vec<String>,
     #[serde(default)] export: Vec<String>,
@@ -276,6 +277,7 @@ fn render_capabilities(s: &mut String, c: &CapabilitiesSection) {
     let _ = writeln!(s, "        query_editor: {},", c.query_editor);
     let _ = writeln!(s, "        explain_plan: {},", c.explain_plan);
     let _ = writeln!(s, "        ssh_tunnel: {},", c.ssh_tunnel);
+    let _ = writeln!(s, "        process_list: {},", c.process_list);
     let _ = writeln!(s, "        import: &[{}],", csv_str_slice(&c.import));
     let _ = writeln!(s, "        export: &[{}],", csv_str_slice(&c.export));
     let _ = writeln!(s, "        realtime: {},", c.realtime);

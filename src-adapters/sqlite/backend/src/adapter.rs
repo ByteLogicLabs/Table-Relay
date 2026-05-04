@@ -91,6 +91,16 @@ impl Adapter for SqliteAdapter {
         self.driver.run_query(command, row_limit).await
     }
 
+    async fn execute_raw_scoped_stream(
+        &self,
+        command: &str,
+        row_limit: Option<u32>,
+        _schema: Option<&str>,
+        sink: tokio::sync::mpsc::UnboundedSender<adapter_api::StatementResult>,
+    ) -> Result<QueryResult, AdapterError> {
+        self.driver.run_query_stream(command, row_limit, sink).await
+    }
+
     async fn shutdown(&self) {
         self.driver.shutdown().await;
     }

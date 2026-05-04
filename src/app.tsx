@@ -5,7 +5,7 @@ import WelcomeView from './features/workspace/welcome-view';
 import { Toaster } from './components/ui/sonner';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
 import { isDbError } from './lib/db';
-import { connectAndLoad, disconnect as disconnectDb } from './state/connections';
+import { connectAndLoad, disconnect as disconnectDb, markConnectionLost } from './state/connections';
 import { getRailSnapshot, useRail } from './state/rail';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
@@ -105,6 +105,7 @@ export default function App() {
           description: error,
         });
         reconnectToastIds.current.delete(connectionId);
+        markConnectionLost(connectionId);
         setActiveConnectionIds(prev => prev.filter(cId => cId !== connectionId));
       });
       unlisteners.push(unA, unB, unC);

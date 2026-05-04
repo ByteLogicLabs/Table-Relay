@@ -14,6 +14,7 @@ import {
   Server,
   Waypoints,
   Radio,
+  Activity,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
@@ -35,6 +36,7 @@ import {
 } from '../../components/ui/dropdown-menu';
 import DatabasePickerDialog from '../connections/database-picker-dialog';
 import ConnectionPickerDialog from '../connections/connection-picker-dialog';
+import { ProcessListPanel } from '../process-list/process-list-panel';
 import { ConnectionProfile } from '../../types';
 import {
   connectAndLoad,
@@ -178,6 +180,7 @@ export default function Sidebar({
   // menu entry while manifests load — the opposite of views/routines,
   // where historically everything supported them.
   const supportsRealtime = activeManifest?.capabilities.realtime ?? false;
+  const supportsProcessList = activeManifest?.capabilities.processList ?? false;
   // Distinguish "connection exists in store" from "connection is live". When
   // a connect attempt fails we still have `conn` (the profile) but no active
   // driver — this is what the sidebar checks to swap in a clear "failed"
@@ -186,6 +189,7 @@ export default function Sidebar({
   const isConnecting = conn ? connState.connectingIds.has(conn.id) : false;
   const connectError = conn ? (connState.lastErrorById.get(conn.id) ?? null) : null;
   const [retrying, setRetrying] = useState(false);
+  const [processListOpen, setProcessListOpen] = useState(false);
 
   // Minimum-visible-time gate for the post-connect spinner.
   //
@@ -497,6 +501,18 @@ export default function Sidebar({
         >
           <Database className="w-4 h-4" />
         </Button>
+        {supportsProcessList && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            title="Processes"
+            aria-label="Processes"
+            onClick={() => setProcessListOpen(true)}
+          >
+            <Activity className="w-4 h-4" />
+          </Button>
+        )}
       </div>
 
       {/* Header: server + database dropdown */}
@@ -542,6 +558,11 @@ export default function Sidebar({
                   <Radio className="w-4 h-4 mr-2" /> Realtime
                 </DropdownMenuItem>
               )}
+              {supportsProcessList && (
+                <DropdownMenuItem onClick={() => setProcessListOpen(true)}>
+                  <Activity className="w-4 h-4 mr-2" /> Processes
+                </DropdownMenuItem>
+              )}
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={onOpenNewServer}>
                 <Plus className="w-4 h-4 mr-2" /> New server
@@ -569,6 +590,14 @@ export default function Sidebar({
         onPick={onPickConnection}
         onCreateNew={onOpenNewServer}
       />
+
+      {conn && processListOpen && (
+        <ProcessListPanel
+          open={processListOpen}
+          onOpenChange={setProcessListOpen}
+          connectionId={conn.id}
+        />
+      )}
 
       {/* Filter */}
       <div className="px-3 py-2 border-b border-border/50">

@@ -7,6 +7,8 @@ import { ConnectionProfile } from '../../types';
 import { db, isDbError, type StatementResult, type TableStructure } from '../../lib/db';
 import { analyzeSelect } from './analyze-select';
 import { analyzeMongoFind } from './analyze-mongo';
+import { analyzeDestructive, type DestructiveStatement } from './analyze-destructive';
+import { DestructiveWarningDialog } from './destructive-warning-dialog';
 import { classifyColumn, coerceForColumn, validateEditorValue, dialectFromManifest, type EditorKind } from '../data-grid/editor-kinds';
 import { registerQueryCompletion } from '../../lib/query-completion/hooks';
 import {
@@ -50,6 +52,65 @@ function pickMonacoTheme(): 'app-dark' | 'app-light' {
   // ships with the One Dark Pro palette. Light mode remains registered as a
   // fallback for future theming work.
   return 'app-dark';
+}
+
+/** Split a multi-statement SQL string on `;` respecting quotes and comments. */
+function splitSqlStatements(sql: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inSingle = false;
+  let inDouble = false;
+  let inBack = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let i = 0; i < sql.length; i++) {
+    const ch = sql[i];
+    const next = sql[i + 1];
+
+    if (inLineComment) {
+      current += ch;
+      if (ch === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      current += ch;
+      if (ch === '*' && next === '/') { current += '/'; i++; inBlockComment = false; }
+      continue;
+    }
+    if (inSingle) {
+      current += ch;
+      if (ch === "'" && sql[i - 1] !== '\\') inSingle = false;
+      continue;
+    }
+    if (inDouble) {
+      current += ch;
+      if (ch === '"' && sql[i - 1] !== '\\') inDouble = false;
+      continue;
+    }
+    if (inBack) {
+      current += ch;
+      if (ch === '`') inBack = false;
+      continue;
+    }
+
+    if (ch === '-' && next === '-') { inLineComment = true; current += ch; continue; }
+    if (ch === '/' && next === '*') { inBlockComment = true; current += ch; current += '/'; i++; continue; }
+    if (ch === "'") { inSingle = true; current += ch; continue; }
+    if (ch === '"') { inDouble = true; current += ch; continue; }
+    if (ch === '`') { inBack = true; current += ch; continue; }
+
+    if (ch === ';') {
+      const trimmed = current.trim();
+      if (trimmed) parts.push(trimmed);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  const trimmed = current.trim();
+  if (trimmed) parts.push(trimmed);
+  return parts;
 }
 
 function statementAtCursor(source: string, cursorOffset: number): string {
@@ -311,6 +372,9 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   const [activeResultIndex, setActiveResultIndex] = useState(() => seededSnapshot?.activeResultIndex ?? 0);
   const [resultViewMode, setResultViewMode] = useState<'table' | 'json'>(() => seededSnapshot?.resultViewMode ?? 'table');
   const [isExecuting, setIsExecuting] = useState(false);
+  // Destructive warning dialog state
+  const [destructiveWarning, setDestructiveWarning] = useState<DestructiveStatement[] | null>(null);
+  const pendingRunRef = useRef<string | null>(null);
   // Results pane height — user-resizable via the drag handle on its top edge.
   const [resultsHeight, setResultsHeight] = useState(() => seededSnapshot?.resultsHeight ?? 260);
   const [theme, setTheme] = useState<'app-dark' | 'app-light'>(pickMonacoTheme);
@@ -777,25 +841,48 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     collapseJsonSubtrees(jsonResultEditorRef.current);
   }, [resultViewMode, supportsJsonResultView, activeResultIndex, activeRowsAsJsonText, collapseJsonSubtrees]);
 
-  const handleRun = async (statementOverride?: string) => {
-    const payload = stripCodeComments(statementOverride ?? query, language, activeManifest?.queryEditor?.commentTags).trim();
-    if (!payload) return;
+  const executePayload = async (payload: string) => {
     setIsExecuting(true);
+    setResultStatements([]);
+    setRunError(null);
+    setActiveResultIndex(0);
+
+    const collected: StatementResult[] = [];
+
     try {
-      // Adapter/backend owns database scoping now. The editor sends the
-      // command exactly as typed — no frontend-injected prefixes.
-      const res = await db.runQuery(connection.id, payload);
-      for (const stmt of res.statements) {
-        onLogQuery?.(stmt.sql, {
-          source: 'editor',
-          durationMs: stmt.durationMs,
-          status: stmt.error ? 'error' : 'ok',
-          message: stmt.error ?? undefined,
-        });
+      const finalResult = await db.runQueryStream(
+        connection.id,
+        payload,
+        (s) => {
+          collected.push(s);
+          onLogQuery?.(s.sql, {
+            source: 'editor',
+            durationMs: s.durationMs,
+            status: s.error ? 'error' : 'ok',
+            message: s.error ?? undefined,
+          });
+          setResultStatements([...collected]);
+          setActiveResultIndex(collected.length - 1);
+        },
+        undefined,
+        effectiveSchema,
+      );
+      // Compatibility fallback for adapters that returned a final batch
+      // without streaming any intermediate rows.
+      if (collected.length === 0 && finalResult.statements.length > 0) {
+        for (const s of finalResult.statements) {
+          collected.push(s);
+          onLogQuery?.(s.sql, {
+            source: 'editor',
+            durationMs: s.durationMs,
+            status: s.error ? 'error' : 'ok',
+            message: s.error ?? undefined,
+          });
+        }
+        setResultStatements([...collected]);
+        setActiveResultIndex(collected.length - 1);
       }
       setRunError(null);
-      setResultStatements(res.statements);
-      setActiveResultIndex(Math.max(0, res.statements.length - 1));
     } catch (err) {
       const message = isDbError(err) ? err.message : String(err);
       onLogQuery?.(payload, {
@@ -803,12 +890,26 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
         status: 'error',
         message,
       });
-      setResultStatements([]);
       setRunError(message);
-      setActiveResultIndex(0);
     } finally {
       setIsExecuting(false);
     }
+  };
+
+  const handleRun = async (statementOverride?: string) => {
+    const payload = stripCodeComments(statementOverride ?? query, language, activeManifest?.queryEditor?.commentTags).trim();
+    if (!payload) return;
+
+    // Check for destructive statements before executing
+    const dialect = activeManifest?.capabilities.sqlDialect ?? 'none';
+    const analysis = analyzeDestructive(payload, dialect);
+    if ('statements' in analysis) {
+      pendingRunRef.current = payload;
+      setDestructiveWarning(analysis.statements);
+      return;
+    }
+
+    await executePayload(payload);
   };
   handleRunRef.current = () => { void handleRun(); };
 
@@ -1377,6 +1478,20 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
           })()}
         </div>
       )}
+
+      <DestructiveWarningDialog
+        open={destructiveWarning !== null}
+        onOpenChange={(open) => { if (!open) { setDestructiveWarning(null); pendingRunRef.current = null; } }}
+        statements={destructiveWarning ?? []}
+        onConfirm={() => {
+          const payload = pendingRunRef.current;
+          setDestructiveWarning(null);
+          pendingRunRef.current = null;
+          if (payload) {
+            void executePayload(payload);
+          }
+        }}
+      />
     </div>
   );
 }
