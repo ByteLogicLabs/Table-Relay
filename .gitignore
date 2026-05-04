@@ -18,3 +18,4 @@ target
 .claude
 ./*.md
 !./README.md
+workspace/*.md
