@@ -18,6 +18,7 @@ import {
   useConnections,
 } from '../../state/connections';
 import { formatSql } from '../../lib/format-sql';
+import { getMonacoThemeId } from '../../lib/monaco-setup';
 import { prefillChat } from '../../state/ai';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { readQueryResultSnapshot, writeQueryResultSnapshot } from '../../state/query-result-cache';
@@ -47,11 +48,8 @@ interface SqlEditorProps {
   onQueryChange?: (query: string) => void;
 }
 
-function pickMonacoTheme(): 'app-dark' | 'app-light' {
-  // The app itself uses a dark surface as its primary theme, so the editor always
-  // ships with the One Dark Pro palette. Light mode remains registered as a
-  // fallback for future theming work.
-  return 'app-dark';
+function pickMonacoTheme(): string {
+  return getMonacoThemeId(document.documentElement.dataset.theme ?? 'one-dark');
 }
 
 /** Split a multi-statement SQL string on `;` respecting quotes and comments. */
@@ -377,7 +375,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   const pendingRunRef = useRef<string | null>(null);
   // Results pane height — user-resizable via the drag handle on its top edge.
   const [resultsHeight, setResultsHeight] = useState(() => seededSnapshot?.resultsHeight ?? 260);
-  const [theme, setTheme] = useState<'app-dark' | 'app-light'>(pickMonacoTheme);
+  const [theme, setTheme] = useState<string>(pickMonacoTheme);
   const jsonResultEditorRef = useRef<MonacoEditorNs.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const completionDisposerRef = useRef<IDisposable | null>(null);
@@ -395,7 +393,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   useEffect(() => {
     const root = document.documentElement;
     const observer = new MutationObserver(() => setTheme(pickMonacoTheme()));
-    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    observer.observe(root, { attributes: true, attributeFilter: ['class', 'data-theme'] });
     return () => observer.disconnect();
   }, []);
 

@@ -62,13 +62,14 @@ export function highlight(stmt: string, dialect: 'sql' | 'mongo' | 'redis' = 'sq
   return tokens;
 }
 
-// One Dark Pro token colors — kept in sync with src/lib/monaco-setup.ts.
+// Theme-aware token colors. Variables are defined per theme in src/index.css
+// so the query log + any inline highlights track the active palette.
 export const tokenClass: Record<TokenKind, string> = {
-  keyword: 'text-[#c678dd] font-semibold',
-  string: 'text-[#98c379]',
-  number: 'text-[#d19a66]',
-  comment: 'text-[#7f848e] italic',
-  ident: 'text-[#abb2bf]',
-  punct: 'text-[#56b6c2]',
-  plain: 'text-[#abb2bf]',
+  keyword: 'text-(--syntax-keyword) font-semibold',
+  string:  'text-(--syntax-string)',
+  number:  'text-(--syntax-number)',
+  comment: 'text-muted-foreground italic',
+  ident:   'text-foreground',
+  punct:   'text-(--syntax-punct)',
+  plain:   'text-foreground',
 };

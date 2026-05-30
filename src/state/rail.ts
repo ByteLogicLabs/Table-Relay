@@ -90,3 +90,18 @@ export async function unpinManyTiles(ids: string[]): Promise<void> {
   mutate(s => ({ tiles: s.tiles.filter(t => !set.has(t.id)) }));
 }
 
+/** Reorder tiles by providing a new ordered array of tile ids. */
+export function reorderTiles(orderedIds: string[]): void {
+  mutate(s => {
+    const byId = new Map(s.tiles.map(t => [t.id, t]));
+    const now = Date.now();
+    const reordered = orderedIds
+      .map((id, i) => {
+        const t = byId.get(id);
+        return t ? { ...t, orderIndex: i, updatedAt: now } : null;
+      })
+      .filter((t): t is RailTile => t !== null);
+    return { tiles: reordered };
+  });
+}
+

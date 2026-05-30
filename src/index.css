@@ -300,4 +300,241 @@
   html {
     @apply font-sans overflow-hidden;
     }
+  html, body, #root {
+    overflow: hidden;
+  }
+}
+
+/* Syntax-token vars consumed by lib/highlight.ts + query-log. Each theme
+   block below overrides them; if a theme forgets, we fall back to these
+   neutral defaults so nothing renders as pure black. */
+:root {
+  --syntax-keyword: var(--primary);
+  --syntax-string:  oklch(0.65 0.14 145);
+  --syntax-number:  oklch(0.72 0.16 50);
+  --syntax-punct:   oklch(0.70 0.10 200);
+  --syntax-success: oklch(0.65 0.14 145);
+  --editor-bg:      var(--card);
+}
+
+/* ─── One Dark Pro ───────────────────────────────────────────── */
+/* Palette based on #282c34 background — slightly warm blue-gray */
+.dark[data-theme="one-dark"] {
+  --background:         oklch(0.23 0.012 261);  /* #282c34 */
+  --foreground:         oklch(0.74 0.007 260);  /* #abb2bf */
+  --card:               oklch(0.20 0.012 261);  /* #21252b panels */
+  --card-foreground:    oklch(0.74 0.007 260);
+  --popover:            oklch(0.20 0.012 261);
+  --popover-foreground: oklch(0.74 0.007 260);
+  --primary:            oklch(0.70 0.14 222);   /* #61afef blue */
+  --primary-foreground: oklch(0.20 0.012 261);
+  --secondary:          oklch(0.30 0.012 262);  /* #3e4452 */
+  --secondary-foreground: oklch(0.74 0.007 260);
+  --muted:              oklch(0.27 0.012 261);
+  --muted-foreground:   oklch(0.45 0.008 260);  /* #5c6370 */
+  --accent:             oklch(0.30 0.012 262);
+  --accent-foreground:  oklch(0.74 0.007 260);
+  --destructive:        oklch(0.62 0.13 10);    /* #e06c75 */
+  --border:             oklch(0.30 0.012 262);
+  --input:              oklch(0.30 0.012 262);
+  --ring:               oklch(0.70 0.14 222);
+  --sidebar:            oklch(0.20 0.012 261);
+  --sidebar-foreground: oklch(0.74 0.007 260);
+  --sidebar-bg:         rgba(33, 37, 43, 0.88);
+  --syntax-keyword:     #c678dd;
+  --syntax-string:      #98c379;
+  --syntax-number:      #d19a66;
+  --syntax-punct:       #56b6c2;
+  --syntax-success:     #98c379;
+  --editor-bg:          #0b0e14;
+}
+
+/* ─── Catppuccin Latte (light) ──────────────────────────────── */
+[data-theme="latte"] {
+  --background:         oklch(0.95 0.005 261);  /* #eff1f5 */
+  --foreground:         oklch(0.36 0.030 261);  /* #4c4f69 */
+  --card:               oklch(0.92 0.006 261);  /* #e6e9ef */
+  --card-foreground:    oklch(0.36 0.030 261);
+  --popover:            oklch(0.95 0.005 261);
+  --popover-foreground: oklch(0.36 0.030 261);
+  --primary:            oklch(0.51 0.23 257);   /* #1e66f5 blue */
+  --primary-foreground: oklch(0.98 0.002 261);
+  --secondary:          oklch(0.89 0.007 261);  /* #dce0e8 */
+  --secondary-foreground: oklch(0.36 0.030 261);
+  --muted:              oklch(0.92 0.006 261);
+  --muted-foreground:   oklch(0.50 0.020 261);  /* #6c6f85 */
+  --accent:             oklch(0.89 0.007 261);
+  --accent-foreground:  oklch(0.36 0.030 261);
+  --destructive:        oklch(0.42 0.25 15);    /* #d20f39 */
+  --border:             oklch(0.83 0.007 261);  /* #ccd0da */
+  --input:              oklch(0.83 0.007 261);
+  --ring:               oklch(0.51 0.23 257);
+  --sidebar:            oklch(0.92 0.006 261);
+  --sidebar-foreground: oklch(0.36 0.030 261);
+  --sidebar-bg:         rgba(230, 233, 239, 0.88);
+  --syntax-keyword:     #8839ef;
+  --syntax-string:      #40a02b;
+  --syntax-number:      #fe640b;
+  --syntax-punct:       #04a5e5;
+  --syntax-success:     #40a02b;
+  --editor-bg:          #e6e9ef;
+}
+
+/* ─── Monokai ────────────────────────────────────────────────── */
+.dark[data-theme="monokai"] {
+  --background:         oklch(0.19 0.007 118);  /* #272822 */
+  --foreground:         oklch(0.97 0.003 118);  /* #f8f8f2 */
+  --card:               oklch(0.16 0.006 118);  /* #1e1f1c */
+  --card-foreground:    oklch(0.97 0.003 118);
+  --popover:            oklch(0.16 0.006 118);
+  --popover-foreground: oklch(0.97 0.003 118);
+  --primary:            oklch(0.72 0.18 53);    /* #fd971f orange */
+  --primary-foreground: oklch(0.16 0.006 118);
+  --secondary:          oklch(0.27 0.007 90);
+  --secondary-foreground: oklch(0.97 0.003 118);
+  --muted:              oklch(0.24 0.006 90);
+  --muted-foreground:   oklch(0.50 0.020 75);   /* #75715e */
+  --accent:             oklch(0.83 0.22 130);   /* #a6e22e green */
+  --accent-foreground:  oklch(0.16 0.006 118);
+  --destructive:        oklch(0.57 0.25 350);   /* #f92672 pink */
+  --border:             oklch(0.30 0.009 90);   /* #49483e */
+  --input:              oklch(0.30 0.009 90);
+  --ring:               oklch(0.72 0.18 53);
+  --sidebar:            oklch(0.16 0.006 118);
+  --sidebar-foreground: oklch(0.97 0.003 118);
+  --sidebar-bg:         rgba(30, 31, 28, 0.88);
+  --syntax-keyword:     #f92672;
+  --syntax-string:      #e6db74;
+  --syntax-number:      #ae81ff;
+  --syntax-punct:       #f8f8f2;
+  --syntax-success:     #a6e22e;
+  --editor-bg:          #1e1f1c;
+}
+
+/* ─── Dracula ─────────────────────────────────────────────────── */
+/* github.com/dracula/dracula-theme — #282a36 base */
+.dark[data-theme="dracula"] {
+  --background:         oklch(0.20 0.020 280);  /* #282a36 */
+  --foreground:         oklch(0.97 0.003 90);   /* #f8f8f2 */
+  --card:               oklch(0.17 0.018 280);  /* #21222c */
+  --card-foreground:    oklch(0.97 0.003 90);
+  --popover:            oklch(0.17 0.018 280);
+  --popover-foreground: oklch(0.97 0.003 90);
+  --primary:            oklch(0.72 0.19 302);   /* #bd93f9 purple */
+  --primary-foreground: oklch(0.17 0.018 280);
+  --secondary:          oklch(0.31 0.022 277);  /* #44475a */
+  --secondary-foreground: oklch(0.97 0.003 90);
+  --muted:              oklch(0.28 0.020 278);
+  --muted-foreground:   oklch(0.46 0.07 262);   /* #6272a4 */
+  --accent:             oklch(0.31 0.022 277);
+  --accent-foreground:  oklch(0.97 0.003 90);
+  --destructive:        oklch(0.63 0.22 24);    /* #ff5555 */
+  --border:             oklch(0.31 0.022 277);
+  --input:              oklch(0.31 0.022 277);
+  --ring:               oklch(0.72 0.19 302);
+  --sidebar:            oklch(0.17 0.018 280);
+  --sidebar-foreground: oklch(0.97 0.003 90);
+  --sidebar-bg:         rgba(33, 34, 44, 0.88);
+  --syntax-keyword:     #ff79c6;
+  --syntax-string:      #f1fa8c;
+  --syntax-number:      #bd93f9;
+  --syntax-punct:       #ff79c6;
+  --syntax-success:     #50fa7b;
+  --editor-bg:          #1e1f29;
+}
+
+/* ─── Nord ────────────────────────────────────────────────────── */
+/* github.com/nordtheme/nord — #2e3440 Polar Night */
+.dark[data-theme="nord"] {
+  --background:         oklch(0.24 0.018 253);  /* #2e3440 */
+  --foreground:         oklch(0.94 0.004 252);  /* #eceff4 */
+  --card:               oklch(0.29 0.020 250);  /* #3b4252 */
+  --card-foreground:    oklch(0.94 0.004 252);
+  --popover:            oklch(0.29 0.020 250);
+  --popover-foreground: oklch(0.94 0.004 252);
+  --primary:            oklch(0.78 0.07 210);   /* #88c0d0 frost blue */
+  --primary-foreground: oklch(0.24 0.018 253);
+  --secondary:          oklch(0.33 0.020 253);  /* #434c5e */
+  --secondary-foreground: oklch(0.94 0.004 252);
+  --muted:              oklch(0.31 0.019 252);
+  --muted-foreground:   oklch(0.47 0.040 258);  /* #616e88 */
+  --accent:             oklch(0.33 0.020 253);
+  --accent-foreground:  oklch(0.94 0.004 252);
+  --destructive:        oklch(0.52 0.10 15);    /* #bf616a */
+  --border:             oklch(0.33 0.020 253);
+  --input:              oklch(0.33 0.020 253);
+  --ring:               oklch(0.78 0.07 210);
+  --sidebar:            oklch(0.21 0.016 253);
+  --sidebar-foreground: oklch(0.94 0.004 252);
+  --sidebar-bg:         rgba(36, 41, 51, 0.92);
+  --syntax-keyword:     #81a1c1;
+  --syntax-string:      #a3be8c;
+  --syntax-number:      #b48ead;
+  --syntax-punct:       #81a1c1;
+  --syntax-success:     #a3be8c;
+  --editor-bg:          #272e3b;
+}
+
+/* ─── Tokyo Night ─────────────────────────────────────────────── */
+/* github.com/enkia/tokyo-night-vscode-theme — #1a1b26 */
+.dark[data-theme="tokyo-night"] {
+  --background:         oklch(0.16 0.022 276);  /* #1a1b26 */
+  --foreground:         oklch(0.72 0.045 263);  /* #a9b1d6 */
+  --card:               oklch(0.18 0.028 267);  /* #1f2335 */
+  --card-foreground:    oklch(0.72 0.045 263);
+  --popover:            oklch(0.18 0.028 267);
+  --popover-foreground: oklch(0.72 0.045 263);
+  --primary:            oklch(0.68 0.16 262);   /* #7aa2f7 blue */
+  --primary-foreground: oklch(0.16 0.022 276);
+  --secondary:          oklch(0.22 0.025 272);  /* #292e42 */
+  --secondary-foreground: oklch(0.72 0.045 263);
+  --muted:              oklch(0.22 0.025 272);
+  --muted-foreground:   oklch(0.43 0.055 270);  /* #565f89 */
+  --accent:             oklch(0.22 0.025 272);
+  --accent-foreground:  oklch(0.72 0.045 263);
+  --destructive:        oklch(0.70 0.16 7);     /* #f7768e */
+  --border:             oklch(0.22 0.025 272);
+  --input:              oklch(0.22 0.025 272);
+  --ring:               oklch(0.68 0.16 262);
+  --sidebar:            oklch(0.14 0.020 270);
+  --sidebar-foreground: oklch(0.72 0.045 263);
+  --sidebar-bg:         rgba(15, 16, 26, 0.92);
+  --syntax-keyword:     #9d7cd8;
+  --syntax-string:      #9ece6a;
+  --syntax-number:      #ff9e64;
+  --syntax-punct:       #89ddff;
+  --syntax-success:     #9ece6a;
+  --editor-bg:          #141622;
+}
+
+/* ─── GitHub Dark ─────────────────────────────────────────────── */
+/* github.com/primer/github-vscode-theme — #0d1117 */
+.dark[data-theme="github-dark"] {
+  --background:         oklch(0.12 0.010 252);  /* #0d1117 */
+  --foreground:         oklch(0.84 0.005 247);  /* #c9d1d9 */
+  --card:               oklch(0.14 0.010 252);  /* #161b22 */
+  --card-foreground:    oklch(0.84 0.005 247);
+  --popover:            oklch(0.14 0.010 252);
+  --popover-foreground: oklch(0.84 0.005 247);
+  --primary:            oklch(0.67 0.18 240);   /* #58a6ff blue */
+  --primary-foreground: oklch(0.12 0.010 252);
+  --secondary:          oklch(0.18 0.010 253);  /* #21262d */
+  --secondary-foreground: oklch(0.84 0.005 247);
+  --muted:              oklch(0.18 0.010 253);
+  --muted-foreground:   oklch(0.60 0.008 252);  /* #8b949e */
+  --accent:             oklch(0.18 0.010 253);
+  --accent-foreground:  oklch(0.84 0.005 247);
+  --destructive:        oklch(0.63 0.19 24);    /* #f85149 */
+  --border:             oklch(0.26 0.010 253);  /* #30363d */
+  --input:              oklch(0.26 0.010 253);
+  --ring:               oklch(0.67 0.18 240);
+  --sidebar:            oklch(0.11 0.008 252);
+  --sidebar-foreground: oklch(0.84 0.005 247);
+  --sidebar-bg:         rgba(22, 27, 34, 0.88);
+  --syntax-keyword:     #ff7b72;
+  --syntax-string:      #a5d6ff;
+  --syntax-number:      #79c0ff;
+  --syntax-punct:       #ff7b72;
+  --syntax-success:     #7ee787;
+  --editor-bg:          #010409;
 }

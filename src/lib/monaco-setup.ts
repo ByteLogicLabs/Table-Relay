@@ -207,6 +207,206 @@ export function defineAppThemes(): void {
     colors: darkColors,
   });
 
+  // ── Monokai ──────────────────────────────────────────────────
+  monaco.editor.defineTheme('app-monokai', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: '', foreground: 'f8f8f2', background: '272822' },
+      { token: 'keyword', foreground: 'f92672', fontStyle: 'bold' },
+      { token: 'keyword.sql', foreground: 'f92672', fontStyle: 'bold' },
+      { token: 'string', foreground: 'e6db74' },
+      { token: 'string.sql', foreground: 'e6db74' },
+      { token: 'number', foreground: 'ae81ff' },
+      { token: 'comment', foreground: '75715e', fontStyle: 'italic' },
+      { token: 'comment.sql', foreground: '75715e', fontStyle: 'italic' },
+      { token: 'function', foreground: 'a6e22e' },
+      { token: 'type', foreground: '66d9e8' },
+      { token: 'type.identifier', foreground: '66d9e8' },
+      { token: 'operator', foreground: 'f8f8f2' },
+      { token: 'identifier', foreground: 'f8f8f2' },
+      { token: 'variable', foreground: 'f92672' },
+      { token: 'predefined', foreground: '66d9e8' },
+    ],
+    colors: {
+      'editor.foreground': '#f8f8f2',
+      'editor.background': '#272822',
+      'editorLineNumber.foreground': '#49483e',
+      'editorLineNumber.activeForeground': '#75715e',
+      'editor.selectionBackground': '#49483e',
+      'editor.lineHighlightBackground': '#3e3d32',
+      'editor.lineHighlightBorder': '#00000000',
+      'editorCursor.foreground': '#f8f8f0',
+      'editorWidget.background': '#1e1f1c',
+      'editorWidget.border': '#49483e',
+      'editorSuggestWidget.background': '#1e1f1c',
+      'editorSuggestWidget.border': '#49483e',
+      'editorSuggestWidget.selectedBackground': '#3e3d32',
+      'editorHoverWidget.background': '#1e1f1c',
+      'editorHoverWidget.border': '#49483e',
+    },
+  });
+
+  // ── Dracula ───────────────────────────────────────────────────
+  monaco.editor.defineTheme('app-dracula', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: '', foreground: 'f8f8f2', background: '282a36' },
+      { token: 'keyword', foreground: 'ff79c6', fontStyle: 'bold' },
+      { token: 'keyword.sql', foreground: 'ff79c6', fontStyle: 'bold' },
+      { token: 'string', foreground: 'f1fa8c' },
+      { token: 'string.sql', foreground: 'f1fa8c' },
+      { token: 'number', foreground: 'bd93f9' },
+      { token: 'comment', foreground: '6272a4', fontStyle: 'italic' },
+      { token: 'comment.sql', foreground: '6272a4', fontStyle: 'italic' },
+      { token: 'function', foreground: '50fa7b' },
+      { token: 'type', foreground: '8be9fd' },
+      { token: 'type.identifier', foreground: '8be9fd' },
+      { token: 'operator', foreground: 'ff79c6' },
+      { token: 'identifier', foreground: 'f8f8f2' },
+      { token: 'variable', foreground: 'f8f8f2' },
+      { token: 'predefined', foreground: '8be9fd' },
+    ],
+    colors: {
+      'editor.foreground': '#f8f8f2',
+      'editor.background': '#282a36',
+      'editorLineNumber.foreground': '#44475a',
+      'editorLineNumber.activeForeground': '#6272a4',
+      'editor.selectionBackground': '#44475a',
+      'editor.lineHighlightBackground': '#44475a',
+      'editor.lineHighlightBorder': '#00000000',
+      'editorCursor.foreground': '#f8f8f2',
+      'editorWidget.background': '#1e1f29',
+      'editorWidget.border': '#44475a',
+      'editorSuggestWidget.background': '#1e1f29',
+      'editorSuggestWidget.border': '#44475a',
+      'editorSuggestWidget.selectedBackground': '#44475a',
+      'editorHoverWidget.background': '#1e1f29',
+      'editorHoverWidget.border': '#44475a',
+    },
+  });
+
+  // ── Nord ──────────────────────────────────────────────────────
+  monaco.editor.defineTheme('app-nord', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: '', foreground: 'd8dee9', background: '2e3440' },
+      { token: 'keyword', foreground: '81a1c1', fontStyle: 'bold' },
+      { token: 'keyword.sql', foreground: '81a1c1', fontStyle: 'bold' },
+      { token: 'string', foreground: 'a3be8c' },
+      { token: 'string.sql', foreground: 'a3be8c' },
+      { token: 'number', foreground: 'b48ead' },
+      { token: 'comment', foreground: '616e88', fontStyle: 'italic' },
+      { token: 'comment.sql', foreground: '616e88', fontStyle: 'italic' },
+      { token: 'function', foreground: '88c0d0' },
+      { token: 'type', foreground: '8fbcbb' },
+      { token: 'type.identifier', foreground: '8fbcbb' },
+      { token: 'operator', foreground: '81a1c1' },
+      { token: 'identifier', foreground: 'd8dee9' },
+      { token: 'variable', foreground: 'bf616a' },
+      { token: 'predefined', foreground: '8fbcbb' },
+    ],
+    colors: {
+      'editor.foreground': '#d8dee9',
+      'editor.background': '#2e3440',
+      'editorLineNumber.foreground': '#4c566a',
+      'editorLineNumber.activeForeground': '#d8dee9',
+      'editor.selectionBackground': '#4c566a',
+      'editor.lineHighlightBackground': '#3b4252',
+      'editor.lineHighlightBorder': '#00000000',
+      'editorCursor.foreground': '#d8dee9',
+      'editorWidget.background': '#272e3b',
+      'editorWidget.border': '#4c566a',
+      'editorSuggestWidget.background': '#272e3b',
+      'editorSuggestWidget.border': '#4c566a',
+      'editorSuggestWidget.selectedBackground': '#3b4252',
+      'editorHoverWidget.background': '#272e3b',
+      'editorHoverWidget.border': '#4c566a',
+    },
+  });
+
+  // ── Tokyo Night ───────────────────────────────────────────────
+  monaco.editor.defineTheme('app-tokyo-night', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: '', foreground: 'a9b1d6', background: '1a1b26' },
+      { token: 'keyword', foreground: '9d7cd8', fontStyle: 'bold' },
+      { token: 'keyword.sql', foreground: '9d7cd8', fontStyle: 'bold' },
+      { token: 'string', foreground: '9ece6a' },
+      { token: 'string.sql', foreground: '9ece6a' },
+      { token: 'number', foreground: 'ff9e64' },
+      { token: 'comment', foreground: '565f89', fontStyle: 'italic' },
+      { token: 'comment.sql', foreground: '565f89', fontStyle: 'italic' },
+      { token: 'function', foreground: '7aa2f7' },
+      { token: 'type', foreground: '2ac3de' },
+      { token: 'type.identifier', foreground: '2ac3de' },
+      { token: 'operator', foreground: '89ddff' },
+      { token: 'identifier', foreground: 'c0caf5' },
+      { token: 'variable', foreground: 'f7768e' },
+      { token: 'predefined', foreground: '2ac3de' },
+    ],
+    colors: {
+      'editor.foreground': '#a9b1d6',
+      'editor.background': '#1a1b26',
+      'editorLineNumber.foreground': '#363b54',
+      'editorLineNumber.activeForeground': '#737aa2',
+      'editor.selectionBackground': '#283457',
+      'editor.lineHighlightBackground': '#1f2335',
+      'editor.lineHighlightBorder': '#00000000',
+      'editorCursor.foreground': '#c0caf5',
+      'editorWidget.background': '#141622',
+      'editorWidget.border': '#292e42',
+      'editorSuggestWidget.background': '#141622',
+      'editorSuggestWidget.border': '#292e42',
+      'editorSuggestWidget.selectedBackground': '#1f2335',
+      'editorHoverWidget.background': '#141622',
+      'editorHoverWidget.border': '#292e42',
+    },
+  });
+
+  // ── GitHub Dark ───────────────────────────────────────────────
+  monaco.editor.defineTheme('app-github-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: '', foreground: 'c9d1d9', background: '0d1117' },
+      { token: 'keyword', foreground: 'ff7b72', fontStyle: 'bold' },
+      { token: 'keyword.sql', foreground: 'ff7b72', fontStyle: 'bold' },
+      { token: 'string', foreground: 'a5d6ff' },
+      { token: 'string.sql', foreground: 'a5d6ff' },
+      { token: 'number', foreground: '79c0ff' },
+      { token: 'comment', foreground: '8b949e', fontStyle: 'italic' },
+      { token: 'comment.sql', foreground: '8b949e', fontStyle: 'italic' },
+      { token: 'function', foreground: 'd2a8ff' },
+      { token: 'type', foreground: 'ffa657' },
+      { token: 'type.identifier', foreground: 'ffa657' },
+      { token: 'operator', foreground: 'ff7b72' },
+      { token: 'identifier', foreground: 'c9d1d9' },
+      { token: 'variable', foreground: 'ffa657' },
+      { token: 'predefined', foreground: '79c0ff' },
+    ],
+    colors: {
+      'editor.foreground': '#c9d1d9',
+      'editor.background': '#0d1117',
+      'editorLineNumber.foreground': '#30363d',
+      'editorLineNumber.activeForeground': '#8b949e',
+      'editor.selectionBackground': '#264f78',
+      'editor.lineHighlightBackground': '#161b22',
+      'editor.lineHighlightBorder': '#00000000',
+      'editorCursor.foreground': '#c9d1d9',
+      'editorWidget.background': '#010409',
+      'editorWidget.border': '#30363d',
+      'editorSuggestWidget.background': '#010409',
+      'editorSuggestWidget.border': '#30363d',
+      'editorSuggestWidget.selectedBackground': '#161b22',
+      'editorHoverWidget.background': '#010409',
+      'editorHoverWidget.border': '#30363d',
+    },
+  });
+
   // Light fallback — keeps semantics but on a light background.
   const bgLight = hslToHex(readVar('--background', '0 0% 100%'), '#ffffff');
   const fgLight = hslToHex(readVar('--foreground', '222 84% 5%'), '#0f172a');
@@ -237,3 +437,16 @@ export function defineAppThemes(): void {
 }
 
 defineAppThemes();
+
+const THEME_MAP: Record<string, string> = {
+  'latte':       'app-light',
+  'monokai':     'app-monokai',
+  'dracula':     'app-dracula',
+  'nord':        'app-nord',
+  'tokyo-night': 'app-tokyo-night',
+  'github-dark': 'app-github-dark',
+};
+
+export function getMonacoThemeId(appTheme: string): string {
+  return THEME_MAP[appTheme] ?? 'app-dark';
+}

@@ -1,7 +1,8 @@
-import { useEffect } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, Unplug, Pencil, FileUp } from 'lucide-react';
+import { Database, GripVertical, Settings, Unplug, Pencil, FileUp } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -9,7 +10,7 @@ import {
   ContextMenuTrigger,
   ContextMenuSeparator,
 } from '../../components/ui/context-menu';
-import { refreshRail, unpinTile, useRail, unpinManyTiles } from '../../state/rail';
+import { refreshRail, unpinTile, useRail, unpinManyTiles, reorderTiles } from '../../state/rail';
 import { useConnections } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { toast } from 'sonner';
@@ -34,8 +35,8 @@ interface ConnectionRailProps {
   onExpandChange: (expanded: boolean) => void;
 }
 
-export const RAIL_COLLAPSED_WIDTH = 72;
-export const RAIL_EXPANDED_WIDTH = 220;
+export const RAIL_COLLAPSED_WIDTH = 78;
+export const RAIL_EXPANDED_WIDTH = 240;
 
 function driverIcon(driver: ConnectionProfile['driver'], className = 'w-4 h-4') {
   return <DbIcon driver={driver} className={className} />;
@@ -54,6 +55,45 @@ export default function ConnectionRail({
 }: ConnectionRailProps) {
   const rail = useRail();
   useEffect(() => { void refreshRail(); }, []);
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  useEffect(() => {
+    const handler = () => setSettingsOpen(true);
+    window.addEventListener('dbtable:open-settings', handler);
+    return () => window.removeEventListener('dbtable:open-settings', handler);
+  }, []);
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+  const [overId, setOverId] = useState<string | null>(null);
+  const dragSrcRef = useRef<string | null>(null);
+
+  const handleDragStart = (id: string) => {
+    dragSrcRef.current = id;
+    setDraggingId(id);
+  };
+
+  const handleDragOver = (e: React.DragEvent, id: string) => {
+    e.preventDefault();
+    if (dragSrcRef.current !== id) setOverId(id);
+  };
+
+  const handleDrop = (targetId: string) => {
+    const srcId = dragSrcRef.current;
+    if (!srcId || srcId === targetId) return;
+    const ids = rail.tiles.map(t => t.id);
+    const from = ids.indexOf(srcId);
+    const to = ids.indexOf(targetId);
+    if (from === -1 || to === -1) return;
+    const next = [...ids];
+    next.splice(from, 1);
+    next.splice(to, 0, srcId);
+    reorderTiles(next);
+  };
+
+  const handleDragEnd = () => {
+    setDraggingId(null);
+    setOverId(null);
+    dragSrcRef.current = null;
+  };
 
   const serversById = new Map(servers.map(s => [s.id, s]));
   const connState = useConnections();
@@ -82,7 +122,7 @@ export default function ConnectionRail({
       onMouseEnter={() => onExpandChange(true)}
       onMouseLeave={() => onExpandChange(false)}
       style={{ width: expanded ? RAIL_EXPANDED_WIDTH : RAIL_COLLAPSED_WIDTH }}
-      className="shrink-0 flex flex-col bg-sidebar-bg/70 border-r border-border/50 h-full transition-[width] duration-200 ease-out overflow-hidden"
+      className="shrink-0 flex flex-col bg-sidebar-bg/70 border-r border-border h-full transition-[width] duration-200 ease-out overflow-hidden"
     >
       <MacWindowControls />
 
@@ -96,9 +136,20 @@ export default function ConnectionRail({
             ? `${ver} · ${tile.databaseName}`
             : `${server?.driver ?? '?'} · ${tile.databaseName}`;
           const connected = connectedServerIds.has(tile.serverId);
+          const isDragging = draggingId === tile.id;
+          const isOver = overId === tile.id;
           return (
             <ContextMenu key={tile.id}>
               <ContextMenuTrigger>
+                <div
+                  draggable
+                  onDragStart={() => handleDragStart(tile.id)}
+                  onDragOver={(e) => handleDragOver(e, tile.id)}
+                  onDrop={() => handleDrop(tile.id)}
+                  onDragEnd={handleDragEnd}
+                  className={`relative group/tile transition-opacity ${isDragging ? 'opacity-40' : 'opacity-100'}`}
+                >
+                  {isOver && <div className="absolute -top-px left-1 right-1 h-0.5 rounded-full bg-primary z-10" />}
                 <button
                   type="button"
                   onClick={() => onFocusTile(tile)}
@@ -108,9 +159,12 @@ export default function ConnectionRail({
                       ? 'h-11 flex items-center gap-2.5 px-2'
                       : 'h-14 flex flex-col items-center justify-center gap-0.5 px-1 py-1.5'}
                     ${isFocused
-                      ? 'bg-muted text-foreground'
+                      ? 'bg-primary/15 text-foreground'
                       : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'}`}
                 >
+                  {expanded && (
+                    <GripVertical className="absolute left-0.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground/30 opacity-0 group-hover/tile:opacity-100 transition-opacity cursor-grab" />
+                  )}
                   <span
                     className="relative flex items-center justify-center shrink-0"
                     style={server?.color ? { color: server.color } : undefined}
@@ -133,6 +187,7 @@ export default function ConnectionRail({
                     </span>
                   )}
                 </button>
+                </div>
               </ContextMenuTrigger>
               <ContextMenuContent className="w-56">
                 <ContextMenuItem onClick={() => onFocusTile(tile)}>Focus</ContextMenuItem>
@@ -206,6 +261,21 @@ export default function ConnectionRail({
         )}
       </div>
 
+      {/* Settings button */}
+      <div className="shrink-0 px-1.5 pb-2 pt-1 border-t border-border/40">
+        <button
+          type="button"
+          onClick={() => setSettingsOpen(true)}
+          title="Settings"
+          className={`relative w-full rounded-lg text-left transition-colors cursor-pointer text-muted-foreground hover:bg-muted/60 hover:text-foreground
+            ${expanded ? 'h-9 flex items-center gap-2.5 px-2' : 'h-10 flex flex-col items-center justify-center gap-0.5'}`}
+        >
+          <Settings className="w-4 h-4 shrink-0" />
+          {expanded && <span className="text-[13px] font-medium">Settings</span>}
+        </button>
+      </div>
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   );
 }

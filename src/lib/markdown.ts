@@ -14,12 +14,50 @@
  */
 import DOMPurify from 'dompurify';
 import { marked } from 'marked';
+import { highlight, tokenClass, type TokenKind } from './highlight';
 
 // GFM tables + auto-linking + proper paragraph breaks on `\n`. Not async —
 // marked.parse returns string synchronously unless `async: true`.
 marked.setOptions({
   gfm: true,
   breaks: true,
+});
+
+function escapeHtml(s: string): string {
+  return s.replace(/[&<>"']/g, c => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#39;',
+  })[c] ?? c);
+}
+
+// Custom code-block renderer: SQL / Mongo / Redis blocks get syntax highlighted
+// via lib/highlight using theme-aware CSS variables. Other languages render
+// as plain monospace blocks.
+const HIGHLIGHTABLE_LANGS = new Set(['sql', 'mongo', 'redis', 'mysql', 'postgresql', 'postgres', 'sqlite']);
+marked.use({
+  renderer: {
+    code({ text, lang }) {
+      const normalised = (lang ?? '').toLowerCase().trim();
+      // Encode the raw text into a data attribute so the React side can
+      // copy it without re-extracting from the (highlighted, span-wrapped) DOM.
+      const dataText = escapeHtml(text);
+      const copyBtn = `<button type="button" data-md-copy="${dataText}" class="md-copy-btn" aria-label="Copy code">Copy</button>`;
+      if (HIGHLIGHTABLE_LANGS.has(normalised)) {
+        const dialect = normalised === 'mongo' ? 'mongo'
+                      : normalised === 'redis' ? 'redis'
+                      : 'sql';
+        const tokens = highlight(text, dialect);
+        const inner = tokens
+          .map(t => `<span class="${tokenClass[t.kind as TokenKind]}">${escapeHtml(t.text)}</span>`)
+          .join('');
+        return `<div class="md-code-wrap">${copyBtn}<pre><code class="language-${normalised}">${inner}</code></pre></div>\n`;
+      }
+      return `<div class="md-code-wrap">${copyBtn}<pre><code${normalised ? ` class="language-${normalised}"` : ''}>${escapeHtml(text)}</code></pre></div>\n`;
+    },
+  },
 });
 
 export function renderMarkdown(src: string): string {
@@ -31,11 +69,11 @@ export function renderMarkdown(src: string): string {
   // scripting, iframes, forms — the default deny-list covers that.
   return DOMPurify.sanitize(html, {
     ALLOWED_TAGS: [
-      'a', 'b', 'blockquote', 'br', 'code', 'del', 'em', 'h1', 'h2', 'h3',
+      'a', 'b', 'blockquote', 'br', 'button', 'code', 'del', 'em', 'h1', 'h2', 'h3',
       'h4', 'h5', 'h6', 'hr', 'i', 'li', 'ol', 'p', 'pre', 'span', 'strong', 'div',
       's', 'sub', 'sup', 'table', 'tbody', 'td', 'th', 'thead', 'tr', 'ul',
     ],
-    ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class'],
+    ALLOWED_ATTR: ['href', 'title', 'target', 'rel', 'class', 'data-md-copy', 'type', 'aria-label'],
   });
 }
 
@@ -59,7 +97,10 @@ export const markdownClass =
   '[&>p]:my-1 [&>p:first-child]:mt-0 [&>p:last-child]:mb-0 ' +
   '[&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 ' +
   '[&_code]:font-mono [&_code]:text-[12px] [&_code]:bg-background/60 [&_code]:border [&_code]:border-border [&_code]:rounded [&_code]:px-1 [&_code]:py-0.5 [&_code]:break-words ' +
-  '[&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:bg-background/80 [&_pre]:border [&_pre]:border-border [&_pre]:rounded [&_pre]:p-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre>code]:border-0 [&_pre>code]:bg-transparent [&_pre>code]:p-0 ' +
+  '[&_pre]:font-mono [&_pre]:text-[12px] [&_pre]:bg-background/80 [&_pre]:border [&_pre]:border-border [&_pre]:rounded [&_pre]:p-2 [&_pre]:my-2 [&_pre]:overflow-x-auto [&_pre>code]:border-0 [&_pre>code]:bg-transparent [&_pre>code]:p-0 [&_pre]:select-text ' +
+  // Code wrap + copy button overlay
+  '[&_.md-code-wrap]:relative [&_.md-code-wrap]:group/code ' +
+  '[&_.md-copy-btn]:absolute [&_.md-copy-btn]:top-2.5 [&_.md-copy-btn]:right-2.5 [&_.md-copy-btn]:text-[10px] [&_.md-copy-btn]:text-muted-foreground [&_.md-copy-btn]:bg-background/80 [&_.md-copy-btn]:border [&_.md-copy-btn]:border-border [&_.md-copy-btn]:rounded [&_.md-copy-btn]:px-1.5 [&_.md-copy-btn]:py-0.5 [&_.md-copy-btn]:opacity-0 [&_.md-code-wrap:hover_.md-copy-btn]:opacity-100 [&_.md-copy-btn:hover]:text-foreground [&_.md-copy-btn:hover]:bg-background [&_.md-copy-btn]:cursor-pointer [&_.md-copy-btn]:transition-opacity ' +
   '[&_ul]:list-disc [&_ul]:pl-5 [&_ul]:my-1 [&_ol]:list-decimal [&_ol]:pl-5 [&_ol]:my-1 ' +
   '[&_h1]:text-base [&_h1]:font-semibold [&_h1]:mt-2 [&_h1]:mb-1 ' +
   '[&_h2]:text-sm [&_h2]:font-semibold [&_h2]:mt-2 [&_h2]:mb-1 ' +

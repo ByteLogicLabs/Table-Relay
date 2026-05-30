@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Trash2, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import { Button } from '../../components/ui/button';
+import { Checkbox } from '../../components/ui/checkbox';
 import { QueryLogEntry } from '../../types';
 import { highlight, tokenClass } from '../../lib/highlight';
 import { prefillChat } from '../../state/ai';
@@ -96,11 +97,11 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
 
         <div className="flex items-center gap-2">
           <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground select-none cursor-pointer">
-            <input
-              type="checkbox"
+            <Checkbox
+              id="syntax-highlight"
               checked={highlightOn}
-              onChange={(e) => setHighlightOn(e.target.checked)}
-              className="accent-primary"
+              onCheckedChange={(v) => setHighlightOn(v === true)}
+              className="h-3.5 w-3.5"
             />
             Syntax highlighting
           </label>
@@ -123,23 +124,24 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
         <div
           ref={scrollRef}
           style={{ height }}
-          className="overflow-auto font-mono text-[12px] leading-5 px-3 py-2 bg-[#0b0e14]"
+          className="overflow-auto font-mono text-[12px] leading-5 px-3 py-2 bg-(--editor-bg)"
         >
           {ordered.length === 0 ? (
-            <div className="text-[#7f848e] text-xs">No queries executed yet.</div>
+            <div className="text-muted-foreground text-xs">No queries executed yet.</div>
           ) : (
             ordered.map((e) => {
-              const okColor = '#98c379';  // One Dark green
-              const errColor = '#e06c75'; // One Dark red
               const statusLabel = e.status === 'error' ? 'ERROR' : 'OK';
-              const statusColor = e.status === 'error' ? errColor : okColor;
+              const statusColor = e.status === 'error'
+                ? 'var(--destructive)'
+                : 'var(--syntax-success)';
+              const errColor = 'var(--destructive)';
               const isSql = detectDialect(e.statement) === 'sql';
               const canAssist = isSql && e.statement.trim().length > 0;
               const assistKind = e.status === 'error' ? 'fix' : 'explain';
               const assistLabel = assistKind === 'fix' ? 'Fix with AI' : 'Explain with AI';
               return (
                 <div key={e.id} className="group mb-2 border-l-2 pl-2 relative" style={{ borderColor: statusColor }}>
-                  <div className="text-[#7f848e] italic flex items-start justify-between gap-2">
+                  <div className="text-muted-foreground italic flex items-start justify-between gap-2">
                     <div className="min-w-0 wrap-break-word">
                       -- {formatTimestamp(e.timestamp)}
                       {e.durationMs !== undefined && <span className="opacity-80"> · {e.durationMs.toFixed(1)}ms</span>}
@@ -170,7 +172,7 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
                       ? highlight(e.statement, detectDialect(e.statement)).map((t, i) => (
                           <span key={i} className={tokenClass[t.kind]}>{t.text}</span>
                         ))
-                      : <span className="text-[#abb2bf]">{e.statement}</span>}
+                      : <span className="text-foreground">{e.statement}</span>}
                   </div>
                 </div>
               );

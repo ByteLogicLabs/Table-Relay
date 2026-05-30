@@ -208,6 +208,9 @@ async function ensureWired() {
     });
   });
   await ai.onToolCallFinished(ev => {
+    // Capture across the mutate boundary so we can persist after state updates.
+    let convId: string | undefined;
+    let toolSnapshot: { name: string; arguments: string; result?: string; denied?: boolean } | undefined;
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.toolCallId);
       if (!conn) return s;
@@ -224,8 +227,28 @@ async function ensureWired() {
           pendingApproval: undefined,
         },
       };
+      convId = chat.conversationId;
+      toolSnapshot = {
+        name:      prev.tool?.name ?? '?',
+        arguments: prev.tool?.arguments ?? '',
+        result:    ev.result,
+        denied:    prev.tool?.denied,
+      };
       return setChat(s, conn, { ...chat, messages: next });
     });
+    // Persist the tool bubble so it survives reloads / conversation switches.
+    if (convId && toolSnapshot) {
+      void ai.conversationSaveMessage(
+        convId,
+        ev.toolCallId,
+        'tool',
+        '',
+        {
+          toolCallsJson: JSON.stringify(toolSnapshot),
+          toolCallId:    ev.toolCallId,
+        },
+      ).catch(() => {});
+    }
   });
   await ai.onApprovalRequest(ev => {
     mutate(s => {
@@ -336,13 +359,41 @@ export async function loadConversation(conversationId: string) {
   if (!conv || !conv.messages) return;
   const connKey = conv.connectionId ?? state.focusedConnectionId ?? GLOBAL_KEY;
   const messages: ChatMessage[] = conv.messages
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .map(m => ({
-      id: m.id,
-      role: m.role as 'user' | 'assistant',
-      content: m.content,
-      streaming: false,
-    }));
+    .filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
+    .map(m => {
+      if (m.role === 'tool') {
+        // Rehydrate the tool bubble from the persisted JSON blob. If parsing
+        // fails (legacy row, corruption) we still surface the message with
+        // an "unknown tool" placeholder rather than dropping it silently.
+        let tool: ChatMessage['tool'] | undefined;
+        if (m.toolCallsJson) {
+          try {
+            const parsed = JSON.parse(m.toolCallsJson) as {
+              name?: string; arguments?: string; result?: string; denied?: boolean;
+            };
+            tool = {
+              name:      parsed.name      ?? '?',
+              arguments: parsed.arguments ?? '',
+              result:    parsed.result,
+              denied:    parsed.denied,
+            };
+          } catch { /* fall through to placeholder */ }
+        }
+        return {
+          id:        m.id,
+          role:      'tool' as const,
+          content:   m.content,
+          streaming: false,
+          tool:      tool ?? { name: '?', arguments: '' },
+        };
+      }
+      return {
+        id:        m.id,
+        role:      m.role as 'user' | 'assistant',
+        content:   m.content,
+        streaming: false,
+      };
+    });
   mutate(s => setChat(s, connKey, {
     ...chatOf(s, connKey),
     conversationId: conv.id,

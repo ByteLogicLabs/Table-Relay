@@ -1,6 +1,7 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
 import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Radio } from 'lucide-react';
+import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '../../components/ui/context-menu';
 import DataGrid from '../data-grid/data-grid';
@@ -103,6 +104,72 @@ export default function TabsShell({
       onNewQuery(activeConnections[0].id);
     }
   };
+
+  const navigateTab = useCallback((direction: 'previous' | 'next') => {
+    if (!activeTabId || tabs.length === 0) return;
+    const idx = tabs.findIndex(t => t.id === activeTabId);
+    if (idx === -1) return;
+    const nextIdx = direction === 'previous'
+      ? (idx - 1 + tabs.length) % tabs.length
+      : (idx + 1) % tabs.length;
+    onTabChange(tabs[nextIdx].id);
+  }, [activeTabId, onTabChange, tabs]);
+
+  // Window-level keyboard shortcuts. Scoped here (not inside the tabs map)
+  // so they fire regardless of which child surface has focus — closing /
+  // navigating tabs is a workspace-level affordance, not bound to any tab's
+  // own focus surface.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod) return;
+
+      // Cmd/Ctrl + PageUp / PageDown — previous / next tab. These are safe
+      // to fire from anywhere; no app surface uses PageUp/PageDown for
+      // editing actions, so we don't need a focus guard.
+      if (e.key === 'PageUp') {
+        e.preventDefault();
+        navigateTab('previous');
+        return;
+      }
+      if (e.key === 'PageDown') {
+        e.preventDefault();
+        navigateTab('next');
+        return;
+      }
+
+      // Cmd/Ctrl + W — close active tab. Skip when the user is editing text
+      // in Monaco / an input / a textarea / contentEditable surface, so we
+      // don't yank the tab out from under someone mid-typing. (Monaco
+      // renders into a `.monaco-editor` ancestor; input elements report
+      // their tag directly.)
+      if (e.key.toLowerCase() === 'w' && !e.shiftKey && activeTabId) {
+        const target = e.target as HTMLElement | null;
+        const tag = target?.tagName;
+        const inEditableSurface =
+          tag === 'INPUT' || tag === 'TEXTAREA' || target?.isContentEditable === true
+          || target?.closest('.monaco-editor') !== null;
+        if (inEditableSurface) return;
+        e.preventDefault();
+        onCloseTab(activeTabId);
+        return;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [activeTabId, navigateTab, onCloseTab]);
+
+  // Middle-click closes a tab — standard browser-tab convention. The auxclick
+  // event fires for non-primary mouse buttons, with `button === 1` meaning
+  // middle. Stop propagation so the parent's onClick (which would activate
+  // the tab) doesn't also run.
+  const handleTabAuxClick = useCallback((e: React.MouseEvent, tabId: string) => {
+    if (e.button === 1) {
+      e.preventDefault();
+      e.stopPropagation();
+      onCloseTab(tabId);
+    }
+  }, [onCloseTab]);
   
   if (tabs.length === 0) {
     if (noDatabaseSelected) {
@@ -138,7 +205,7 @@ export default function TabsShell({
           fixed-width left/right arrows and the new-tab button. The arrows and
           `+` sit outside the scroll region so they stay reachable no matter
           how many tabs are open. */}
-      <div className="h-10 border-b border-border bg-muted/30 flex items-center px-2 gap-1">
+      <div data-tauri-drag-region className="h-10 border-b border-border bg-muted/30 flex items-center px-2 gap-1">
         <Button
           variant="ghost"
           size="icon"
@@ -184,6 +251,11 @@ export default function TabsShell({
                       : 'text-muted-foreground hover:bg-muted/50'
                   }`}
                   onClick={() => onTabChange(tab.id)}
+                  onAuxClick={(e) => handleTabAuxClick(e, tab.id)}
+                  // Suppress the browser's "open in new tab" middle-click
+                  // behavior on links inside the tab content area too — but
+                  // mainly here to silence the default scroll-to-pan cursor.
+                  onMouseDown={(e) => { if (e.button === 1) e.preventDefault(); }}
                 >
                   {tab.type === 'data' && <TableIcon className="w-3.5 h-3.5 shrink-0" />}
                   {tab.type === 'structure' && <LayoutTemplate className="w-3.5 h-3.5 shrink-0" />}
@@ -221,6 +293,15 @@ export default function TabsShell({
                 </ContextMenuItem>
                 <ContextMenuItem onClick={() => onCloseTabs('all', tab.id)}>
                   Close All Tabs
+                </ContextMenuItem>
+                <ContextMenuSeparator />
+                <ContextMenuItem
+                  onClick={() => {
+                    void navigator.clipboard.writeText(tab.title);
+                    toast.success('Title copied');
+                  }}
+                >
+                  Copy Title
                 </ContextMenuItem>
                 <ContextMenuSeparator />
                 <ContextMenuItem onClick={handleCreateNewQuery}>New Query</ContextMenuItem>

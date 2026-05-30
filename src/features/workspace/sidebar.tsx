@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Database,
@@ -53,6 +53,10 @@ import {
   type ViewInfo,
 } from '../../lib/db';
 import DbIcon from '../../components/db-icon';
+import { DestructiveConfirmDialog } from '../../components/destructive-confirm-dialog';
+import { useMultiSelection } from '../../hooks/use-multi-selection';
+import { getClickIntent, getKeyIntent } from '../../lib/click-intent';
+import { dialectFromManifest } from '../data-grid/editor-kinds';
 
 interface SidebarProps {
   focusedConnection: ConnectionProfile | null;
@@ -106,6 +110,11 @@ interface SidebarProps {
 
 type SectionKey = 'tables' | 'views' | 'routines';
 
+function quoteIdentForDialect(ident: string, dialect: 'mysql' | 'postgres' | 'sqlite' | 'generic' | 'none'): string {
+  if (dialect === 'mysql') return '`' + ident.replace(/`/g, '``') + '`';
+  return '"' + ident.replace(/"/g, '""') + '"';
+}
+
 function toTitleCaseLabel(raw: string): string {
   // Display-only prettifier for DB names in the sidebar header.
   // Keeps underlying schema/database identifiers untouched for queries.
@@ -153,6 +162,14 @@ export default function Sidebar({
     views: false,
     routines: false,
   });
+
+  // Destructive confirmation state for table drops / truncates triggered
+  // from the sidebar. Single source of truth so context menu, keyboard
+  // shortcut, and (future) bulk action bar all route through the same
+  // dialog component.
+  type TableDestructiveAction = { kind: 'drop' | 'truncate'; tableNames: string[] };
+  const [tableConfirm, setTableConfirm] = useState<TableDestructiveAction | null>(null);
+  const tablesContainerRef = useRef<HTMLDivElement>(null);
 
   const connState = useConnections();
   const conn = focusedConnection;
@@ -363,6 +380,182 @@ export default function Sidebar({
   const fViews = q ? views.filter(v => v.name.toLowerCase().includes(q)) : views;
   const fRoutines = q ? routines.filter(r => r.name.toLowerCase().includes(q)) : routines;
 
+  // Multi-selection over the visible (filtered) tables list. Selection
+  // resets implicitly when the orderedIds() function returns a new array
+  // — switching connection/database produces a different `tables` ref,
+  // so stale selections never leak across contexts (we also clear
+  // explicitly below).
+  const orderedTableIds = useCallback(() => fTables.map(t => t.name), [fTables]);
+  const tableSelection = useMultiSelection(orderedTableIds);
+
+  // Drop selection when the visible context changes (different connection,
+  // database, or schema). Without this, the selectedIds Set would still
+  // hold names from the previous schema and bulk drop would target ghosts.
+  useEffect(() => {
+    tableSelection.clearSelection();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conn?.id, schemaForActions]);
+
+  const dialect = useMemo(
+    () => dialectFromManifest(activeManifest?.capabilities ?? null),
+    [activeManifest],
+  );
+  const supportsDropTable = activeManifest?.capabilities.dropTable ?? false;
+  const supportsDdl = dialect !== 'none';
+
+  const buildDropSql = useCallback((tableNames: string[]): string => {
+    return tableNames
+      .map(name => `DROP TABLE ${quoteIdentForDialect(schemaForActions, dialect)}.${quoteIdentForDialect(name, dialect)};`)
+      .join('\n');
+  }, [dialect, schemaForActions]);
+
+  const buildTruncateSql = useCallback((tableNames: string[]): string => {
+    return tableNames
+      .map(name => `TRUNCATE TABLE ${quoteIdentForDialect(schemaForActions, dialect)}.${quoteIdentForDialect(name, dialect)};`)
+      .join('\n');
+  }, [dialect, schemaForActions]);
+
+  const performTableDestructive = useCallback(async () => {
+    if (!conn || !tableConfirm) return;
+    const sql = tableConfirm.kind === 'drop'
+      ? buildDropSql(tableConfirm.tableNames)
+      : buildTruncateSql(tableConfirm.tableNames);
+    try {
+      await db.runQuery(conn.id, sql);
+      toast.success(
+        `${tableConfirm.kind === 'drop' ? 'Dropped' : 'Truncated'} ${tableConfirm.tableNames.length} ${tableConfirm.tableNames.length === 1 ? 'table' : 'tables'}`,
+      );
+      tableSelection.clearSelection();
+      // Trigger the same refresh path that ⌘+R uses so the sidebar
+      // re-fetches schemas/views/routines after the structural change.
+      window.dispatchEvent(new CustomEvent('dbtable:reload'));
+    } catch (err) {
+      toast.error(`${tableConfirm.kind === 'drop' ? 'Drop' : 'Truncate'} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [buildDropSql, buildTruncateSql, conn, tableConfirm, tableSelection]);
+
+  const requestDropSelected = useCallback((triggerName?: string) => {
+    const names = tableSelection.selectedIds.size > 0
+      && (triggerName === undefined || tableSelection.selectedIds.has(triggerName))
+      ? [...tableSelection.selectedIds]
+      : triggerName ? [triggerName] : [];
+    if (names.length === 0) return;
+    setTableConfirm({ kind: 'drop', tableNames: names });
+  }, [tableSelection]);
+
+  const requestTruncateSelected = useCallback((triggerName?: string) => {
+    const names = tableSelection.selectedIds.size > 0
+      && (triggerName === undefined || tableSelection.selectedIds.has(triggerName))
+      ? [...tableSelection.selectedIds]
+      : triggerName ? [triggerName] : [];
+    if (names.length === 0) return;
+    setTableConfirm({ kind: 'truncate', tableNames: names });
+  }, [tableSelection]);
+
+  const handleTableRowClick = useCallback((e: React.MouseEvent, name: string) => {
+    // Ensure the keyboard container is focused so subsequent arrow / Enter
+    // / Cmd+Delete keys reach our handler. Without this, modifier-clicks
+    // would change selection silently and the user would have to click
+    // again before keyboard nav worked.
+    tablesContainerRef.current?.focus();
+    const intent = getClickIntent(e);
+    switch (intent.kind) {
+      case 'open':
+        tableSelection.selectOnly(name);
+        if (conn) onOpenTable(conn.id, schemaForActions, name);
+        break;
+      case 'toggle':
+        tableSelection.toggleSelection(name);
+        break;
+      case 'range':
+        tableSelection.selectRange(name);
+        break;
+      case 'context':
+        if (!tableSelection.selectedIds.has(name)) tableSelection.selectOnly(name);
+        break;
+    }
+  }, [conn, onOpenTable, schemaForActions, tableSelection]);
+
+  const handleTableRowContextMenu = useCallback((name: string) => {
+    if (!tableSelection.selectedIds.has(name)) tableSelection.selectOnly(name);
+  }, [tableSelection]);
+
+  const moveTableFocus = useCallback((direction: 'up' | 'down') => {
+    const ids = orderedTableIds();
+    if (ids.length === 0) return;
+    const current = tableSelection.focusedId ?? tableSelection.anchorId ?? ids[0];
+    const idx = ids.indexOf(current);
+    const nextIdx = direction === 'up'
+      ? Math.max(0, idx - 1)
+      : Math.min(ids.length - 1, idx + 1);
+    tableSelection.selectOnly(ids[nextIdx]);
+  }, [orderedTableIds, tableSelection]);
+
+  const handleTablesKeyDown = useCallback((e: React.KeyboardEvent) => {
+    const intent = getKeyIntent(e);
+    if (!intent) return;
+
+    switch (intent.kind) {
+      case 'escape':
+        if (tableSelection.selectedIds.size > 0) {
+          e.preventDefault();
+          tableSelection.clearSelection();
+        }
+        break;
+      case 'open':
+        if (tableSelection.focusedId && conn) {
+          e.preventDefault();
+          onOpenTable(conn.id, schemaForActions, tableSelection.focusedId);
+        }
+        break;
+      case 'move':
+        if (intent.direction === 'up' || intent.direction === 'down') {
+          e.preventDefault();
+          moveTableFocus(intent.direction);
+        }
+        break;
+      case 'extend':
+        if (tableSelection.focusedId) {
+          e.preventDefault();
+          const ids = orderedTableIds();
+          const idx = ids.indexOf(tableSelection.focusedId);
+          const nextIdx = intent.direction === 'up'
+            ? Math.max(0, idx - 1)
+            : Math.min(ids.length - 1, idx + 1);
+          tableSelection.selectRange(ids[nextIdx]);
+        }
+        break;
+      case 'select-all':
+        e.preventDefault();
+        tableSelection.selectAll(orderedTableIds());
+        break;
+      case 'copy':
+        if (tableSelection.selectedIds.size > 0) {
+          e.preventDefault();
+          const names = orderedTableIds().filter(id => tableSelection.selectedIds.has(id));
+          void navigator.clipboard.writeText(names.join('\n'));
+          toast.success(`Copied ${names.length} ${names.length === 1 ? 'name' : 'names'}`);
+        }
+        break;
+      case 'remove-view':
+        // Plain Delete in the table list is intentionally a no-op. The
+        // table list's "view" is the database itself — there's nothing
+        // to remove from view without dropping the table. Spec: plain
+        // Delete must never reach the database.
+        break;
+      case 'remove-destructive':
+        if (supportsDropTable && tableSelection.selectedIds.size > 0) {
+          e.preventDefault();
+          requestDropSelected();
+        }
+        break;
+      case 'refresh':
+        e.preventDefault();
+        window.dispatchEvent(new CustomEvent('dbtable:reload'));
+        break;
+    }
+  }, [conn, moveTableFocus, onOpenTable, orderedTableIds, requestDropSelected, schemaForActions, supportsDropTable, tableSelection]);
+
   // Helpers for deciding whether a sidebar row matches the active tab.
   // Scoped to the connection + database the sidebar is currently showing,
   // so pins on different servers / databases can't falsely highlight.
@@ -452,7 +645,7 @@ export default function Sidebar({
 
   if (!conn) {
     return (
-      <div className="w-64 shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border/50 items-center justify-center gap-3 text-xs text-muted-foreground px-6 text-center">
+      <div className="w-64 shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border items-center justify-center gap-3 text-xs text-muted-foreground px-6 text-center">
         <div>Connect to a server to start.</div>
         {connections.length > 0 ? (
           <Button size="sm" variant="outline" onClick={() => setConnPickerOpen(true)}>
@@ -478,9 +671,9 @@ export default function Sidebar({
     setCollapsed(c => ({ ...c, [k]: !c[k] }));
 
   return (
-    <div className="w-64 shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border/50">
+    <div className="w-64 shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border">
       {/* Quick-action toolbar */}
-      <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border/50">
+      <div data-tauri-drag-region className="flex items-center gap-1 px-2 py-1.5 border-b border-border/50">
         <Button
           variant="ghost"
           size="icon"
@@ -688,20 +881,43 @@ export default function Sidebar({
                 onAdd={onNewTable ? () => onNewTable(conn.id, schemaForActions) : undefined}
                 addTitle="New table"
               />
-              {!collapsed.tables && fTables.map(t => {
+              {!collapsed.tables && (
+                <div
+                  ref={tablesContainerRef}
+                  onKeyDown={handleTablesKeyDown}
+                  tabIndex={-1}
+                  role="listbox"
+                  aria-multiselectable="true"
+                  aria-label="Tables"
+                  className="outline-none"
+                >
+                  {fTables.map(t => {
                 const active = matchesActive('table', t.name);
+                const isSelected = tableSelection.selectedIds.has(t.name);
+                const isFocused = tableSelection.focusedId === t.name;
+                const inMultiSelection = isSelected && tableSelection.selectedIds.size > 1;
+                const selectionCount = tableSelection.selectedIds.size;
                 return (
                 <ContextMenu key={`t-${t.name}`}>
                   <ContextMenuTrigger>
-                    <button
-                      className={rowCls(active)}
-                      onClick={() => onOpenTable(conn.id, schemaForActions, t.name)}
+                    <div
+                      role="option"
+                      aria-selected={isSelected}
+                      data-focused={isFocused || undefined}
+                      tabIndex={-1}
+                      className={
+                        rowCls(active) +
+                        (isSelected && !active ? ' bg-primary/10' : '') +
+                        (isFocused ? ' ring-1 ring-inset ring-primary/40' : '')
+                      }
+                      onClick={(e) => handleTableRowClick(e, t.name)}
+                      onContextMenu={() => handleTableRowContextMenu(t.name)}
                     >
                       <TableIcon className={iconCls(active)} />
                       <span className="flex-1 truncate">{t.name}</span>
-                    </button>
+                    </div>
                   </ContextMenuTrigger>
-                  <ContextMenuContent className="w-48">
+                  <ContextMenuContent className="w-52">
                     <ContextMenuItem onClick={() => onOpenTable(conn.id, schemaForActions, t.name)}>
                       Open data
                     </ContextMenuItem>
@@ -720,13 +936,38 @@ export default function Sidebar({
                       </>
                     )}
                     <ContextMenuSeparator />
-                    <ContextMenuItem onClick={() => { void navigator.clipboard.writeText(t.name); toast.success('Name copied'); }}>
-                      Copy name
+                    <ContextMenuItem
+                      onClick={() => {
+                        const names = inMultiSelection ? [...tableSelection.selectedIds] : [t.name];
+                        void navigator.clipboard.writeText(names.join('\n'));
+                        toast.success(names.length === 1 ? 'Name copied' : `Copied ${names.length} names`);
+                      }}
+                    >
+                      {inMultiSelection ? `Copy ${selectionCount} names` : 'Copy name'}
                     </ContextMenuItem>
+                    {supportsDdl && (
+                      <>
+                        <ContextMenuSeparator />
+                        <ContextMenuItem
+                          onClick={() => requestTruncateSelected(t.name)}
+                        >
+                          {inMultiSelection ? `Truncate ${selectionCount} tables…` : 'Truncate table…'}
+                        </ContextMenuItem>
+                        {supportsDropTable && (
+                          <ContextMenuItem
+                            onClick={() => requestDropSelected(t.name)}
+                          >
+                            {inMultiSelection ? `Drop ${selectionCount} tables…` : 'Drop table…'}
+                          </ContextMenuItem>
+                        )}
+                      </>
+                    )}
                   </ContextMenuContent>
                 </ContextMenu>
                 );
               })}
+                </div>
+              )}
 
               {supportsViews && <Section
                 label="views"
@@ -843,6 +1084,19 @@ export default function Sidebar({
           )}
         </div>
       </ScrollArea>
+
+      <DestructiveConfirmDialog
+        open={tableConfirm !== null}
+        onOpenChange={(o) => { if (!o) setTableConfirm(null); }}
+        action={tableConfirm?.kind === 'truncate' ? 'Truncate' : 'Drop'}
+        itemNoun="table"
+        itemNames={tableConfirm?.tableNames ?? []}
+        context={schemaForActions ? `in ${schemaForActions}` : undefined}
+        warning={tableConfirm?.kind === 'truncate'
+          ? 'All rows will be removed. This cannot be undone.'
+          : 'The table and all its data will be removed. This cannot be undone.'}
+        onConfirm={() => { void performTableDestructive(); }}
+      />
     </div>
   );
 }

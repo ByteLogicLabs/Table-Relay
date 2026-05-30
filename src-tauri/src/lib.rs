@@ -102,8 +102,13 @@ pub fn run() {
             // carries About / Quit. Without it the app has no Quit entry.
             #[cfg(target_os = "macos")]
             {
-                let app_menu = SubmenuBuilder::new(handle, "db-table")
+                let open_settings = MenuItemBuilder::with_id("app_settings", "Settings…")
+                    .accelerator("CmdOrCtrl+,")
+                    .build(handle)?;
+                let app_menu = SubmenuBuilder::new(handle, "Table Relay")
                     .item(&PredefinedMenuItem::about(handle, None, None)?)
+                    .separator()
+                    .item(&open_settings)
                     .separator()
                     .item(&PredefinedMenuItem::services(handle, None)?)
                     .separator()
@@ -131,11 +136,17 @@ pub fn run() {
             app.on_menu_event(move |app_handle, event| {
                 let id = event.id().as_ref().to_string();
                 crate::log::write_line("menu", &format!("click: id={id}"));
-                if let Some(action) = id.strip_prefix("file_") {
-                    let channel = format!("menu-file-{action}");
-                    match app_handle.emit(&channel, ()) {
-                        Ok(()) => crate::log::write_line("menu", &format!("emitted: {channel}")),
-                        Err(e) => crate::log::write_line("menu", &format!("emit failed: {channel}: {e}")),
+                let channel = if let Some(action) = id.strip_prefix("file_") {
+                    Some(format!("menu-file-{action}"))
+                } else if let Some(action) = id.strip_prefix("app_") {
+                    Some(format!("menu-app-{action}"))
+                } else {
+                    None
+                };
+                if let Some(ch) = channel {
+                    match app_handle.emit(&ch, ()) {
+                        Ok(()) => crate::log::write_line("menu", &format!("emitted: {ch}")),
+                        Err(e) => crate::log::write_line("menu", &format!("emit failed: {ch}: {e}")),
                     }
                 }
             });

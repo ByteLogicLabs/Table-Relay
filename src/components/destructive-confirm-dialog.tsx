@@ -1,0 +1,84 @@
+import { Button } from './ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from './ui/dialog';
+
+interface Props {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  /** Action verb shown in title and primary button, e.g. "Drop", "Delete", "Truncate". */
+  action: string;
+  /** Singular noun for what is being acted on, e.g. "table", "row", "database", "conversation". */
+  itemNoun: string;
+  /** Names of the items being affected. Used for both the count and the visible list. */
+  itemNames: string[];
+  /** Optional context line shown above the names list, e.g. "from public.users" or "in connection production". */
+  context?: string;
+  /** Extra warning text below the names list. */
+  warning?: string;
+  onConfirm: () => void;
+}
+
+export function DestructiveConfirmDialog({
+  open,
+  onOpenChange,
+  action,
+  itemNoun,
+  itemNames,
+  context,
+  warning,
+  onConfirm,
+}: Props) {
+  const count = itemNames.length;
+  const pluralNoun = count === 1 ? itemNoun : `${itemNoun}s`;
+  const title = `${action} ${count} ${pluralNoun}?`;
+  const buttonLabel = `${action} ${count} ${pluralNoun}`;
+  const visibleNames = itemNames.slice(0, 20);
+  const overflow = count - visibleNames.length;
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle className="text-destructive">{title}</DialogTitle>
+          {context && <DialogDescription>{context}</DialogDescription>}
+        </DialogHeader>
+        <div className="max-h-48 overflow-auto rounded bg-muted p-2 text-xs font-mono">
+          <ul className="space-y-0.5">
+            {visibleNames.map((name) => (
+              <li key={name} className="truncate">{name}</li>
+            ))}
+          </ul>
+          {overflow > 0 && (
+            <div className="mt-1 text-muted-foreground">
+              …and {overflow} more
+            </div>
+          )}
+        </div>
+        {warning && (
+          <p className="text-xs text-muted-foreground">{warning}</p>
+        )}
+        <DialogFooter>
+          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              onConfirm();
+              onOpenChange(false);
+            }}
+            autoFocus
+          >
+            {buttonLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}

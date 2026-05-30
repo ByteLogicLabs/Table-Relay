@@ -9,7 +9,15 @@ import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/pop
 import { Checkbox } from '../../components/ui/checkbox';
 import { useAi, start, end, sendMessage, stopStreaming, syncStatus, approveToolCall, newChat, setFocusedConnection, currentChat, type ChatMessage as StoreChatMessage, type ChatPrefill } from '../../state/ai';
 import { ai, isAiError, type AiProviderKind, type ChatFocus, type LocalModelInfo, type DownloadDoneEvent, type LlamaRuntimeStatus, type AutoApprovalFlags } from '../../lib/ai';
+import {
+  type CredentialProfile,
+  getActiveCredentialId,
+  loadCredentials,
+  setActiveCredentialId,
+} from '../../lib/ai-credentials';
+import { Settings as SettingsIcon } from 'lucide-react';
 import { markdownClass, renderMarkdown } from '../../lib/markdown';
+import { highlight, tokenClass } from '../../lib/highlight';
 import { Trash2, Download as DownloadIcon, StopCircle, Copy, CheckCircle2, ExternalLink, Wrench, Check as CheckIcon, X as XIcon } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -121,6 +129,7 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
         <div className="flex items-center gap-2 min-w-0">
           <Sparkles className="w-4 h-4 text-primary shrink-0" />
           <span className="text-sm font-medium truncate">AI Chat</span>
+          {showActive && <ActiveCredentialPicker />}
           {showActive && <ActiveModelPicker providerKind={s.providerKind} model={s.model} />}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
@@ -132,15 +141,9 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7"
-                title="New chat — clears messages, keeps session"
+                title="New chat — previous conversation is saved in history"
                 aria-label="New chat"
-                onClick={() => {
-                  if (chat.messages.length > 0) {
-                    const ok = window.confirm('Start a new chat? The current conversation will be cleared.');
-                    if (!ok) return;
-                  }
-                  newChat();
-                }}
+                onClick={() => newChat()}
               >
                 <Plus className="w-3.5 h-3.5" />
               </Button>
@@ -148,19 +151,8 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
                 variant="ghost"
                 size="sm"
                 className="h-7 text-[10px] uppercase tracking-wide text-muted-foreground"
-                title="Switch provider or model. Ends the current session (zeroes keys, unloads local model). Saved credentials prefill on the next Start."
-                onClick={() => {
-                  // Any non-empty transcript anywhere should still warn —
-                  // `end()` nukes everything.
-                  const anyMessages = Object.values(s.byConnection).some(c => c.messages.length > 0);
-                  if (anyMessages) {
-                    const ok = window.confirm(
-                      'End this chat and pick a different provider / model?\n\nThe current session is closed (API key zeroed, local model unloaded). Saved credentials will prefill when you Start again.'
-                    );
-                    if (!ok) return;
-                  }
-                  void end();
-                }}
+                title="End the session — closes the current chat and returns to credential picker. Conversations remain saved."
+                onClick={() => void end()}
               >
                 End
               </Button>
@@ -351,6 +343,156 @@ const PERMISSION_GROUPS: Array<{ label: string; permissions: Permission[] }> = [
 
 const PERMISSIONS: Permission[] = PERMISSION_GROUPS.flatMap(g => g.permissions);
 
+function openSettings() {
+  window.dispatchEvent(new CustomEvent('dbtable:open-settings'));
+}
+
+// Pretty labels for AI tool calls. Falls back to a generic snake → Title
+// conversion for unknown tools so new backends still get a sensible label.
+const TOOL_LABELS: Record<string, string> = {
+  write_query_tab:   'Write Query Tab',
+  call_query:        'Run Query',
+  list_schemas:      'List Schemas',
+  list_tables:       'List Tables',
+  describe_table:    'Describe Table',
+  publish_notify:    'Publish Notification',
+  subscribe_channel: 'Subscribe Channel',
+};
+function prettyToolName(name: string): string {
+  if (TOOL_LABELS[name]) return TOOL_LABELS[name];
+  return name
+    .split('_')
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
+
+function CopyButton({ text, className = '' }: { text: string; className?: string }) {
+  const [copied, setCopied] = useState(false);
+  const onCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      toast.error('Copy failed');
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={onCopy}
+      className={`flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground bg-background/60 hover:bg-background border border-border rounded px-1.5 py-0.5 transition-colors ${className}`}
+      title={copied ? 'Copied!' : 'Copy'}
+    >
+      {copied ? <CheckIcon className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+      {copied ? 'Copied' : 'Copy'}
+    </button>
+  );
+}
+
+function HighlightedSql({ sql, className }: { sql: string; className?: string }) {
+  const tokens = highlight(sql, 'sql');
+  return (
+    <div className="relative group/sql">
+      <pre className={`${className ?? ''} select-text`}>
+        {tokens.map((t, i) => (
+          <span key={i} className={tokenClass[t.kind]}>{t.text}</span>
+        ))}
+      </pre>
+      <CopyButton
+        text={sql}
+        className="absolute top-1 right-1 opacity-0 group-hover/sql:opacity-100 focus:opacity-100"
+      />
+    </div>
+  );
+}
+
+/**
+ * Switch between saved credential profiles from the chat header. Calls
+ * `end()` + `start()` so the active session takes the new credential's
+ * provider/key/baseUrl. The model picker still operates within the active
+ * credential's provider.
+ */
+function ActiveCredentialPicker() {
+  const [credentials, setCredentials] = useState<CredentialProfile[]>(() => loadCredentials());
+  const [activeId, setActiveId]       = useState<string | null>(() => getActiveCredentialId());
+  const [switching, setSwitching]     = useState(false);
+  const [opened, setOpened]           = useState(false);
+
+  // Refresh on each open so changes from the Settings dialog are picked up
+  // without forcing a full chat-panel remount.
+  useEffect(() => {
+    if (!opened) return;
+    setCredentials(loadCredentials());
+    setActiveId(getActiveCredentialId());
+  }, [opened]);
+
+  const swap = async (id: string) => {
+    const next = credentials.find(c => c.id === id);
+    if (!next || switching || id === activeId) return;
+    setSwitching(true);
+    try {
+      await end();
+      await start({
+        kind:    next.kind,
+        model:   next.model,
+        apiKey:  next.apiKey,
+        baseUrl: next.baseUrl,
+      });
+      setActiveCredentialId(next.id);
+      setActiveId(next.id);
+      toast.success(`Switched to ${next.name}`);
+    } catch (e) {
+      toast.error(isAiError(e) ? e.message : String(e));
+    } finally {
+      setSwitching(false);
+    }
+  };
+
+  const active = credentials.find(c => c.id === activeId);
+  const label  = active ? active.name : '(unsaved)';
+
+  return (
+    <Select
+      value={activeId ?? ''}
+      onValueChange={swap}
+      onOpenChange={setOpened}
+      disabled={switching}
+    >
+      <SelectTrigger
+        size="sm"
+        className="h-7 text-[11px] font-medium text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
+        title="Switch credential — keeps chat open"
+      >
+        {switching
+          ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> switching…</>
+          : <SelectValue placeholder={label}>{label}</SelectValue>}
+      </SelectTrigger>
+      <SelectContent>
+        {credentials.length === 0 && (
+          <div className="px-2 py-1 text-xs text-muted-foreground">No saved credentials</div>
+        )}
+        {credentials.map(c => (
+          <SelectItem key={c.id} value={c.id} className="text-xs">
+            <span className="font-medium">{c.name}</span>
+            <span className="text-muted-foreground ml-2">· {c.kind}</span>
+          </SelectItem>
+        ))}
+        <div className="border-t border-border mt-1 pt-1">
+          <button
+            type="button"
+            onClick={openSettings}
+            className="w-full text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded flex items-center gap-2"
+          >
+            <SettingsIcon className="w-3 h-3" /> Manage credentials in Settings…
+          </button>
+        </div>
+      </SelectContent>
+    </Select>
+  );
+}
+
 function ActiveModelPicker({
   providerKind,
   model,
@@ -437,7 +579,7 @@ function ActiveModelPicker({
     >
       <SelectTrigger
         size="sm"
-        className="h-6 text-[10px] uppercase tracking-wide text-muted-foreground bg-muted border-transparent hover:bg-muted/70 px-1.5 py-0.5 rounded font-mono"
+        className="h-7 text-[11px] font-mono text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
         title="Switch model — keeps credentials, clears history"
       >
         {swapping
@@ -465,151 +607,46 @@ function ActiveModelPicker({
 
 function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPrefill | null; prefillTick: number }) {
   const s = useAi();
-  const firstAvailable = PROVIDERS.find(p => p.available)?.kind ?? 'openai';
-  const [selected, setSelected] = useState<AiProviderKind>(firstAvailable);
-
-  // On mount, pick whichever provider was most recently used — that's almost
-  // always what the user wants after clicking Switch/End. Falls back to the
-  // first available provider if nothing is saved yet.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const list = await ai.settingsList();
-        if (cancelled || list.length === 0) return;
-        const mostRecent = [...list].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0];
-        if (mostRecent && PROVIDERS.some(p => p.kind === mostRecent.kind)) {
-          setSelected(mostRecent.kind);
-        }
-      } catch { /* best-effort */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-  const [apiKey, setApiKey] = useState('');
-  const [model, setModel] = useState('');
-  const [baseUrl, setBaseUrl] = useState('http://localhost:11434/v1');
-  const [showKey, setShowKey] = useState(false);
-  const [hasSaved, setHasSaved] = useState(false);
-  const [models, setModels] = useState<string[]>([]);
-  const [modelsError, setModelsError] = useState<string | null>(null);
-  const [loadingModels, setLoadingModels] = useState(false);
   const starting = s.status === 'starting';
-  const provider = PROVIDERS.find(p => p.kind === selected)!;
 
-  // Load saved credentials for the picked provider. Run on every selection
-  // change so switching provider repopulates fields from store.db, and falls
-  // back to sensible defaults when nothing is saved.
+  // Reload credentials when the user returns from Settings — listen for the
+  // open/close cycle of the settings dialog by polling localStorage on focus
+  // and listening to the open-settings event isn't enough since settings
+  // closes silently. A `storage` event would only fire across tabs, so we
+  // refresh on mount + on a custom `dbtable:credentials-changed` event the
+  // settings dialog can fire (cheap if not wired yet — just reads localStorage).
+  const [credentials, setCredentials] = useState<CredentialProfile[]>(() => loadCredentials());
+  const reload = () => setCredentials(loadCredentials());
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      let saved: Awaited<ReturnType<typeof ai.settingsGet>> = null;
-      try {
-        saved = await ai.settingsGet(selected);
-      } catch { /* ignore — prefill is best-effort */ }
-      if (cancelled) return;
-
-      if (saved) {
-        setHasSaved(true);
-        setApiKey(saved.apiKey ?? '');
-        // Base URL: keep the saved value for openai_compatible; hosted
-        // providers don't use it so preserve the current field value.
-        if (provider.needsBaseUrl && saved.baseUrl) setBaseUrl(saved.baseUrl);
-        setModel(saved.model ?? (selected === 'llama_local' ? '' : (provider.defaultModel ?? provider.kind)));
-      } else {
-        setHasSaved(false);
-        setApiKey('');
-        setModel(selected === 'llama_local' ? '' : (provider.defaultModel ?? provider.kind));
-        if (provider.needsBaseUrl) setBaseUrl('http://localhost:11434/v1');
-      }
-      setModels([]);
-      setModelsError(null);
-    })();
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selected]);
-
-  const handleForget = async () => {
-    try {
-      await ai.settingsForget(selected);
-      setHasSaved(false);
-      setApiKey('');
-      setModel(selected === 'llama_local' ? '' : (provider.defaultModel ?? provider.kind));
-      if (provider.needsBaseUrl) setBaseUrl('http://localhost:11434/v1');
-      toast.success('Saved credentials cleared for this provider');
-    } catch (e) {
-      toast.error(isAiError(e) ? e.message : String(e));
-    }
-  };
-
-  const canLoadModels = provider.available
-    && selected !== 'llama_local'
-    && (!provider.needsKey || apiKey.trim().length > 0)
-    && (!provider.needsBaseUrl || baseUrl.trim().length > 0);
-
-  const loadModels = async (opts: { silent?: boolean } = {}) => {
-    if (!canLoadModels) return;
-    setLoadingModels(true);
-    setModelsError(null);
-    try {
-      const list = await ai.listModels(selected, {
-      apiKey: (provider.needsKey || (provider.optionalKey && apiKey.trim().length > 0)) ? apiKey : undefined,
-        baseUrl: provider.needsBaseUrl ? baseUrl.trim() : undefined,
-      });
-      // Promote the current model to the list so the Select shows it even if
-      // the provider doesn't return an exact match (e.g. OpenRouter's
-      // `openai/gpt-4o-mini` vs. our default `gpt-4o-mini`).
-      const next = model && !list.includes(model) ? [model, ...list] : list;
-      setModels(next);
-      if (next.length === 0) {
-        setModelsError('Provider returned no models');
-      }
-    } catch (e) {
-      const msg = isAiError(e) ? e.message : String(e);
-      setModelsError(msg);
-      // Auto-fetches run on every keystroke — don't toast on those, but
-      // leave the inline error so the user can see what went wrong.
-      if (!opts.silent) toast.error(msg);
-    } finally {
-      setLoadingModels(false);
-    }
-  };
-
-  // Auto-fetch the model list once the user has supplied the required
-  // credentials. Debounced so typing a key doesn't fire ten requests in a
-  // row. Only runs when the list is empty — once we have results, the user
-  // drives refreshes via the button.
-  useEffect(() => {
-    if (!canLoadModels || models.length > 0 || loadingModels) return;
-    const handle = setTimeout(() => { void loadModels({ silent: true }); }, 450);
-    return () => clearTimeout(handle);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [canLoadModels, apiKey, baseUrl, selected, models.length]);
-
-  const canStart = !starting
-    && model.trim().length > 0
-    && (!provider.needsKey || apiKey.trim().length > 0)
-    && (!provider.needsBaseUrl || baseUrl.trim().length > 0);
-
-  const handleStart = async () => {
-    const input = {
-      kind: selected,
-      model: model.trim(),
-      apiKey: (provider.needsKey || (provider.optionalKey && apiKey.trim().length > 0)) ? apiKey : undefined,
-      baseUrl: provider.needsBaseUrl ? baseUrl.trim() : undefined,
+    window.addEventListener('focus', reload);
+    window.addEventListener('dbtable:credentials-changed', reload);
+    return () => {
+      window.removeEventListener('focus', reload);
+      window.removeEventListener('dbtable:credentials-changed', reload);
     };
+  }, []);
+
+  const handlePick = async (cred: CredentialProfile) => {
     try {
-      await start(input);
-      // Zero out the key in state the moment the session owns it — the Rust
-      // side keeps the authoritative copy inside Zeroizing<String>.
-      setApiKey('');
+      await start({
+        kind:    cred.kind,
+        model:   cred.model,
+        apiKey:  cred.apiKey,
+        baseUrl: cred.baseUrl,
+      });
+      setActiveCredentialId(cred.id);
+      toast.success(`${cred.name} activated`);
     } catch (e) {
-      // If a leftover session is still live (e.g. the UI was reloaded after
-      // a crash), end it and retry once so the user isn't stuck.
       if (isAiError(e) && e.kind === 'SessionAlreadyActive') {
         try {
           await end();
-          await start(input);
-          setApiKey('');
+          await start({
+            kind:    cred.kind,
+            model:   cred.model,
+            apiKey:  cred.apiKey,
+            baseUrl: cred.baseUrl,
+          });
+          setActiveCredentialId(cred.id);
           return;
         } catch (e2) {
           toast.error(isAiError(e2) ? e2.message : String(e2));
@@ -620,32 +657,9 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
     }
   };
 
-  const handleApiKeyInput = (raw: string) => {
-    // Gemini users often paste a full Google URL containing `?key=...`.
-    if (selected === 'gemini') {
-      const parsed = parseKeyFromUrlLike(raw);
-      if (parsed) {
-        setApiKey(parsed);
-        return;
-      }
-    }
-    setApiKey(raw);
-  };
-
-  const parseGeminiUrlIntoKey = (raw: string) => {
-    if (selected !== 'gemini') return;
-    const parsed = parseKeyFromUrlLike(raw);
-    if (!parsed) return;
-    setApiKey(parsed);
-    toast.success('Gemini key extracted from URL');
-  };
-
   // Banner when a Fix / Explain / Generate was triggered without an active
-  // session — tells the user to pick a provider + Start so the queued action
-  // can fire.
+  // session — tells the user to pick a credential so the queued action can fire.
   const queued = pendingPrefill;
-  // Re-read on tick so a fresh prefill re-surfaces the banner after the user
-  // dismisses the previous one by clicking Start.
   void prefillTick;
   const queuedLabel = queued
     ? queued.kind === 'fix' ? 'Fix Query'
@@ -659,8 +673,13 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
       <div className="text-center text-muted-foreground text-xs">
         <Sparkles className="w-8 h-8 opacity-50 mx-auto mb-2" />
         <p className="font-medium text-sm text-foreground">Start an AI chat</p>
-        <p className="mt-1 opacity-80">Pick a provider to begin. Nothing is persisted.</p>
+        <p className="mt-1 opacity-80">
+          {credentials.length > 0
+            ? 'Pick a credential to begin.'
+            : 'Add a provider credential in Settings to get started.'}
+        </p>
       </div>
+
       {queuedLabel && (
         <div className="flex items-start gap-2 px-3 py-2 rounded-md border border-primary/30 bg-primary/10 text-primary text-xs">
           <Sparkles className="w-4 h-4 shrink-0 mt-0.5" />
@@ -670,149 +689,37 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
         </div>
       )}
 
-      <div className="space-y-1">
-        <label className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">Provider</label>
-        <Select value={selected} onValueChange={(v) => setSelected(v as AiProviderKind)}>
-          <SelectTrigger size="sm" className="h-8 text-xs w-full">
-            <SelectValue placeholder="Pick a provider" />
-          </SelectTrigger>
-          <SelectContent>
-            {PROVIDERS.map(p => (
-              <SelectItem
-                key={p.kind}
-                value={p.kind}
-                disabled={!p.available}
-                className="text-xs"
-              >
-                <span className="font-medium">{p.label}</span>
-                <span className="text-muted-foreground ml-2">· {p.sublabel}</span>
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-      </div>
-
-      {selected === 'llama_local' && (
-        <LocalModelPanel selectedId={model} onPick={setModel} />
-      )}
-
-      {provider.available && selected !== 'llama_local' && (
-        <div className="space-y-2.5 border-t border-border pt-3">
-          {provider.needsBaseUrl && (
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">Base URL</label>
-              <Input
-                value={baseUrl}
-                onChange={e => setBaseUrl(e.target.value)}
-                placeholder="http://localhost:11434/v1"
-                className="h-8 text-xs"
-              />
-            </div>
-          )}
-          {(provider.needsKey || provider.optionalKey) && (
-            <div className="space-y-1">
-              <label className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">
-                API Key {provider.optionalKey && <span className="normal-case text-muted-foreground/60">(optional)</span>}
-              </label>
-              <div className="relative">
-                <Input
-                  type={showKey ? 'text' : 'password'}
-                  value={apiKey}
-                  onChange={e => handleApiKeyInput(e.target.value)}
-                  onPaste={e => {
-                    if (selected !== 'gemini') return;
-                    const pasted = e.clipboardData.getData('text');
-                    parseGeminiUrlIntoKey(pasted);
-                  }}
-                  onBlur={e => parseGeminiUrlIntoKey(e.target.value)}
-                  placeholder={
-                    selected === 'openai' ? 'sk-…'
-                    : selected === 'anthropic' ? 'sk-ant-…'
-                    : selected === 'gemini' ? 'AIza…'
-                    : selected === 'openai_compatible' ? 'Bearer token (optional)'
-                    : 'API key'
-                  }
-                  className="h-8 text-xs pr-8 font-mono"
-                  autoComplete="off"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey(v => !v)}
-                  className="absolute right-1 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground"
-                  title={showKey ? 'Hide' : 'Show'}
-                >
-                  {showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
-                </button>
+      {credentials.length === 0 ? (
+        <Button onClick={openSettings} className="w-full">
+          <SettingsIcon className="w-4 h-4 mr-2" /> Open Settings
+        </Button>
+      ) : (
+        <div className="space-y-1.5">
+          {credentials.map(cred => (
+            <button
+              key={cred.id}
+              onClick={() => void handlePick(cred)}
+              disabled={starting}
+              className="w-full text-left rounded-lg border border-border hover:border-primary/50 hover:bg-muted/40 transition-colors px-3 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium truncate flex-1">{cred.name}</span>
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground shrink-0">
+                  {cred.kind}
+                </span>
               </div>
-              <div className="flex items-center justify-between gap-2">
-                <p className="text-[10px] text-muted-foreground opacity-70">
-                  {hasSaved
-                    ? 'Saved locally · prefilled from store.db'
-                    : 'Saved to store.db after Start · plaintext'}
-                </p>
-                {hasSaved && (
-                  <button
-                    type="button"
-                    onClick={() => void handleForget()}
-                    className="text-[10px] text-destructive hover:underline"
-                  >
-                    Forget saved
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-          <div className="space-y-1">
-            <div className="flex items-center justify-between">
-              <label className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">Model</label>
-              <button
-                type="button"
-                onClick={() => { void loadModels(); }}
-                disabled={!canLoadModels || loadingModels}
-                className="text-[10px] text-muted-foreground hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1"
-                title={canLoadModels ? 'Fetch models' : 'Fill the fields above first'}
-              >
-                {loadingModels
-                  ? <Loader2 className="w-3 h-3 animate-spin" />
-                  : <RefreshCw className="w-3 h-3" />}
-                {models.length > 0 ? 'Refresh' : 'Fetch'}
-              </button>
-            </div>
-            {models.length > 0 ? (
-              <Select value={model} onValueChange={setModel}>
-                <SelectTrigger size="sm" className="h-8 text-xs font-mono w-full">
-                  <SelectValue placeholder="Pick a model" />
-                </SelectTrigger>
-                <SelectContent>
-                  {models.map(m => (
-                    <SelectItem key={m} value={m} className="text-xs font-mono">{m}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            ) : (
-              <Input
-                value={model}
-                onChange={e => setModel(e.target.value)}
-                placeholder={provider.defaultModel ?? ''}
-                className="h-8 text-xs font-mono"
-              />
-            )}
-            {modelsError ? (
-              <p className="text-[10px] text-destructive opacity-90 wrap-break-word">
-                Couldn't fetch models: {modelsError}. Type a model id above.
+              <p className="text-[11px] text-muted-foreground truncate mt-0.5 font-mono">
+                {cred.model}
+                {cred.baseUrl && ` · ${cred.baseUrl}`}
               </p>
-            ) : models.length === 0 ? (
-              <p className="text-[10px] text-muted-foreground opacity-70">
-                {loadingModels
-                  ? 'Loading models…'
-                  : canLoadModels
-                    ? 'Models will load automatically, or click Fetch now'
-                    : provider.needsKey
-                      ? 'Enter an API key above to load the model list'
-                      : 'Fill the base URL above to load the model list'}
-              </p>
-            ) : null}
-          </div>
+            </button>
+          ))}
+          <button
+            onClick={openSettings}
+            className="w-full text-center text-[11px] text-muted-foreground hover:text-foreground py-2 flex items-center justify-center gap-1.5"
+          >
+            <SettingsIcon className="w-3 h-3" /> Manage credentials in Settings
+          </button>
         </div>
       )}
 
@@ -823,13 +730,15 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
         </div>
       )}
 
-      <Button onClick={handleStart} disabled={!canStart} className="w-full">
-        {starting ? <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Starting…</> : 'Start chat'}
-      </Button>
-
       <p className="text-[10px] text-muted-foreground text-center opacity-70">
-        Session-scoped · no history persists across restarts
+        Session-scoped · no chat history persists across restarts
       </p>
+
+      {starting && (
+        <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
+          <Loader2 className="w-3 h-3 animate-spin" /> Starting session…
+        </div>
+      )}
     </div>
   );
 }
@@ -1416,21 +1325,41 @@ function AssistantOrUserBubble({ message: m }: { message: StoreChatMessage }) {
   );
 
   return (
-    <div className={`flex min-w-0 ${isUser ? 'justify-end' : 'justify-start'}`}>
+    <div className={`group/msg flex min-w-0 ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
-        className={`min-w-0 max-w-[85%] overflow-hidden rounded-lg px-3 py-2 wrap-break-word ${
+        className={`relative min-w-0 max-w-[85%] overflow-hidden rounded-lg px-3 py-2 wrap-break-word select-text ${
           isUser
             ? 'bg-primary text-primary-foreground text-sm whitespace-pre-wrap'
             : 'bg-muted text-foreground'
         } ${renderMd ? '' : 'text-sm whitespace-pre-wrap'}`}
       >
+        {!isUser && m.content.length > 0 && !m.streaming && (
+          <CopyButton
+            text={m.content}
+            className="absolute top-1 right-1 opacity-0 group-hover/msg:opacity-100 focus:opacity-100 z-10"
+          />
+        )}
         {m.streaming && m.content.length === 0 ? (
           <span className="inline-flex items-center gap-2 text-muted-foreground">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
             <span className="italic">Thinking…</span>
           </span>
         ) : renderMd ? (
-          <div className={markdownClass} dangerouslySetInnerHTML={{ __html: html }} />
+          <div
+            className={markdownClass}
+            onClick={async (e) => {
+              const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-md-copy]');
+              if (!btn) return;
+              const text = btn.dataset.mdCopy ?? '';
+              try {
+                await navigator.clipboard.writeText(text);
+                const orig = btn.textContent;
+                btn.textContent = 'Copied';
+                setTimeout(() => { btn.textContent = orig; }, 1500);
+              } catch { toast.error('Copy failed'); }
+            }}
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
         ) : (
           <>
             {m.content}
@@ -1470,14 +1399,14 @@ function ToolBubble({ message }: { message: StoreChatMessage }) {
 
   return (
     <div className="flex justify-start" ref={cardRef}>
-      <div className={`max-w-[92%] w-full rounded-lg px-3 py-2 text-xs ${
+      <div className={`max-w-[92%] w-full rounded-lg px-3 py-2 text-xs select-text ${
         pending
           ? 'border-2 border-primary bg-primary/5 shadow-[0_0_0_4px_rgba(var(--primary-rgb,59,130,246),0.1)]'
           : 'border border-border bg-muted/30'
       }`}>
         <div className="flex items-center gap-1.5 text-muted-foreground">
           <Wrench className="w-3 h-3" />
-          <span className="font-mono text-foreground">{t.name}</span>
+          <span className="text-foreground font-medium" title={t.name}>{prettyToolName(t.name)}</span>
           {pending && (
             <span className="ml-auto flex items-center gap-1 text-[10px] font-medium text-primary">
               <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
@@ -1613,9 +1542,10 @@ function renderToolArgs(
               {title && <span>title: <code className="font-mono">{title}</code></span>}
             </div>
           )}
-          <pre className="text-[11px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1.5 max-h-48 overflow-auto">
-            {sql}
-          </pre>
+          <HighlightedSql
+            sql={sql}
+            className="text-[11px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1.5 max-h-48 overflow-auto"
+          />
         </>
       );
     }
@@ -1860,13 +1790,21 @@ function ApprovalCard({
   // Prefer the query preview when we have it; fall back to `summary` for
   // read-only shape tools. Both go through the same monospace preview
   // block so the card layout stays uniform.
-  const body = sql && sql.length > 0 ? sql : (summary ?? '(no preview)');
+  const hasSql = !!(sql && sql.length > 0);
+  const body = hasSql ? sql! : (summary ?? '(no preview)');
   return (
     <div className="mt-1 space-y-2">
       <div className="text-[11px] text-muted-foreground">{prompt}</div>
-      <pre className="text-[11px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1.5 max-h-48 overflow-auto">
-        {body}
-      </pre>
+      {hasSql ? (
+        <HighlightedSql
+          sql={body}
+          className="text-[11px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1.5 max-h-48 overflow-auto"
+        />
+      ) : (
+        <pre className="text-[11px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1.5 max-h-48 overflow-auto">
+          {body}
+        </pre>
+      )}
       <div className="flex gap-2">
         <Button
           size="sm"

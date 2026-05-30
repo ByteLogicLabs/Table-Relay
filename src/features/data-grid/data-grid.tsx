@@ -19,6 +19,7 @@ import { classifyColumn, coerceForColumn, validateEditorValue, dialectFromManife
 import { readCachedGrid, writeCachedGrid, clearCachedGrid } from '../../state/tab-data-cache';
 import { ensureTableStructure } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
+import { getMonacoThemeId } from '../../lib/monaco-setup';
 
 type FilterOperator =
   | 'eq' | 'neq'
@@ -259,8 +260,8 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
   const redoStackRef = useRef<HistorySnapshot[]>([]);
   // Bump whenever we push/pop, so buttons re-render with current enablement.
   const [historyTick, setHistoryTick] = useState(0);
-  const [editorTheme, setEditorTheme] = useState<'app-dark' | 'app-light'>(
-    document.documentElement.classList.contains('dark') ? 'app-dark' : 'app-light',
+  const [editorTheme, setEditorTheme] = useState<string>(
+    getMonacoThemeId(document.documentElement.dataset.theme ?? 'one-dark'),
   );
   const jsonEditorRef = useRef<MonacoEditorNs.IStandaloneCodeEditor | null>(null);
   // Dirty-tracking for the JSON Tree editor. We don't mirror the full text
@@ -386,10 +387,10 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
 
   useEffect(() => {
     const root = document.documentElement;
-    const sync = () => setEditorTheme(root.classList.contains('dark') ? 'app-dark' : 'app-light');
+    const sync = () => setEditorTheme(getMonacoThemeId(root.dataset.theme ?? 'one-dark'));
     sync();
     const observer = new MutationObserver(sync);
-    observer.observe(root, { attributes: true, attributeFilter: ['class'] });
+    observer.observe(root, { attributes: true, attributeFilter: ['class', 'data-theme'] });
     return () => observer.disconnect();
   }, []);
 
@@ -2008,7 +2009,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
                     key={col}
                     onClick={() => cycleSort(col)}
                     aria-sort={sortBy?.column === col ? (sortBy.direction === 'asc' ? 'ascending' : 'descending') : 'none'}
-                    className="px-4 py-2 border-b border-r border-border font-medium cursor-pointer hover:bg-muted/50 transition-colors whitespace-nowrap min-w-40 select-none"
+                    className="px-4 py-2 border-b border-r border-border font-medium cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap min-w-40 select-none"
                   >
                     <div className="flex items-center justify-between gap-2">
                       <span>{col}</span>

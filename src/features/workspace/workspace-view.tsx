@@ -16,6 +16,7 @@ import { isDbError } from '../../lib/db';
 import { ai, type ChatFocus } from '../../lib/ai';
 import { clearCachedGrid, clearCachedGridsWhere } from '../../state/tab-data-cache';
 import { clearQueryResultSnapshot } from '../../state/query-result-cache';
+import { setDebugPage } from '../../state/debug';
 
 const SIDEBAR_WIDTH = 256;
 const CHAT_WIDTH_KEY = 'dbtable:chatWidth:v1';
@@ -971,6 +972,20 @@ export default function WorkspaceView({
     onConnect(conn.id);
   };
 
+  const _activeTab = visibleTabs.find(t => t.id === activeTabId);
+  // Side effect — must not run during render or it triggers DevDebug
+  // to re-render mid-commit and React logs a warning.
+  useEffect(() => {
+    setDebugPage({
+      view: 'workspace',
+      activeTabId: activeTabId,
+      activeTabType: _activeTab?.type ?? null,
+      activeTabTitle: _activeTab?.title ?? null,
+      focusedConnection: focusedConnection?.name ?? null,
+      focusedDatabase: focusedTile?.databaseName ?? null,
+    });
+  }, [activeTabId, _activeTab?.type, _activeTab?.title, focusedConnection?.name, focusedTile?.databaseName]);
+
   return (
     <div className="flex-1 flex bg-background relative mac-vibrancy min-w-0" style={contentMaxWidthStyle}>
       <ConnectionRail
@@ -1038,7 +1053,7 @@ export default function WorkspaceView({
         })()}
       />
 
-      <div className="flex-1 flex flex-col min-w-0 bg-background border-l border-border/50">
+      <div className="flex-1 flex flex-col min-w-0 bg-background border-l border-border">
         <TabsShell
           activeConnections={activeConnections}
           tabs={visibleTabs}

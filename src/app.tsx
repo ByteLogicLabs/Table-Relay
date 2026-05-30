@@ -3,6 +3,9 @@ import { ConnectionProfile } from './types';
 import WorkspaceView from './features/workspace/workspace-view';
 import WelcomeView from './features/workspace/welcome-view';
 import { Toaster } from './components/ui/sonner';
+import DevDebug from './components/dev-debug';
+import { setDebugPage } from './state/debug';
+import { loadSettings, applyTheme } from './lib/settings-store';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
 import { isDbError } from './lib/db';
 import { connectAndLoad, disconnect as disconnectDb, markConnectionLost } from './state/connections';
@@ -58,11 +61,17 @@ export default function App() {
     }
   }, []);
 
-  // Match system dark-mode preference.
+  // Apply persisted theme on mount (defaults to One Dark).
   useEffect(() => {
-    if (window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
-      document.documentElement.classList.add('dark');
-    }
+    applyTheme(loadSettings().theme);
+  }, []);
+
+  // Forward native menu "Settings…" click to the frontend.
+  useEffect(() => {
+    const unsub = listen<void>('menu-app-settings', () => {
+      window.dispatchEvent(new CustomEvent('dbtable:open-settings'));
+    });
+    return () => { void unsub.then(fn => fn()); };
   }, []);
 
   // Listen for reconnect lifecycle events emitted by the Rust supervisor. On
@@ -264,6 +273,12 @@ export default function App() {
   // return to the welcome screen even if saved profiles still exist.
   const showWorkspace = activeConnectionIds.length > 0 || rail.tiles.length > 0;
 
+  // Push to the debug store as a side effect — calling setState during render
+  // schedules a re-render of DevDebug mid-commit, which React warns about.
+  useEffect(() => {
+    setDebugPage({ view: showWorkspace ? 'workspace' : 'welcome' });
+  }, [showWorkspace]);
+
   return (
     <div className="h-screen w-screen bg-background text-foreground flex flex-col overflow-hidden">
       <div className="flex-1 flex overflow-hidden relative">
@@ -288,6 +303,7 @@ export default function App() {
         )}
       </div>
       <Toaster position="top-right" />
+      <DevDebug />
     </div>
   );
 }
