@@ -9,6 +9,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '.
 import { toast } from 'sonner';
 import { db, type AdapterManifest, type ConnectionField } from '../../lib/db';
 import DbIcon from '../../components/db-icon';
+import { Loader2 } from 'lucide-react';
 
 /** Human driver label → adapter key. Used to pair legacy store rows with
  *  the new adapter manifests until the store is updated to carry
@@ -60,6 +61,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
     sshAuthKind: 'key',
   });
   const [isTesting, setIsTesting] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
   const [testReport, setTestReport] = useState<TestReport | null>(null);
   /** Every registered adapter manifest. Loaded once per modal open. */
   const [manifests, setManifests] = useState<AdapterManifest[] | null>(null);
@@ -116,6 +118,9 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
 
   useEffect(() => {
     if (isOpen) {
+      // Clear any stale busy flag from a previous save so the button is
+      // live again when the modal is reopened (it isn't unmounted).
+      setIsSaving(false);
       if (initialData) {
         setFormData(initialData);
       } else {
@@ -258,6 +263,10 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
       return;
     }
 
+    // onSave is fire-and-forget (void) and the modal unmounts right after,
+    // so flip the busy flag just before handing off — this disables the
+    // button against double-clicks until the dialog closes.
+    setIsSaving(true);
     onSave({
       id: initialData?.id || Date.now().toString(),
       name: formData.name,
@@ -571,7 +580,16 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
           </Button>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={onClose}>Cancel</Button>
-            <Button onClick={handleSave}>Save & Connect</Button>
+            <Button onClick={handleSave} disabled={isSaving}>
+              {isSaving ? (
+                <>
+                  <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
+                  Connecting…
+                </>
+              ) : (
+                'Save & Connect'
+              )}
+            </Button>
           </div>
         </DialogFooter>
       </DialogContent>

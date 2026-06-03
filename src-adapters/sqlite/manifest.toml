@@ -15,7 +15,7 @@ description  = "Opens a local SQLite 3 database file. The file itself is the con
 tags = ["sql", "relational", "embedded", "first-party"]
 
 [provenance]
-vendor  = "db-table team"
+vendor  = "Table Relay team"
 license = "Apache-2.0"
 
 [capabilities]

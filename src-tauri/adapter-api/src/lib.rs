@@ -1,7 +1,7 @@
 //! Public surface every built-in adapter implements.
 //!
 //! This crate defines the `Adapter` trait plus the intent types it
-//! takes and the value types it returns. The host (`db-table`) links
+//! takes and the value types it returns. The host (`table-relay`) links
 //! every adapter directly — there is no dylib boundary, no ABI stamp —
 //! so every type here is a plain Rust struct/enum.
 //!

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
-import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Radio } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Radio, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '../../components/ui/context-menu';
@@ -343,6 +343,7 @@ export default function TabsShell({
               >
                 <DataGrid
                   tabId={tab.id}
+                  isActive={isActive}
                   connectionId={tab.connectionId}
                   schema={tab.schema ?? ''}
                   tableName={tab.table!}
@@ -449,6 +450,52 @@ export default function TabsShell({
               </div>
             );
           })}
+          {/*
+            Connecting placeholder for data / realtime tabs. These render
+            from the mounted lists above, which `return null` when the tab's
+            connection isn't yet in `activeConnections`. On reload the active
+            tab (e.g. a data grid) exists before the async reconnect finishes,
+            so its connection is briefly absent and the grid never mounts —
+            leaving the main pane blank with no loader. Show a centered
+            spinner for that window so the area is never empty. The grid /
+            realtime view has its own loading overlay once it mounts.
+          */}
+          {activeTab
+            && (activeTab.type === 'data' || activeTab.type === 'realtime')
+            && !connection && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-muted-foreground bg-background">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <p className="text-sm">Connecting…</p>
+            </div>
+          )}
+
+          {/*
+            Fallback placeholder. The branches above each render only for a
+            specific tab type (data/realtime via the mounted lists, the rest
+            via `activeTab?.type === …`). If a tab is active but none of them
+            match — an unknown/future tab type, or a known type whose
+            `connection` hasn't resolved yet — the content area would render
+            nothing and the pane goes black. This keeps something visible.
+          */}
+          {activeTab
+            && activeTab.type !== 'data'
+            && activeTab.type !== 'realtime'
+            && !(
+              (activeTab.type === 'structure' && connection)
+              || (activeTab.type === 'query' && connection)
+              || (activeTab.type === 'erd' && connection)
+              || (activeTab.type === 'routine' && connection && activeTab.routine)
+            ) && (
+            <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background px-6 text-center">
+              <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center">
+                <DatabaseIcon className="w-7 h-7 opacity-40" />
+              </div>
+              <p className="text-sm font-medium text-foreground/80">Nothing to show here</p>
+              <p className="text-xs max-w-xs">
+                Pick a table or collection from the sidebar, or open a new query to get started.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Query log — tabs that can fire server-side commands (data, query,

@@ -432,6 +432,57 @@ export function isDbError(x: unknown): x is DbError {
   return !!x && typeof x === 'object' && 'kind' in (x as object) && 'message' in (x as object);
 }
 
+/**
+ * Per-connection concurrency gate for the heavy data calls (`browse`,
+ * `describeTable`). Without it, opening a database with several saved tabs —
+ * or a reconnect / db-switch that re-triggers them — fires a dozen+ browses
+ * and describes in the SAME tick. They all pile onto the connection's pool at
+ * once; over a high-latency link (SSH especially) a handful of ~10ms queries
+ * then serialize into 10–40s of queue wait, and the unlucky last one looks
+ * "hung". (Confirmed in app.log: 6 tables browsed at one timestamp, describes
+ * climbing 6s→10s.) Capping the in-flight count makes the burst queue
+ * client-side and drain in small waves instead of saturating the pool — the
+ * single most effective stampede guard, independent of any UI-level fix.
+ *
+ * Cap is per connection id so unrelated connections never block each other.
+ * 4 keeps a table's own browse+describe+count flowing while leaving headroom.
+ */
+const DATA_CALL_LIMIT = 4;
+const gateState = new Map<string, { active: number; queue: Array<() => void> }>();
+
+function gateFor(connectionId: string) {
+  let g = gateState.get(connectionId);
+  if (!g) {
+    g = { active: 0, queue: [] };
+    gateState.set(connectionId, g);
+  }
+  return g;
+}
+
+async function withDataGate<T>(connectionId: string, fn: () => Promise<T>): Promise<T> {
+  const g = gateFor(connectionId);
+  if (g.active >= DATA_CALL_LIMIT) {
+    // Wait for a slot. The releaser wakes us by handing over its slot, so we
+    // do NOT increment `active` here — it already counts us. (Incrementing
+    // would race a fresh caller that sees the briefly-decremented count and
+    // also proceeds, overshooting the cap.)
+    await new Promise<void>(resolve => g.queue.push(resolve));
+  } else {
+    g.active++;
+  }
+  try {
+    return await fn();
+  } finally {
+    const next = g.queue.shift();
+    if (next) {
+      // Transfer our slot directly to the next waiter — don't decrement.
+      next();
+    } else {
+      g.active--;
+    }
+  }
+}
+
 export const db = {
   connect: (connectionId: string) =>
     invoke<ConnectionMeta>('db_connect', { connectionId }),
@@ -444,7 +495,8 @@ export const db = {
   listSchemas: (connectionId: string) =>
     invoke<SchemaInfo[]>('db_list_schemas', { connectionId }),
   describeTable: (connectionId: string, schema: string, table: string) =>
-    invoke<TableStructure>('db_describe_table', { connectionId, schema, table }),
+    withDataGate(connectionId, () =>
+      invoke<TableStructure>('db_describe_table', { connectionId, schema, table })),
   describeSchema: (connectionId: string, schema: string) =>
     invoke<TableStructure[]>('db_describe_schema', { connectionId, schema }),
   listRelations: (connectionId: string, schema: string) =>
@@ -530,7 +582,8 @@ export const db = {
     invoke<void>('db_unsubscribe', { subscriptionId }),
   /** Intent-driven browse. Frontend declares schema/table/filters/sort/page; adapter generates the SQL. */
   browse: (connectionId: string, request: BrowseRequest) =>
-    invoke<BrowseResult>('db_browse', { connectionId, request }),
+    withDataGate(connectionId, () =>
+      invoke<BrowseResult>('db_browse', { connectionId, request })),
   // Process list / kill
   processList: (connectionId: string) =>
     invoke<ProcessInfo[]>('db_process_list', { connectionId }),

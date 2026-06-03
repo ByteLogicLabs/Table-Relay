@@ -1,13 +1,15 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { ConnectionProfile } from '../../types';
 import { Button, buttonVariants } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Search, Plus, Settings, Database, MoreVertical, Edit, Copy, Trash2 } from 'lucide-react';
 import ConnectionModal from '../connections/connection-modal';
+import SettingsDialog from '../settings/settings-dialog';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger, DropdownMenuSeparator } from '../../components/ui/dropdown-menu';
 import { toast } from 'sonner';
 import MacWindowControls from './mac-window-controls';
 import DbIcon from '../../components/db-icon';
+import { useConnections } from '../../state/connections';
 
 interface WelcomeViewProps {
   connections: ConnectionProfile[];
@@ -27,7 +29,18 @@ export default function WelcomeView({
   const [search, setSearch] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingConnection, setEditingConnection] = useState<ConnectionProfile | undefined>();
-  const [isConnecting, setIsConnecting] = useState<string | null>(null);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const connState = useConnections();
+
+  // The Settings dialog normally lives in the connection rail, but the rail
+  // isn't mounted on this welcome screen — so the native menu "Settings…"
+  // (⌘+,) and the in-app gear button had nothing to open. Host a dialog here
+  // and listen for the same `tablerelay:open-settings` event the rail uses.
+  useEffect(() => {
+    const handler = () => setSettingsOpen(true);
+    window.addEventListener('tablerelay:open-settings', handler);
+    return () => window.removeEventListener('tablerelay:open-settings', handler);
+  }, []);
 
   const filteredConnections = connections.filter(c => 
     c.name.toLowerCase().includes(search.toLowerCase()) || 
@@ -35,12 +48,9 @@ export default function WelcomeView({
   );
 
   const handleConnect = (id: string) => {
-    setIsConnecting(id);
-    // Simulate connection delay
-    setTimeout(() => {
-      setIsConnecting(null);
-      onConnect(id);
-    }, 800);
+    // Kicks off the real connect in app.tsx, which drives the
+    // store's `connectingIds` set we read from below.
+    onConnect(id);
   };
 
   const handleDuplicate = (conn: ConnectionProfile) => {
@@ -74,7 +84,14 @@ export default function WelcomeView({
             </div>
           </div>
           <div className="p-4 border-t border-border/50 flex justify-between items-center">
-            <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="text-muted-foreground hover:text-foreground"
+              title="Settings"
+              aria-label="Settings"
+              onClick={() => setSettingsOpen(true)}
+            >
               <Settings className="w-4 h-4" />
             </Button>
           </div>
@@ -85,12 +102,16 @@ export default function WelcomeView({
       <div className="flex-1 flex flex-col min-w-0">
         <div
           data-tauri-drag-region
-          className={`h-14 border-b border-border/50 flex items-center justify-between ${hasFavorites ? 'px-6' : 'pl-4 pr-6'}`}
+          className={`h-14 border-b border-border/50 flex items-center justify-end pr-6 ${
+            // No "Connections" heading here — it collided with / sat awkwardly
+            // beside the macOS traffic lights. The header is now just a drag
+            // region carrying the search + Add Connection controls on the right.
+            // Still reserve left clearance for the traffic lights (78px = the
+            // rail's RAIL_COLLAPSED_WIDTH) when there's no Favorites sidebar to
+            // cover that corner.
+            hasFavorites ? 'pl-6' : 'pl-19.5'
+          }`}
         >
-          <div className="flex items-center">
-            {!hasFavorites && <MacWindowControls className="pl-0 pr-4 py-0" />}
-            <h1 className="font-semibold text-lg">Connections</h1>
-          </div>
           <div className="flex items-center gap-4">
             <div className="relative w-64">
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -104,6 +125,16 @@ export default function WelcomeView({
             <Button size="sm" onClick={() => { setEditingConnection(undefined); setIsModalOpen(true); }}>
               <Plus className="w-4 h-4 mr-2" />
               Add Connection
+            </Button>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 text-muted-foreground hover:text-foreground"
+              title="Settings"
+              aria-label="Settings"
+              onClick={() => setSettingsOpen(true)}
+            >
+              <Settings className="w-4 h-4" />
             </Button>
           </div>
         </div>
@@ -127,7 +158,7 @@ export default function WelcomeView({
                   className="group bg-card border border-border rounded-xl p-4 hover:shadow-md transition-all cursor-pointer relative"
                   onClick={() => handleConnect(conn.id)}
                 >
-                  {isConnecting === conn.id && (
+                  {connState.connectingIds.has(conn.id) && (
                     <div className="absolute inset-0 bg-background/80 backdrop-blur-sm rounded-xl flex items-center justify-center z-10">
                       <div className="flex flex-col items-center gap-2">
                         <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
@@ -205,6 +236,8 @@ export default function WelcomeView({
         }}
         initialData={editingConnection}
       />
+
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
     </div>
   );
 }

@@ -23,11 +23,13 @@ needs_known_hosts = true
 name = "sqlite"
 
 [[adapter]]
-name = "redis"
+name              = "redis"
+needs_known_hosts = true
 
 [[adapter]]
 name              = "postgres"
 needs_known_hosts = true
 
 [[adapter]]
-name = "mongo"
+name              = "mongo"
+needs_known_hosts = true

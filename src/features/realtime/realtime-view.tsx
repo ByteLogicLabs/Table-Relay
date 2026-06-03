@@ -390,7 +390,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
   };
 
   const handleOpenChat = () => {
-    window.dispatchEvent(new CustomEvent('dbtable:toggle-chat'));
+    window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'));
   };
 
   return (

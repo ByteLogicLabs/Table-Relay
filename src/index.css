@@ -382,33 +382,37 @@
 
 /* ─── Monokai ────────────────────────────────────────────────── */
 .dark[data-theme="monokai"] {
-  --background:         oklch(0.19 0.007 118);  /* #272822 */
-  --foreground:         oklch(0.97 0.003 118);  /* #f8f8f2 */
-  --card:               oklch(0.16 0.006 118);  /* #1e1f1c */
-  --card-foreground:    oklch(0.97 0.003 118);
-  --popover:            oklch(0.16 0.006 118);
-  --popover-foreground: oklch(0.97 0.003 118);
-  --primary:            oklch(0.72 0.18 53);    /* #fd971f orange */
-  --primary-foreground: oklch(0.16 0.006 118);
-  --secondary:          oklch(0.27 0.007 90);
-  --secondary-foreground: oklch(0.97 0.003 118);
-  --muted:              oklch(0.24 0.006 90);
-  --muted-foreground:   oklch(0.50 0.020 75);   /* #75715e */
-  --accent:             oklch(0.83 0.22 130);   /* #a6e22e green */
-  --accent-foreground:  oklch(0.16 0.006 118);
-  --destructive:        oklch(0.57 0.25 350);   /* #f92672 pink */
-  --border:             oklch(0.30 0.009 90);   /* #49483e */
-  --input:              oklch(0.30 0.009 90);
-  --ring:               oklch(0.72 0.18 53);
-  --sidebar:            oklch(0.16 0.006 118);
-  --sidebar-foreground: oklch(0.97 0.003 118);
+  /* Authentic Monokai palette — exact hex values (the prior oklch
+     conversions drifted noticeably: background rendered ~#131411 instead of
+     #272822, pink shifted to magenta, etc.). Reference:
+     gist.github.com/r-malon/8fc669332215c8028697a0bbfbfbb32a (corrected). */
+  --background:         #272822;
+  --foreground:         #f8f8f2;
+  --card:               #1e1f1c;
+  --card-foreground:    #f8f8f2;
+  --popover:            #1e1f1c;
+  --popover-foreground: #f8f8f2;
+  --primary:            #fd971f;  /* orange */
+  --primary-foreground: #272822;
+  --secondary:          #3e3d32;  /* line-highlight surface */
+  --secondary-foreground: #f8f8f2;
+  --muted:              #3e3d32;
+  --muted-foreground:   #75715e;  /* comment */
+  --accent:             #49483e;  /* selection surface — neutral hover bg */
+  --accent-foreground:  #f8f8f2;
+  --destructive:        #f92672;  /* pink */
+  --border:             #49483e;
+  --input:              #49483e;
+  --ring:               #fd971f;
+  --sidebar:            #1e1f1c;
+  --sidebar-foreground: #f8f8f2;
   --sidebar-bg:         rgba(30, 31, 28, 0.88);
-  --syntax-keyword:     #f92672;
-  --syntax-string:      #e6db74;
-  --syntax-number:      #ae81ff;
+  --syntax-keyword:     #f92672;  /* pink */
+  --syntax-string:      #e6db74;  /* yellow */
+  --syntax-number:      #ae81ff;  /* purple */
   --syntax-punct:       #f8f8f2;
-  --syntax-success:     #a6e22e;
-  --editor-bg:          #1e1f1c;
+  --syntax-success:     #a6e22e;  /* green */
+  --editor-bg:          #272822;
 }
 
 /* ─── Dracula ─────────────────────────────────────────────────── */

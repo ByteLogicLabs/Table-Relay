@@ -351,6 +351,11 @@ pub struct ChatSendInput {
     pub sql: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+    /// Optional cap on tool-calling rounds for this turn (from the user's
+    /// AI settings). Falls back to `DEFAULT_MAX_TOOL_ITERATIONS` when absent
+    /// or out of the sane [1, 50] range.
+    #[serde(default)]
+    pub max_iterations: Option<u32>,
 }
 
 /// What the user is currently looking at. Informs the system-context blob —
@@ -570,6 +575,11 @@ async fn ai_chat_send_inner(
     };
 
     if tool_mode {
+        // Clamp the user-configured cap into a sane range; fall back to default.
+        let max_iterations = input
+            .max_iterations
+            .filter(|n| (1..=50).contains(n))
+            .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS);
         return run_tool_loop(
             app,
             slot,
@@ -580,6 +590,7 @@ async fn ai_chat_send_inner(
             input.request_id,
             input.connection_id.expect("checked above"),
             input.schema,
+            max_iterations,
         )
         .await;
     }
@@ -654,6 +665,12 @@ async fn ai_chat_send_inner(
 /// returns a plain-text reply. Once we have that reply, we emit it as one
 /// chunk + done so the frontend's existing streaming code picks it up.
 #[allow(clippy::too_many_arguments)]
+/// Default tool-calling round cap when the user hasn't set one. Capable
+/// agentic models legitimately chain several reads → a query → a summary, so
+/// 12 leaves headroom; the repeat-guard below stops genuine loops far sooner.
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 12;
+
+#[allow(clippy::too_many_arguments)]
 async fn run_tool_loop(
     app: tauri::AppHandle,
     slot: State<'_, SessionSlot>,
@@ -664,6 +681,7 @@ async fn run_tool_loop(
     request_id: String,
     connection_id: String,
     schema: Option<String>,
+    max_iterations: u32,
 ) -> Result<(), AiError> {
     use crate::ai::tools;
     let tools_catalog = tools::catalog();
@@ -672,8 +690,17 @@ async fn run_tool_loop(
         default_schema: schema.clone(),
     };
 
-    const MAX_ITERATIONS: u32 = 6;
-    for _iter in 0..MAX_ITERATIONS {
+    // Loop-guard: some models retry a tool with identical args over and over —
+    // either an erroring `find()` that keeps failing, OR a *successful* call
+    // they keep re-issuing without ever moving on (the "Hi" doom-loop on weak
+    // models). Track consecutive identical `(name::arguments)` calls REGARDLESS
+    // of success/failure and bail early with a clear message instead of
+    // spinning to `max_iterations`. Reset only when the model issues a
+    // genuinely different call.
+    let mut last_call_sig: Option<String> = None;
+    let mut repeat_calls: u32 = 0;
+    const MAX_REPEAT_CALLS: u32 = 3;
+    for _iter in 0..max_iterations {
         // Snapshot history under a read lock. We re-snapshot every
         // iteration because tool results append new messages.
         let history = {
@@ -790,13 +817,70 @@ async fn run_tool_loop(
                     "result": result.content,
                 }),
             );
+
+            // Loop-guard: count consecutive identical `(name::arguments)`
+            // calls — whether they errored or succeeded. A model stuck
+            // re-issuing the same successful read (the greeting doom-loop) is
+            // just as wedged as one retrying a failing `find()`. After
+            // MAX_REPEAT_CALLS, stop and emit a readable message so the UI's
+            // "Thinking…" bubble resolves instead of spinning to the cap.
+            let errored = result.content.contains("\"error\"");
+            let sig = format!("{}::{}", tc.name, tc.arguments);
+            if last_call_sig.as_deref() == Some(sig.as_str()) {
+                repeat_calls += 1;
+            } else {
+                last_call_sig = Some(sig);
+                repeat_calls = 1;
+            }
+            if repeat_calls >= MAX_REPEAT_CALLS {
+                crate::log_chat!(
+                    "error",
+                    "tool loop aborted: `{}` called {} times with identical args (errored={})",
+                    tc.name,
+                    repeat_calls,
+                    errored
+                );
+                let msg = if errored {
+                    format!(
+                        "I tried `{}` {} times with the same arguments and it kept failing, so I stopped to avoid looping. Last error: {}",
+                        tc.name, repeat_calls, result.content
+                    )
+                } else {
+                    format!(
+                        "I kept calling `{}` with the same arguments without making progress, so I stopped to avoid looping. Try rephrasing your request, or ask me something more specific.",
+                        tc.name
+                    )
+                };
+                {
+                    let mut guard = slot.write().await;
+                    if let Some(session) = guard.as_mut() {
+                        session.messages.push(crate::ai::ChatMessage {
+                            role: ChatRole::Assistant,
+                            content: msg.clone(),
+                            tool_calls: Vec::new(),
+                            tool_call_id: None,
+                        });
+                    }
+                }
+                let _ = app.emit(
+                    "ai://chat/chunk",
+                    ChunkEvent { request_id: request_id.clone(), delta: msg.clone() },
+                );
+                let _ = app.emit(
+                    "ai://chat/done",
+                    DoneEvent { request_id, content: msg, finish_reason: Some("error") },
+                );
+                return Ok(());
+            }
         }
         // Loop: model gets another round.
     }
 
     // Hit the iteration cap. Emit a failure message so the chat doesn't hang.
     let fallback = format!(
-        "(tool-call loop exceeded {MAX_ITERATIONS} iterations — please rephrase)"
+        "I used all {max_iterations} of my allowed tool-calling steps for this turn without reaching a final answer. \
+         This usually means the request needs to be broken into smaller asks, or the model is over-exploring. \
+         Try a more specific question — or raise “Max tool steps” in Settings → AI if this model needs more room."
     );
     {
         let mut guard = slot.write().await;

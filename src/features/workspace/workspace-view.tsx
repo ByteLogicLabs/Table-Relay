@@ -19,14 +19,14 @@ import { clearQueryResultSnapshot } from '../../state/query-result-cache';
 import { setDebugPage } from '../../state/debug';
 
 const SIDEBAR_WIDTH = 256;
-const CHAT_WIDTH_KEY = 'dbtable:chatWidth:v1';
+const CHAT_WIDTH_KEY = 'tablerelay:chatWidth:v1';
 const CHAT_MIN_WIDTH = 320;
 const CHAT_MAX_WIDTH = 800;
 const CHAT_DEFAULT_WIDTH = 384;
-const TABS_STORAGE_KEY = 'dbtable:tabs:v1';
-const ACTIVE_TAB_KEY = 'dbtable:activeTab:v1';
-const ACTIVE_TAB_BY_CONN_KEY = 'dbtable:activeTabByConn:v1';
-const FOCUSED_TILE_KEY = 'dbtable:focusedTile:v1';
+const TABS_STORAGE_KEY = 'tablerelay:tabs:v1';
+const ACTIVE_TAB_KEY = 'tablerelay:activeTab:v1';
+const ACTIVE_TAB_BY_CONN_KEY = 'tablerelay:activeTabByConn:v1';
+const FOCUSED_TILE_KEY = 'tablerelay:focusedTile:v1';
 
 /**
  * Translate the active AppTab into a focus hint the AI context builder can
@@ -168,18 +168,18 @@ export default function WorkspaceView({
   const [railExpanded, setRailExpanded] = useState(false);
 
   // Any view with a toolbar (data-grid, sql-editor, etc.) can ask to toggle
-  // the chat panel by dispatching `dbtable:toggle-chat`. Keeps each view
+  // the chat panel by dispatching `tablerelay:toggle-chat`. Keeps each view
   // free of chat-panel wiring — they just fire the event.
   useEffect(() => {
     const onToggle = () => setChatOpen(o => !o);
     // Fix / Explain / Generate shortcuts force the panel open — the panel
     // itself listens to the same event for the prefill payload.
     const onPrefill = () => setChatOpen(true);
-    window.addEventListener('dbtable:toggle-chat', onToggle);
-    window.addEventListener('dbtable:ai-prefill', onPrefill);
+    window.addEventListener('tablerelay:toggle-chat', onToggle);
+    window.addEventListener('tablerelay:ai-prefill', onPrefill);
     return () => {
-      window.removeEventListener('dbtable:toggle-chat', onToggle);
-      window.removeEventListener('dbtable:ai-prefill', onPrefill);
+      window.removeEventListener('tablerelay:toggle-chat', onToggle);
+      window.removeEventListener('tablerelay:ai-prefill', onPrefill);
     };
   }, []);
 
@@ -248,7 +248,7 @@ export default function WorkspaceView({
       }
       // Data-grid listens for this on its own tab id.
       window.dispatchEvent(
-        new CustomEvent('dbtable:menu-export', { detail: { tabId: tid } }),
+        new CustomEvent('tablerelay:menu-export', { detail: { tabId: tid } }),
       );
     });
     return () => {
@@ -421,32 +421,63 @@ export default function WorkspaceView({
       activeTabManifest ? activeTabManifest.capabilities.export.length > 0 : true;
   });
 
-  const handleFocusTile = async (tile: RailTile) => {
+  const handleFocusTile = (tile: RailTile) => {
     setFocusedTileId(tile.id);
     if (!connState.activeById.has(tile.serverId)) {
-      try {
-        await connectAndLoad(tile.serverId);
-        onConnect(tile.serverId);
-      } catch (err) {
-        toast.error(isDbError(err) ? err.message : String(err));
-      }
+      // Not connected yet — connect in the background (skeleton shows via
+      // `connectingIds`). Detached so focus is instant, not gated on connect.
+      void (async () => {
+        try {
+          await connectAndLoad(tile.serverId);
+          onConnect(tile.serverId);
+        } catch (err) {
+          toast.error(isDbError(err) ? err.message : String(err));
+        }
+      })();
+    } else {
+      // Already "active" — but if the connection sat idle for minutes its
+      // socket may be dead (server wait_timeout, NAT drop, laptop sleep).
+      // Switching back used to do nothing here, leaving a stale tree and a
+      // dead socket: the next query hangs until the reconnect supervisor
+      // notices, which felt like a hang that only ⌘+R could clear. Fire a
+      // background `refreshSchemas` so we issue a real query through
+      // `with_retry` — that revalidates the socket and transparently rebuilds
+      // a dead one, exactly like ⌘+R, with no manual refresh.
+      void refreshSchemas(tile.serverId, { silent: true });
     }
   };
 
-  const handlePickConnection = async (connectionId: string) => {
-    if (!connState.activeById.has(connectionId)) {
-      try {
-        await connectAndLoad(connectionId);
-        onConnect(connectionId);
-      } catch (err) {
-        toast.error(isDbError(err) ? err.message : String(err));
-        return;
-      }
-    }
-    // Focus the connection but leave the tile slot empty so the sidebar
-    // prompts the user to pick a database for this server.
+  const handlePickConnection = (connectionId: string) => {
+    // Focus the connection FIRST, synchronously, so the workspace switches to
+    // it the instant the user picks — no waiting on the (possibly slow, SSH)
+    // connect. The sidebar reads `connectingIds` and renders its "Connecting…"
+    // skeleton while the background connect runs, so the UI is responsive
+    // immediately instead of feeling laggy. Leave the tile slot empty so the
+    // sidebar prompts for a database once schemas land.
     setFocusedTileId(null);
     setFocusedConnectionId(connectionId);
+
+    // Connect in the background. `connectAndLoad` flips `connectingIds` (drives
+    // the skeleton) and marks the connection active when ready; we only need to
+    // surface failures and run the post-connect `onConnect` side effects.
+    if (!connState.activeById.has(connectionId)) {
+      void (async () => {
+        try {
+          await connectAndLoad(connectionId);
+          onConnect(connectionId);
+        } catch (err) {
+          toast.error(isDbError(err) ? err.message : String(err));
+        }
+      })();
+    } else {
+      // Already active — revalidate in case the socket died while idle, so an
+      // idle-then-reopened connection reloads automatically instead of hanging
+      // until ⌘+R. `refreshSchemas` → `db_list_schemas` → `with_retry`, which
+      // rebuilds a dead socket transparently. Silent: keep the cached tree on
+      // screen and revalidate in the background (stale-while-revalidate), so
+      // switching back never blanks to a skeleton. See `handleFocusTile`.
+      void refreshSchemas(connectionId, { silent: true });
+    }
   };
 
   const handlePinDatabase = async (serverId: string, databaseName: string) => {
@@ -616,7 +647,7 @@ export default function WorkspaceView({
   // ⌘+R / Ctrl+R soft-reloads the sidebar tree + active tab's data instead of
   // refreshing the whole page. We preventDefault so the browser's own reload
   // doesn't unload the app. Components that hold their own data (Sidebar,
-  // DataGrid, DiagramView) listen for the `dbtable:reload` event and refetch.
+  // DataGrid, DiagramView) listen for the `tablerelay:reload` event and refetch.
   //
   // ⌘+Shift+R / Ctrl+Shift+R does a full page reload — same as the
   // browser's hard-refresh shortcut. Useful when the JS bundle itself
@@ -644,7 +675,7 @@ export default function WorkspaceView({
       if (target) {
         void refreshSchemas(target);
       }
-      window.dispatchEvent(new CustomEvent('dbtable:reload', {
+      window.dispatchEvent(new CustomEvent('tablerelay:reload', {
         detail: { connectionId: target ?? null },
       }));
     };

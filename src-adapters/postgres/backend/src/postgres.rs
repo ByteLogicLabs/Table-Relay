@@ -58,19 +58,28 @@ impl PostgresDriver {
         );
         let opts = build_connect_options(&cfg);
 
+        // Same budget as MySQL — 16 max to let parallel describe fan out.
+        // No eager warmup: `min_connections(N)` with `connect_with` blocks the
+        // connect call until N handshakes finish, which stalls the first
+        // `list_schemas` behind the pool filling on a remote/slow host.
+        // `connect_lazy_with` returns instantly; `ping()` (called right after
+        // connect) opens the first real connection, so genuine auth/network
+        // failures still surface immediately. See the reconnect-latency audit.
+        // Proactive connection health (see mysql.rs for the full rationale):
+        // test_before_acquire discards a dead idle socket before lending it,
+        // so a burst of parallel queries can't have one unlucky member block
+        // ~19s on a connection the server killed via idle timeout while its
+        // siblings finish in ms. idle_timeout/max_lifetime retire connections
+        // before the server does.
         let pool = PgPoolOptions::new()
-            // Same budget as MySQL — 16 max to let parallel describe fan
-            // out, 4 warmed so the first burst doesn't cold-start.
             .max_connections(16)
-            .min_connections(4)
-            .acquire_timeout(std::time::Duration::from_secs(60))
-            .connect_with(opts)
-            .await
-            .map_err(|e| {
-                log_line!("pg_connect", "  pool connect failed: {}", e);
-                AdapterError::from(e)
-            })?;
-        log_line!("pg_connect", "  pool ready");
+            .min_connections(0)
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            .test_before_acquire(true)
+            .idle_timeout(std::time::Duration::from_secs(240))
+            .max_lifetime(std::time::Duration::from_secs(1800))
+            .connect_lazy_with(opts);
+        log_line!("pg_connect", "  pool ready (lazy)");
         Ok(Self {
             pool,
             default_db: cfg.database.clone(),

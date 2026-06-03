@@ -536,7 +536,7 @@ export default function DiagramView({ connectionId, scope, schemaName, tableName
   const graphRef = useRef<LoadedGraph | null>(null);
   const lastLoadKeyRef = useRef<string>('');
   // Bumping this triggers a reload. Driven by the user-facing Retry button
-  // and the `dbtable:reload` event listener.
+  // and the `tablerelay:reload` event listener.
   const [reloadTick, setReloadTick] = useState(0);
   const requestReload = () => setReloadTick(t => t + 1);
 
@@ -753,10 +753,10 @@ export default function DiagramView({ connectionId, scope, schemaName, tableName
       if (target && target !== connectionId) return;
       requestReload();
     };
-    window.addEventListener('dbtable:reload', onReload);
+    window.addEventListener('tablerelay:reload', onReload);
     return () => {
       cancelled = true;
-      window.removeEventListener('dbtable:reload', onReload);
+      window.removeEventListener('tablerelay:reload', onReload);
     };
   }, [connectionId, scope, schemaName, tableName, reloadTick]);
 

@@ -34,6 +34,24 @@ pub async fn db_connect(
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<ConnectionMeta, AdapterError> {
+    // Idempotency / tunnel reuse: if this connection is already live AND
+    // healthy, return it instead of building a SECOND adapter + SSH tunnel.
+    // A redundant `db_connect` (frontend state drift, a retry, two callers
+    // racing) would otherwise re-run the full SSH handshake and replace the
+    // working connection — the source of the observed tunnel thrashing
+    // (34× Tunnel::open with 0 reconnects). `ping()` rides the existing pool
+    // (and transparently revives a dead pooled socket through the LIVE tunnel
+    // via the reconnect/test-before-acquire path), so a healthy tunnel is kept
+    // and the handshake is skipped entirely. Only if there's no live entry, or
+    // it fails to ping, do we fall through and build a fresh one.
+    if let Ok(existing) = registry.get(&connection_id).await {
+        if existing.ping().await.is_ok() {
+            if let Some(meta) = registry.meta(&connection_id).await {
+                return Ok(meta);
+            }
+        }
+    }
+
     // Read the profile + plaintext password inside a short-lived lock.
     let profile = {
         let guard = store

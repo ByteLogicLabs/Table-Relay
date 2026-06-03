@@ -7,21 +7,36 @@ use adapter_api::{
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 
 use crate::execute;
 use crate::index;
 use crate::mutate;
 use crate::subscribe;
-use crate::MongoDriver;
+use crate::{MongoDriver, Tunnel};
 use adapter_api::{SubscribeEvent, SubscribeRequest, SubscriptionHandle};
 
 pub struct MongoAdapter {
     pub(crate) driver: Arc<MongoDriver>,
+    /// SSH tunnel kept alive for the lifetime of the adapter. `None`
+    /// when the connection is direct. Wrapped in `Mutex<Option<_>>` so
+    /// `shutdown()` can take ownership and tear it down exactly once.
+    tunnel: Mutex<Option<Tunnel>>,
 }
 
 impl MongoAdapter {
     pub fn new(driver: MongoDriver) -> Self {
-        Self { driver: Arc::new(driver) }
+        Self {
+            driver: Arc::new(driver),
+            tunnel: Mutex::new(None),
+        }
+    }
+
+    pub fn new_with_tunnel(driver: MongoDriver, tunnel: Option<Tunnel>) -> Self {
+        Self {
+            driver: Arc::new(driver),
+            tunnel: Mutex::new(tunnel),
+        }
     }
 }
 
@@ -103,5 +118,8 @@ impl Adapter for MongoAdapter {
 
     async fn shutdown(&self) {
         self.driver.shutdown().await;
+        if let Some(mut t) = self.tunnel.lock().await.take() {
+            t.shutdown().await;
+        }
     }
 }

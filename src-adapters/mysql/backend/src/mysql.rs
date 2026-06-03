@@ -59,21 +59,47 @@ impl MysqlDriver {
         }
         opts = opts.ssl_mode(map_ssl_mode(cfg.ssl_mode.as_deref()));
 
-        let pool = match MySqlPoolOptions::new()
+        let pool = MySqlPoolOptions::new()
             // 16 connections lets diagram/schema loads fan out without every
             // other UI query (sidebar refresh, autocomplete) waiting behind
             // the describe fleet. Paired with the generous acquire window
             // below so bursts of parallel describeTable calls queue up
             // instead of surfacing as "Timeout" errors.
             .max_connections(16)
-            // Keep 4 connections warm so the first `describe_table` +
-            // `SELECT *` burst doesn't pay the full MySQL handshake over SSH
-            // on every one of them. Without this, the first describe opens
-            // 4 cold channels serially and tacks 1.5–2s onto the perceived
-            // latency. `min_connections` is lazily filled on the pool's
-            // background task, so initial connect is not blocked.
-            .min_connections(4)
-            .acquire_timeout(std::time::Duration::from_secs(60))
+            // No eager warmup. `min_connections(N)` with `connect_with` does
+            // NOT return until N full handshakes complete — on a remote/slow
+            // host that blocks the very first `list_schemas` behind the pool
+            // filling up (observed: an 18s `list_schemas` for 2 schemas / 29
+            // tables, purely pool-acquire wait). With `connect_lazy_with` the
+            // pool is created instantly and the first query opens exactly one
+            // connection on demand; the pool grows to max only under real
+            // concurrency. This is the dominant connect-latency win — see the
+            // reconnect-latency audit.
+            .min_connections(0)
+            // Bound a single dial so a blackholed/half-open host fails fast
+            // (~10s) instead of the user staring at a spinner for up to the
+            // full acquire window. Acquire stays generous so legitimate bursts
+            // of parallel describeTable calls queue rather than erroring.
+            .acquire_timeout(std::time::Duration::from_secs(30))
+            // Proactive connection health. THE fix for the "one query in a
+            // burst hangs ~19s" symptom: after a connection sits idle, the
+            // server's `wait_timeout` (or a NAT/laptop-sleep drop) kills the
+            // socket, but a dead connection lingers in the pool. The next
+            // burst of parallel browses then has ONE unlucky query draw that
+            // dead connection and block on the OS socket timeout while its
+            // siblings (which drew healthy connections) finish in ms.
+            //   - test_before_acquire: ping/validate a connection before
+            //     lending it; a dead one is transparently discarded + a fresh
+            //     one opened. Costs a sub-ms round-trip per acquire, buys us
+            //     never handing out a corpse.
+            //   - idle_timeout: close connections idle > 4 min so they're gone
+            //     before a typical MySQL `wait_timeout` (often 5–8 min) kills
+            //     them server-side.
+            //   - max_lifetime: hard cap on age as a backstop against
+            //     long-lived half-broken sockets.
+            .test_before_acquire(true)
+            .idle_timeout(std::time::Duration::from_secs(240))
+            .max_lifetime(std::time::Duration::from_secs(1800))
             // Force the session character set to utf8mb4 on every new
             // connection. Without this, some servers (OVH-managed MySQL,
             // ProxySQL-fronted clusters, anything with
@@ -85,16 +111,12 @@ impl MysqlDriver {
                 conn.execute("SET NAMES utf8mb4").await?;
                 Ok(())
             }))
-            .connect_with(opts)
-            .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                log_line!("mysql_connect", "  pool connect failed: {}", e);
-                return Err(e.into());
-            }
-        };
-        log_line!("mysql_connect", "  pool ready");
+            // Lazy: returns a pool handle immediately without opening any
+            // connection. `db_connect` then calls `ping()`, which opens the
+            // first real connection — that's where any genuine auth/network
+            // failure surfaces, fast, instead of during a later query.
+            .connect_lazy_with(opts);
+        log_line!("mysql_connect", "  pool ready (lazy)");
         Ok(Self { pool, default_db: cfg.database })
     }
 }

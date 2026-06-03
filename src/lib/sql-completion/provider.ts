@@ -25,7 +25,7 @@ export interface SqlCompletionOptions {
 }
 
 /**
- * Register the db-table SQL completion provider on a Monaco instance. The
+ * Register the Table Relay SQL completion provider on a Monaco instance. The
  * returned disposer unregisters it — call from the editor's unmount path.
  */
 export function registerSqlCompletion(

@@ -2,7 +2,7 @@
 name = "adapter-redis"
 version = "0.1.0"
 edition = "2021"
-description = "Built-in Redis adapter for db-table"
+description = "Built-in Redis adapter for Table Relay"
 
 [build-dependencies]
 manifest-build = { path = "../../../src-tauri/manifest-build" }
@@ -24,3 +24,7 @@ futures = { version = "0.3", default-features = false, features = ["std"] }
 # feature for the first cut — every live Redis we want to talk to is
 # either local or already inside the machine / a VPC.
 redis = { version = "0.27", default-features = false, features = ["tokio-comp"] }
+
+# SSH tunnel support is provided by the shared `adapter-ssh` crate;
+# the adapter just re-exports `SshConfig` + `Tunnel`.
+adapter-ssh = { path = "../../../src-tauri/adapter-ssh" }

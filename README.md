@@ -1,6 +1,14 @@
+<div align="center">
+
+<img src="public/logo.png" alt="Table Relay" width="120" height="120" />
+
 # Table Relay
 
-A multi-database desktop workbench for browsing, querying, editing, and diagramming your data — with a built-in AI assistant. One app for **MySQL, PostgreSQL, SQLite, MongoDB, and Redis**, built with [Tauri](https://tauri.app) (Rust + React).
+**A fast, multi-database desktop workbench** for browsing, querying, editing, and diagramming your data — with a built-in AI assistant.
+
+One app for **MySQL · PostgreSQL · SQLite · MongoDB · Redis**, built with [Tauri](https://tauri.app) (Rust + React).
+
+</div>
 
 ---
 
@@ -12,8 +20,10 @@ A multi-database desktop workbench for browsing, querying, editing, and diagramm
 - **Diagrams** — auto-laid-out entity-relationship diagrams from your schema.
 - **Realtime** — publish/subscribe against Redis Pub/Sub and Postgres `LISTEN`/`NOTIFY`.
 - **Process list** — view and kill running queries/connections (where the driver supports it).
-- **AI assistant** — chat about your schema and data with OpenAI, Anthropic, Google Gemini, any OpenAI-compatible endpoint (Ollama, Groq, LM Studio), or a local GGUF model. The assistant inspects schema freely but **every query it runs goes through an explicit approval prompt** before touching the database.
-- **SSH tunneling** — connect to MySQL and PostgreSQL behind a jump host (password or key auth), with trust-on-first-use host-key pinning.
+- **AI assistant** — chat about your schema and data with OpenAI, Anthropic, Google Gemini, any OpenAI-compatible endpoint (Ollama, Groq, LM Studio), or a **fully local, on-device model** — Table Relay runs `llama.cpp` (`llama-server`) for you, with a built-in downloader for curated GGUF models (Qwen2.5-Coder 3B/7B/14B), so you can use the assistant offline with no API key and no data leaving your machine. The assistant inspects schema freely, but **every query it runs is gated by an approval prompt** — with **per-operation permissions** you can auto-allow individually (Read, Write, Create/DDL, Delete) while destructive statements (no-`WHERE` deletes, `DROP`, `TRUNCATE`) always ask.
+- **SSH tunneling** — connect to any networked database (MySQL, PostgreSQL, MongoDB, Redis) behind a jump host (password or key auth), with trust-on-first-use host-key pinning, keepalive-kept-alive sessions, and connection reuse so tunnels aren't re-handshaked on every operation. A small **SSH** badge marks tunneled connections in the rail. (SQLite is a local file, so it has no tunnel.)
+- **Settings** — theme, default row limit, NULL display, Monaco editor preferences, destructive-query confirmation, restore-on-startup, and AI approval persistence — all in one dialog.
+- **Built for speed** — lazy per-tab loading (only the table you're viewing fetches), in-memory caching of schema/structure/rows so switching tabs and connections is instant, parallel persistent connections, and a per-connection query gate that prevents pool stampedes.
 
 ## Supported databases
 
@@ -22,8 +32,8 @@ A multi-database desktop workbench for browsing, querying, editing, and diagramm
 | MySQL | ✅ | ✅ | ✅ | ✅ | — | ✅ |
 | PostgreSQL | ✅ | ✅ | ✅ | ✅ | ✅ (`LISTEN`/`NOTIFY`) | ✅ |
 | SQLite | ✅ | ✅ | ✅ | ✅ | — | — |
-| MongoDB | ✅ | ✅ | ✅ | — | ✅ (change streams) | — |
-| Redis | ✅ | ✅ | — | — | ✅ (Pub/Sub) | — |
+| MongoDB | ✅ | ✅ | ✅ | — | ✅ (change streams) | ✅ |
+| Redis | ✅ | ✅ | — | — | ✅ (Pub/Sub) | ✅ |
 
 Exact capabilities per driver are declared in each adapter's `manifest.toml` and drive what the UI exposes.
 
@@ -45,7 +55,7 @@ npm run tauri:dev
 
 The first Rust build compiles all five database adapters and can take several minutes; subsequent builds are incremental.
 
-> **AI keys are configured in-app, not via environment variables.** Open **Settings → AI Providers**, add a credential, and activate it. Keys are stored locally on your machine (see [Security](#security)). There is no required `.env` file to run the app.
+> **AI is optional and configured in-app, not via environment variables.** For a hosted provider, open **Settings → AI Providers**, add a credential, and activate it (keys are stored locally on your machine — see [Security](#security)). For a **local model** you need no key at all: pick **Local Llama**, download a GGUF model from the built-in catalog, and Table Relay runs it on-device via `llama.cpp` (install the open-source [`llama.cpp`](https://github.com/ggerganov/llama.cpp) `llama-server` CLI first — e.g. `brew install llama.cpp`). There is no required `.env` file to run the app.
 
 ### Build a release bundle
 
@@ -103,4 +113,4 @@ Do not commit `.env` files or any file containing real keys; the repo's `.gitign
 
 ## License
 
-Not yet specified.
+[MIT](LICENSE) © 2026 ByteLogic Innovation / Tofik Hidayat

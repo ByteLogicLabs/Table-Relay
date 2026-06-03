@@ -138,6 +138,17 @@ export default function ConnectionPickerDialog({
                     {c.driver} · {c.host}
                   </span>
                 </span>
+                {/* SSH-tunnel marker — signals this profile connects through a
+                    jump host, which is why it may take longer to open. Colored
+                    badge to match the rail's SSH marker. */}
+                {c.sshEnabled && (
+                  <span
+                    className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-primary text-primary-foreground"
+                    title={c.sshHost ? `SSH tunnel via ${c.sshHost}` : 'SSH tunnel'}
+                  >
+                    SSH
+                  </span>
+                )}
               </button>
             );
           })}

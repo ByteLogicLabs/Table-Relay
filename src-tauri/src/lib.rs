@@ -30,6 +30,12 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir unavailable");
+            // App was renamed db-table → Table Relay, which changed the bundle
+            // identifier (com.dbtable.app → com.tablerelay.app) and therefore
+            // the app-data directory. Carry the old store + vault + oauth files
+            // forward so existing users keep their saved connections, known SSH
+            // hosts, AI settings and chat history after the rename.
+            migrate_legacy_app_data(&dir);
             let store_path = dir.join("store.db");
             let store = Arc::new(
                 Store::open(store_path).expect("failed to open connection store"),
@@ -230,4 +236,54 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// One-time carry-forward of the local store after the db-table → Table Relay
+/// rename changed the bundle identifier (and thus the app-data directory) from
+/// `com.dbtable.app` to `com.tablerelay.app`.
+///
+/// `new_dir` is the current app-data dir (`…/com.tablerelay.app`). We only act
+/// when the NEW `store.db` doesn't exist yet (a fresh post-rename install) and
+/// the OLD dir alongside it has a `store.db` — then we copy `store.db`,
+/// `vault.db` and `gemini_oauth.json` across. Never overwrites a populated new
+/// store, so it's a no-op on every launch after the first.
+fn migrate_legacy_app_data(new_dir: &std::path::Path) {
+    let new_store = new_dir.join("store.db");
+    if new_store.exists() {
+        return; // already migrated (or a normal returning user) — nothing to do
+    }
+
+    // Old dir is the sibling whose name is the old bundle identifier.
+    let parent = match new_dir.parent() {
+        Some(p) => p,
+        None => return,
+    };
+    let old_dir = parent.join("com.dbtable.app");
+    let old_store = old_dir.join("store.db");
+    if !old_store.exists() {
+        return; // nothing to migrate from
+    }
+
+    if let Err(e) = std::fs::create_dir_all(new_dir) {
+        crate::log::write_line("migrate", &format!("create new app-data dir failed: {e}"));
+        return;
+    }
+
+    for name in ["store.db", "vault.db", "gemini_oauth.json"] {
+        let src = old_dir.join(name);
+        if !src.exists() {
+            continue;
+        }
+        let dst = new_dir.join(name);
+        match std::fs::copy(&src, &dst) {
+            Ok(_) => crate::log::write_line(
+                "migrate",
+                &format!("carried forward {name} from com.dbtable.app"),
+            ),
+            Err(e) => crate::log::write_line(
+                "migrate",
+                &format!("copy {name} failed: {e}"),
+            ),
+        }
+    }
 }

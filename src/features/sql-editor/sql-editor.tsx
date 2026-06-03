@@ -19,6 +19,7 @@ import {
 } from '../../state/connections';
 import { formatSql } from '../../lib/format-sql';
 import { getMonacoThemeId } from '../../lib/monaco-setup';
+import { useSettings } from '../../lib/settings-store';
 import { prefillChat } from '../../state/ai';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { readQueryResultSnapshot, writeQueryResultSnapshot } from '../../state/query-result-cache';
@@ -49,7 +50,7 @@ interface SqlEditorProps {
 }
 
 function pickMonacoTheme(): string {
-  return getMonacoThemeId(document.documentElement.dataset.theme ?? 'one-dark');
+  return getMonacoThemeId(document.documentElement.dataset.theme ?? 'monokai');
 }
 
 /** Split a multi-statement SQL string on `;` respecting quotes and comments. */
@@ -303,6 +304,7 @@ function stripCodeComments(source: string, language: string, commentTags?: strin
 }
 
 export default function SqlEditor({ tabId, initialQuery = '', connection, defaultSchema, onLogQuery, onQueryChange }: SqlEditorProps) {
+  const settings = useSettings();
   const effectiveSchema = defaultSchema ?? connection.database ?? undefined;
   const manifests = useAdapterManifests();
   const activeManifest = resolveManifest(manifests, connection.driver);
@@ -901,7 +903,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     // Check for destructive statements before executing
     const dialect = activeManifest?.capabilities.sqlDialect ?? 'none';
     const analysis = analyzeDestructive(payload, dialect);
-    if ('statements' in analysis) {
+    if (settings.confirmDestructive && 'statements' in analysis) {
       pendingRunRef.current = payload;
       setDestructiveWarning(analysis.statements);
       return;
@@ -1026,16 +1028,16 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
           onChange={(v) => setQuery(v ?? '')}
           onMount={handleEditorMount}
           options={{
-            minimap: { enabled: false },
+            minimap: { enabled: settings.editorMinimap },
             fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-            fontSize: 13,
+            fontSize: settings.editorFontSize,
             lineHeight: 20,
             scrollBeyondLastLine: false,
             smoothScrolling: true,
             renderLineHighlight: 'line',
-            tabSize: 2,
+            tabSize: settings.editorTabSize,
             automaticLayout: true,
-            wordWrap: 'on',
+            wordWrap: settings.editorWordWrap ? 'on' : 'off',
             padding: { top: 12, bottom: 12 },
             fixedOverflowWidgets: true,
             scrollbar: {
@@ -1044,8 +1046,8 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             },
             guides: { indentation: false },
             wordBasedSuggestions: 'off',
-            quickSuggestions: { other: true, comments: false, strings: true },
-            suggestOnTriggerCharacters: true,
+            quickSuggestions: settings.editorAutocomplete ? { other: true, comments: false, strings: true } : false,
+            suggestOnTriggerCharacters: settings.editorAutocomplete,
           }}
         />
       </div>
@@ -1249,14 +1251,14 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                         // view. Non-editable results stay read-only with a
                         // tooltip explanation in the action bar.
                         readOnly: !resultIsEditable || jsonResultSaving,
-                        minimap: { enabled: false },
+                        minimap: { enabled: settings.editorMinimap },
                         fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
-                        fontSize: 13,
+                        fontSize: settings.editorFontSize,
                         lineHeight: 20,
                         scrollBeyondLastLine: false,
                         smoothScrolling: true,
                         automaticLayout: true,
-                        wordWrap: 'on',
+                        wordWrap: settings.editorWordWrap ? 'on' : 'off',
                         padding: { top: 10, bottom: 10 },
                         lineNumbers: 'on',
                         glyphMargin: false,

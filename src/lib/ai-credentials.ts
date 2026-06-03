@@ -10,8 +10,8 @@ export interface CredentialProfile {
   createdAt: number;
 }
 
-const LIST_KEY   = 'dbtable:ai-credentials:v1';
-const ACTIVE_KEY = 'dbtable:ai-active-credential:v1';
+const LIST_KEY   = 'tablerelay:ai-credentials:v1';
+const ACTIVE_KEY = 'tablerelay:ai-active-credential:v1';
 
 export function loadCredentials(): CredentialProfile[] {
   try {
@@ -23,7 +23,7 @@ export function loadCredentials(): CredentialProfile[] {
 
 function persist(list: CredentialProfile[]): void {
   localStorage.setItem(LIST_KEY, JSON.stringify(list));
-  window.dispatchEvent(new CustomEvent('dbtable:credentials-changed'));
+  window.dispatchEvent(new CustomEvent('tablerelay:credentials-changed'));
 }
 
 export function saveCredential(
@@ -53,5 +53,5 @@ export function getActiveCredentialId(): string | null {
 export function setActiveCredentialId(id: string | null): void {
   if (id) localStorage.setItem(ACTIVE_KEY, id);
   else    localStorage.removeItem(ACTIVE_KEY);
-  window.dispatchEvent(new CustomEvent('dbtable:credentials-changed'));
+  window.dispatchEvent(new CustomEvent('tablerelay:credentials-changed'));
 }

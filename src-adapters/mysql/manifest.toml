@@ -17,7 +17,7 @@ description  = "Connects to MySQL 5.7+, MySQL 8+, MariaDB 10+, Percona, and most
 tags = ["sql", "relational", "first-party"]
 
 [provenance]
-vendor  = "db-table team"
+vendor  = "Table Relay team"
 license = "Apache-2.0"
 
 [capabilities]
