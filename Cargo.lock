@@ -1082,6 +1082,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array 0.14.7",
+ "rand_core 0.6.4",
  "typenum",
 ]
 
@@ -6199,12 +6200,15 @@ dependencies = [
  "adapter-postgres",
  "adapter-redis",
  "adapter-sqlite",
+ "aes-gcm 0.10.3",
+ "argon2",
  "async-stream",
  "async-trait",
  "bytes",
  "chrono",
  "flate2",
  "futures",
+ "rand 0.8.6",
  "reqwest 0.12.28",
  "rusqlite",
  "rusqlite_migration",

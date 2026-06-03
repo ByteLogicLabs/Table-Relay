@@ -1,49 +1,39 @@
 import { useSyncExternalStore } from 'react';
-import type { RailTile, RailTileInput } from '../lib/rail';
+import { railStore, type RailTile, type RailTileInput } from '../lib/rail';
 
-// Rail tiles persist across launches via localStorage so the user's pinned
-// databases come back on reopen. The app still shows a boot/empty screen when
-// the stored list is empty so new users aren't dumped into an arbitrary tile.
+// Rail tiles persist in the encrypted backend store. localStorage is read only
+// once as a legacy migration path, then cleared.
 interface State {
   tiles: RailTile[];
 }
 
 const STORAGE_KEY = 'tablerelay:rail:v1';
+const OLD_STORAGE_KEY = 'dbtable:rail:v1';
 
-function loadInitial(): State {
-  if (typeof window === 'undefined') return { tiles: [] };
+function readLegacyLocalStorage(): RailTile[] {
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { tiles: [] };
+    const raw = window.localStorage.getItem(STORAGE_KEY) ?? window.localStorage.getItem(OLD_STORAGE_KEY);
+    if (!raw) return [];
     const parsed = JSON.parse(raw) as { tiles?: RailTile[] };
-    if (!parsed || !Array.isArray(parsed.tiles)) return { tiles: [] };
+    if (!parsed || !Array.isArray(parsed.tiles)) return [];
     // Basic shape check — drop anything that doesn't have the required
     // identity fields so we don't crash later on stale/garbled entries.
-    const cleaned = parsed.tiles.filter(
+    return parsed.tiles.filter(
       t => t && typeof t.id === 'string' && typeof t.serverId === 'string' && typeof t.databaseName === 'string',
     );
-    return { tiles: cleaned };
   } catch {
-    return { tiles: [] };
+    return [];
   }
 }
 
-function persist(s: State) {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify({ tiles: s.tiles }));
-  } catch {
-    // Quota / private-mode: silently fall back to in-memory only.
-  }
-}
-
-let state: State = loadInitial();
+let state: State = { tiles: [] };
+let hydrated = false;
 
 const listeners = new Set<() => void>();
 function emit() { for (const l of listeners) l(); }
 function subscribe(l: () => void) { listeners.add(l); return () => { listeners.delete(l); }; }
 function getSnapshot() { return state; }
-function mutate(fn: (s: State) => State) { state = fn(state); persist(state); emit(); }
+function mutate(fn: (s: State) => State) { state = fn(state); emit(); }
 
 export function useRail() {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
@@ -54,32 +44,40 @@ export function getRailSnapshot(): RailTile[] {
 }
 
 export async function refreshRail(): Promise<void> {
-  // No-op: session-only rail, nothing to refresh from.
-}
-
-function tileId(serverId: string, databaseName: string): string {
-  return `${serverId}::${databaseName}`;
+  let tiles = await railStore.list();
+  if (!hydrated && tiles.length === 0) {
+    const legacy = readLegacyLocalStorage();
+    if (legacy.length > 0) {
+      const migrated: RailTile[] = [];
+      for (const tile of legacy.sort((a, b) => a.orderIndex - b.orderIndex)) {
+        migrated.push(await railStore.pin({
+          serverId: tile.serverId,
+          databaseName: tile.databaseName,
+          label: tile.label ?? undefined,
+        }));
+      }
+      await railStore.reorder(migrated.map(t => t.id));
+      try {
+        window.localStorage.removeItem(STORAGE_KEY);
+        window.localStorage.removeItem(OLD_STORAGE_KEY);
+      } catch { /* noop */ }
+      tiles = await railStore.list();
+    }
+  }
+  hydrated = true;
+  mutate(() => ({ tiles }));
 }
 
 export async function pinTile(input: RailTileInput): Promise<RailTile> {
-  const id = tileId(input.serverId, input.databaseName);
-  const existing = state.tiles.find(t => t.id === id);
+  const existing = state.tiles.find(t => t.serverId === input.serverId && t.databaseName === input.databaseName);
   if (existing) return existing;
-  const now = Date.now();
-  const tile: RailTile = {
-    id,
-    serverId: input.serverId,
-    databaseName: input.databaseName,
-    label: input.label ?? null,
-    orderIndex: state.tiles.length,
-    createdAt: now,
-    updatedAt: now,
-  };
+  const tile = await railStore.pin(input);
   mutate(s => ({ tiles: [...s.tiles, tile] }));
   return tile;
 }
 
 export async function unpinTile(id: string): Promise<void> {
+  await railStore.unpin(id);
   mutate(s => ({ tiles: s.tiles.filter(t => t.id !== id) }));
 }
 
@@ -87,6 +85,7 @@ export async function unpinTile(id: string): Promise<void> {
 export async function unpinManyTiles(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const set = new Set(ids);
+  for (const id of ids) await railStore.unpin(id);
   mutate(s => ({ tiles: s.tiles.filter(t => !set.has(t.id)) }));
 }
 
@@ -101,7 +100,7 @@ export function reorderTiles(orderedIds: string[]): void {
         return t ? { ...t, orderIndex: i, updatedAt: now } : null;
       })
       .filter((t): t is RailTile => t !== null);
+    void railStore.reorder(reordered.map(t => t.id));
     return { tiles: reordered };
   });
 }
-

@@ -36,10 +36,8 @@ pub fn run() {
             // forward so existing users keep their saved connections, known SSH
             // hosts, AI settings and chat history after the rename.
             migrate_legacy_app_data(&dir);
-            let store_path = dir.join("store.db");
-            let store = Arc::new(
-                Store::open(store_path).expect("failed to open connection store"),
-            );
+            let store =
+                Arc::new(Store::open(dir.clone()).expect("failed to initialize connection store"));
 
             // Factory registry + built-in adapters. Must run before any
             // `db_connect` command can dispatch by adapter id.
@@ -152,7 +150,9 @@ pub fn run() {
                 if let Some(ch) = channel {
                     match app_handle.emit(&ch, ()) {
                         Ok(()) => crate::log::write_line("menu", &format!("emitted: {ch}")),
-                        Err(e) => crate::log::write_line("menu", &format!("emit failed: {ch}: {e}")),
+                        Err(e) => {
+                            crate::log::write_line("menu", &format!("emit failed: {ch}: {e}"))
+                        }
                     }
                 }
             });
@@ -160,10 +160,19 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // Security / encrypted app store
+            commands::security::security_status,
+            commands::security::security_initialize,
+            commands::security::security_unlock,
+            commands::security::security_lock,
+            commands::security::security_remove_backup,
             // Connection store (plain, no encryption)
             commands::store::connections_list,
             commands::store::connections_save,
             commands::store::connections_delete,
+            commands::store::app_state_get,
+            commands::store::app_state_set,
+            commands::store::app_state_delete,
             commands::store::ai_settings_list,
             commands::store::ai_settings_get,
             commands::store::ai_settings_save,
@@ -280,10 +289,7 @@ fn migrate_legacy_app_data(new_dir: &std::path::Path) {
                 "migrate",
                 &format!("carried forward {name} from com.dbtable.app"),
             ),
-            Err(e) => crate::log::write_line(
-                "migrate",
-                &format!("copy {name} failed: {e}"),
-            ),
+            Err(e) => crate::log::write_line("migrate", &format!("copy {name} failed: {e}")),
         }
     }
 }

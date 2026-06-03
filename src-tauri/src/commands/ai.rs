@@ -116,10 +116,9 @@ pub async fn ai_start(
         }
         ProviderKind::OpenaiCompatible => {
             let key = input.api_key.clone().unwrap_or_default();
-            let base = input
-                .base_url
-                .clone()
-                .ok_or_else(|| AiError::InvalidModel("base_url is required for openai_compatible".into()))?;
+            let base = input.base_url.clone().ok_or_else(|| {
+                AiError::InvalidModel("base_url is required for openai_compatible".into())
+            })?;
             let p = OpenAiProvider::compatible(base, key, input.model.clone());
             p.probe().await?;
             Arc::new(p)
@@ -148,8 +147,9 @@ pub async fn ai_start(
             model: Some(input.model.clone()),
             options_json: input.options_json.clone(),
         };
-        let guard = store.db.lock().expect("store db mutex poisoned");
-        if let Err(e) = crate::store::repo_ai::upsert(&guard, input_clone) {
+        if let Err(e) = store.with_conn(true, |guard| {
+            crate::store::repo_ai::upsert(guard, input_clone).map(|_| ())
+        }) {
             crate::log_line!("ai_settings", "persist failed: {e}");
         }
     }
@@ -203,21 +203,27 @@ pub async fn ai_list_models(input: ListModelsInput) -> Result<Vec<String>, AiErr
         ProviderKind::Openai => {
             let key = input.api_key.as_deref().unwrap_or_default();
             if key.is_empty() {
-                return Err(AiError::Unauthorized("API key is required to list models".into()));
+                return Err(AiError::Unauthorized(
+                    "API key is required to list models".into(),
+                ));
             }
             OpenAiProvider::list_models("https://api.openai.com/v1", Some(key)).await
         }
         ProviderKind::Anthropic => {
             let key = input.api_key.as_deref().unwrap_or_default();
             if key.is_empty() {
-                return Err(AiError::Unauthorized("API key is required to list models".into()));
+                return Err(AiError::Unauthorized(
+                    "API key is required to list models".into(),
+                ));
             }
             AnthropicProvider::list_models(key).await
         }
         ProviderKind::Gemini => {
             let key = input.api_key.as_deref().unwrap_or_default();
             if key.is_empty() {
-                return Err(AiError::Unauthorized("API key is required to list models".into()));
+                return Err(AiError::Unauthorized(
+                    "API key is required to list models".into(),
+                ));
             }
             GeminiProvider::list_models(key).await
         }
@@ -260,10 +266,7 @@ pub async fn ai_cancel_download(
 }
 
 #[tauri::command]
-pub async fn ai_delete_model(
-    id: String,
-    slot: State<'_, SessionSlot>,
-) -> Result<(), AiError> {
+pub async fn ai_delete_model(id: String, slot: State<'_, SessionSlot>) -> Result<(), AiError> {
     // Refuse if the active session is using this exact model, so we don't
     // yank weights out from under a live provider.
     let active = {
@@ -296,10 +299,15 @@ pub struct LlamaRuntimeStatus {
 #[tauri::command]
 pub async fn ai_check_llama_server() -> Result<LlamaRuntimeStatus, AiError> {
     let path = crate::ai::llama_server::find_binary();
-    let platform = if cfg!(target_os = "macos") { "macos" }
-        else if cfg!(target_os = "windows") { "windows" }
-        else if cfg!(target_os = "linux") { "linux" }
-        else { "other" };
+    let platform = if cfg!(target_os = "macos") {
+        "macos"
+    } else if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "other"
+    };
     let install_command = match platform {
         "macos" => "brew install llama.cpp",
         "linux" => "# Ubuntu/Debian:\nsudo apt install llama.cpp\n# or build from source: https://github.com/ggerganov/llama.cpp",
@@ -370,7 +378,11 @@ pub enum FocusHint {
     /// A routine or view tab. The backend re-fetches the body via
     /// `describe_routine` so edits the user made but hasn't saved yet
     /// don't leak through.
-    Routine { schema: String, name: String, kind: String },
+    Routine {
+        schema: String,
+        name: String,
+        kind: String,
+    },
     /// A data / structure tab focused on a specific table. The schema-context
     /// already lists every table; this just marks which one is active so the
     /// model doesn't have to guess which table "this" refers to.
@@ -407,7 +419,11 @@ impl FocusHint {
                 format!("routine:{schema}.{name}:{kind}")
             }
             FocusHint::Table { schema, name } => format!("table:{schema}.{name}"),
-            FocusHint::Realtime { pattern, is_running, .. } => {
+            FocusHint::Realtime {
+                pattern,
+                is_running,
+                ..
+            } => {
                 format!("realtime:{pattern}:{is_running}")
             }
         }
@@ -419,7 +435,10 @@ fn assemble_user_turn(input: &ChatSendInput) -> String {
         ChatKind::Chat => input.content.clone(),
         ChatKind::Fix => {
             let sql = input.sql.as_deref().unwrap_or(&input.content);
-            let err = input.error_message.as_deref().unwrap_or("(no error message)");
+            let err = input
+                .error_message
+                .as_deref()
+                .unwrap_or("(no error message)");
             format!(
                 "The following SQL failed with an error. Diagnose the cause and return a \
                 corrected version in a single fenced ```sql block. Keep the fix minimal \
@@ -500,7 +519,11 @@ async fn ai_chat_send_inner(
     // skips the re-build (which is the hot path).
     let new_context_key: Option<String> = input.connection_id.as_deref().map(|cid| {
         let schema_part = input.schema.as_deref().unwrap_or("");
-        let focus_part = input.focus.as_ref().map(FocusHint::cache_key).unwrap_or_default();
+        let focus_part = input
+            .focus
+            .as_ref()
+            .map(FocusHint::cache_key)
+            .unwrap_or_default();
         format!("{cid}|{schema_part}|{focus_part}")
     });
     let needs_context = {
@@ -509,9 +532,9 @@ async fn ai_chat_send_inner(
             return Err(AiError::NoActiveSession);
         };
         match (&session.last_context_key, &new_context_key) {
-            (_, None) => false,                     // no focus → nothing to inject
-            (None, Some(_)) => true,                // first turn with a focus
-            (Some(a), Some(b)) => a != b,           // user switched tabs
+            (_, None) => false,           // no focus → nothing to inject
+            (None, Some(_)) => true,      // first turn with a focus
+            (Some(a), Some(b)) => a != b, // user switched tabs
         }
     };
 
@@ -566,10 +589,14 @@ async fn ai_chat_send_inner(
                 ctx
             };
             crate::log_chat!("system", "{}", framed.chars().take(400).collect::<String>());
-            session.messages.push(ChatMessage::text(ChatRole::System, framed));
+            session
+                .messages
+                .push(ChatMessage::text(ChatRole::System, framed));
             session.last_context_key = new_context_key.clone();
         }
-        session.messages.push(ChatMessage::text(ChatRole::User, user_turn));
+        session
+            .messages
+            .push(ChatMessage::text(ChatRole::User, user_turn));
         let tool_mode = session.provider.supports_tools() && input.connection_id.is_some();
         (session.provider.clone(), tool_mode)
     };
@@ -640,7 +667,9 @@ async fn ai_chat_send_inner(
     {
         let mut guard = slot.write().await;
         if let Some(session) = guard.as_mut() {
-            session.messages.push(ChatMessage::text(ChatRole::Assistant, full.clone()));
+            session
+                .messages
+                .push(ChatMessage::text(ChatRole::Assistant, full.clone()));
         }
     }
 
@@ -711,7 +740,9 @@ async fn run_tool_loop(
             with_system_prompt(&session.messages)
         };
 
-        let turn = provider.complete_once(&history, Some(&tools_catalog)).await?;
+        let turn = provider
+            .complete_once(&history, Some(&tools_catalog))
+            .await?;
 
         if turn.tool_calls.is_empty() {
             // Final answer. Commit + emit as one chunk + done.
@@ -727,7 +758,10 @@ async fn run_tool_loop(
             }
             let _ = app.emit(
                 "ai://chat/chunk",
-                ChunkEvent { request_id: request_id.clone(), delta: content.clone() },
+                ChunkEvent {
+                    request_id: request_id.clone(),
+                    delta: content.clone(),
+                },
             );
             let _ = app.emit(
                 "ai://chat/done",
@@ -864,11 +898,18 @@ async fn run_tool_loop(
                 }
                 let _ = app.emit(
                     "ai://chat/chunk",
-                    ChunkEvent { request_id: request_id.clone(), delta: msg.clone() },
+                    ChunkEvent {
+                        request_id: request_id.clone(),
+                        delta: msg.clone(),
+                    },
                 );
                 let _ = app.emit(
                     "ai://chat/done",
-                    DoneEvent { request_id, content: msg, finish_reason: Some("error") },
+                    DoneEvent {
+                        request_id,
+                        content: msg,
+                        finish_reason: Some("error"),
+                    },
                 );
                 return Ok(());
             }
@@ -892,7 +933,10 @@ async fn run_tool_loop(
     }
     let _ = app.emit(
         "ai://chat/chunk",
-        ChunkEvent { request_id: request_id.clone(), delta: fallback.clone() },
+        ChunkEvent {
+            request_id: request_id.clone(),
+            delta: fallback.clone(),
+        },
     );
     let _ = app.emit(
         "ai://chat/done",
@@ -945,10 +989,7 @@ pub async fn ai_set_auto_approvals(
 }
 
 #[tauri::command]
-pub async fn ai_chat_stop(
-    request_id: String,
-    slot: State<'_, SessionSlot>,
-) -> Result<(), AiError> {
+pub async fn ai_chat_stop(request_id: String, slot: State<'_, SessionSlot>) -> Result<(), AiError> {
     let provider = session::require_provider(&slot).await?;
     provider.cancel(&request_id).await;
     Ok(())
@@ -1005,8 +1046,7 @@ fn repair_orphan_tool_calls(history: &[ChatMessage]) -> Vec<ChatMessage> {
             // / interrupted prior turn and would make OpenAI reject the
             // request with "tool_call_id ... not found in tool_calls of
             // previous message". Drop those.
-            let needed_set: HashSet<String> =
-                m.tool_calls.iter().map(|c| c.id.clone()).collect();
+            let needed_set: HashSet<String> = m.tool_calls.iter().map(|c| c.id.clone()).collect();
             let mut seen: HashSet<String> = HashSet::new();
             let mut j = i + 1;
             while j < history.len() && matches!(history[j].role, ChatRole::Tool) {
@@ -1058,8 +1098,9 @@ pub async fn ai_conversation_list(
     store: State<'_, Arc<crate::store::Store>>,
     limit: Option<i64>,
 ) -> Result<Vec<conv_repo::Conversation>, AiError> {
-    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
-    conv_repo::list(&db, limit).map_err(|e| AiError::Other(e.to_string()))
+    store
+        .with_conn(false, |db| conv_repo::list(db, limit))
+        .map_err(|e| AiError::Other(e.to_string()))
 }
 
 #[tauri::command]
@@ -1067,8 +1108,9 @@ pub async fn ai_conversation_get(
     store: State<'_, Arc<crate::store::Store>>,
     id: String,
 ) -> Result<Option<conv_repo::Conversation>, AiError> {
-    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
-    conv_repo::get(&db, &id).map_err(|e| AiError::Other(e.to_string()))
+    store
+        .with_conn(false, |db| conv_repo::get(db, &id))
+        .map_err(|e| AiError::Other(e.to_string()))
 }
 
 #[tauri::command]
@@ -1079,8 +1121,18 @@ pub async fn ai_conversation_create(
     provider_kind: Option<String>,
     model: Option<String>,
 ) -> Result<conv_repo::Conversation, AiError> {
-    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
-    conv_repo::create(&db, conv_repo::CreateConversationInput { id, connection_id, provider_kind, model })
+    store
+        .with_conn(true, |db| {
+            conv_repo::create(
+                db,
+                conv_repo::CreateConversationInput {
+                    id,
+                    connection_id,
+                    provider_kind,
+                    model,
+                },
+            )
+        })
         .map_err(|e| AiError::Other(e.to_string()))
 }
 
@@ -1089,8 +1141,9 @@ pub async fn ai_conversation_delete(
     store: State<'_, Arc<crate::store::Store>>,
     id: String,
 ) -> Result<(), AiError> {
-    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
-    conv_repo::delete(&db, &id).map_err(|e| AiError::Other(e.to_string()))
+    store
+        .with_conn(true, |db| conv_repo::delete(db, &id))
+        .map_err(|e| AiError::Other(e.to_string()))
 }
 
 #[tauri::command]
@@ -1099,8 +1152,9 @@ pub async fn ai_conversation_update_title(
     id: String,
     title: String,
 ) -> Result<(), AiError> {
-    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
-    conv_repo::update_title(&db, &id, &title).map_err(|e| AiError::Other(e.to_string()))
+    store
+        .with_conn(true, |db| conv_repo::update_title(db, &id, &title))
+        .map_err(|e| AiError::Other(e.to_string()))
 }
 
 #[tauri::command]
@@ -1114,11 +1168,20 @@ pub async fn ai_conversation_save_message(
     tool_call_id: Option<String>,
     kind: Option<String>,
 ) -> Result<(), AiError> {
-    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
-    conv_repo::add_message(
-        &db, &conversation_id, &msg_id, &role, &content,
-        tool_calls_json.as_deref(), tool_call_id.as_deref(), kind.as_deref(),
-    ).map_err(|e| AiError::Other(e.to_string()))
+    store
+        .with_conn(true, |db| {
+            conv_repo::add_message(
+                db,
+                &conversation_id,
+                &msg_id,
+                &role,
+                &content,
+                tool_calls_json.as_deref(),
+                tool_call_id.as_deref(),
+                kind.as_deref(),
+            )
+        })
+        .map_err(|e| AiError::Other(e.to_string()))
 }
 
 #[tauri::command]
@@ -1126,8 +1189,9 @@ pub async fn ai_conversation_clear_messages(
     store: State<'_, Arc<crate::store::Store>>,
     conversation_id: String,
 ) -> Result<(), AiError> {
-    let db = store.db.lock().map_err(|_| AiError::Other("store lock poisoned".into()))?;
-    conv_repo::clear_messages(&db, &conversation_id).map_err(|e| AiError::Other(e.to_string()))
+    store
+        .with_conn(true, |db| conv_repo::clear_messages(db, &conversation_id))
+        .map_err(|e| AiError::Other(e.to_string()))
 }
 
 #[cfg(test)]

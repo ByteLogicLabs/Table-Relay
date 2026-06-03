@@ -5,16 +5,17 @@ import WelcomeView from './features/workspace/welcome-view';
 import { Toaster } from './components/ui/sonner';
 import DevDebug from './components/dev-debug';
 import { setDebugPage } from './state/debug';
-import { loadSettings, applyTheme } from './lib/settings-store';
+import { loadSettings, hydrateSettings, applyTheme } from './lib/settings-store';
+import { hydrateCredentials } from './lib/ai-credentials';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
 import { isDbError } from './lib/db';
 import { connectAndLoad, disconnect as disconnectDb, markConnectionLost } from './state/connections';
-import { getRailSnapshot, useRail } from './state/rail';
+import { getRailSnapshot, refreshRail, useRail } from './state/rail';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
+import SecurityGate from './features/security/security-gate';
 
 const LEGACY_STORAGE_KEY = 'db_connections';
-const LEGACY_MIGRATED_KEY = 'db_connections_migrated_v1';
 
 function fromRecord(p: ConnectionProfileRecord): ConnectionProfile {
   return {
@@ -41,6 +42,14 @@ function fromRecord(p: ConnectionProfileRecord): ConnectionProfile {
 }
 
 export default function App() {
+  return (
+    <SecurityGate>
+      <UnlockedApp />
+    </SecurityGate>
+  );
+}
+
+function UnlockedApp() {
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
   const [activeConnectionIds, setActiveConnectionIds] = useState<string[]>([]);
   const rail = useRail();
@@ -51,6 +60,7 @@ export default function App() {
   // Track the toast id per connection so we can replace "Reconnecting..." with
   // the success/failure variant instead of stacking three unrelated toasts.
   const reconnectToastIds = useRef<Map<string, string | number>>(new Map());
+  const bootReconnectAttempted = useRef(false);
 
   const reload = useCallback(async () => {
     try {
@@ -63,7 +73,15 @@ export default function App() {
 
   // Apply persisted theme on mount (defaults to One Dark).
   useEffect(() => {
-    applyTheme(loadSettings().theme);
+    void (async () => {
+      const settings = await hydrateSettings();
+      await hydrateCredentials();
+      applyTheme(settings.theme);
+    })();
+  }, []);
+
+  useEffect(() => {
+    void refreshRail();
   }, []);
 
   // Forward native menu "Settings…" click to the frontend.
@@ -73,6 +91,12 @@ export default function App() {
     });
     return () => { void unsub.then(fn => fn()); };
   }, []);
+
+  useEffect(() => {
+    const onChanged = () => { void reload(); };
+    window.addEventListener('tablerelay:connections-changed', onChanged);
+    return () => window.removeEventListener('tablerelay:connections-changed', onChanged);
+  }, [reload]);
 
   // Listen for reconnect lifecycle events emitted by the Rust supervisor. On
   // `connection:lost` we drop the id from the active set so the rail tile and
@@ -138,6 +162,7 @@ export default function App() {
   // workspace-view connects on demand). If the rail is empty the WelcomeView
   // takes over and the user explicitly picks a connection.
   useEffect(() => {
+    if (bootReconnectAttempted.current) return;
     if (connections.length === 0) return;
     // Tiles still restore into the rail regardless; this setting only governs
     // whether we auto-reconnect on boot. One-shot effect, so read the store
@@ -145,11 +170,11 @@ export default function App() {
     if (!loadSettings().restoreOnStartup) return;
     const tiles = getRailSnapshot();
     if (tiles.length === 0) return;
-    // Resolve the focused server: the tile the user last had open, else the
-    // first pinned tile. Only this one connects on boot.
-    let focusedTileId: string | null = null;
-    try { focusedTileId = window.localStorage.getItem('tablerelay:focusedTile:v1'); } catch { /* noop */ }
-    const focusedTile = (focusedTileId && tiles.find(t => t.id === focusedTileId)) || tiles[0];
+    bootReconnectAttempted.current = true;
+    // Resolve the focused server from the restored encrypted rail. Workspace
+    // focus is hydrated after mount; cold boot reconnect can safely use the
+    // first pinned tile.
+    const focusedTile = tiles[0];
     const sid = focusedTile?.serverId;
     if (!sid || !connections.find(c => c.id === sid)) return;
     void (async () => {
@@ -162,43 +187,37 @@ export default function App() {
         console.warn('Auto-reconnect (focused) failed', sid, err);
       }
     })();
-    // Only fires when the connections list first becomes available; we don't
-    // want to re-reconnect on every store change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connections.length > 0]);
+  }, [connections.length, rail.tiles.length]);
 
   // One-time import of any legacy localStorage seed into the SQLite store.
   useEffect(() => {
     void (async () => {
-      const migrated = localStorage.getItem(LEGACY_MIGRATED_KEY);
-      if (!migrated) {
-        const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-        if (raw) {
-          try {
-            const parsed: ConnectionProfile[] = JSON.parse(raw);
-            if (Array.isArray(parsed) && parsed.length > 0) {
-              for (const c of parsed) {
-                await connectionsStore.save({
-                  name: c.name,
-                  driver: c.driver,
-                  host: c.host,
-                  port: Number(c.port),
-                  user: c.user,
-                  password: typeof c.password === 'string' && c.password !== '***' ? c.password : undefined,
-                  database: c.database,
-                  sshEnabled: !!c.sshEnabled,
-                  color: c.color,
-                  isFavorite: !!c.isFavorite,
-                });
-              }
-              toast.success(`Imported ${parsed.length} connection${parsed.length === 1 ? '' : 's'}`);
+      const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+      if (raw) {
+        try {
+          const parsed: ConnectionProfile[] = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            for (const c of parsed) {
+              await connectionsStore.save({
+                name: c.name,
+                driver: c.driver,
+                host: c.host,
+                port: Number(c.port),
+                user: c.user,
+                password: typeof c.password === 'string' && c.password !== '***' ? c.password : undefined,
+                database: c.database,
+                sshEnabled: !!c.sshEnabled,
+                color: c.color,
+                isFavorite: !!c.isFavorite,
+              });
             }
-          } catch (e) {
-            console.warn('Legacy connections migration skipped', e);
+            toast.success(`Imported ${parsed.length} connection${parsed.length === 1 ? '' : 's'}`);
           }
+        } catch (e) {
+          console.warn('Legacy connections migration skipped', e);
+        } finally {
+          localStorage.removeItem(LEGACY_STORAGE_KEY);
         }
-        localStorage.setItem(LEGACY_MIGRATED_KEY, '1');
-        localStorage.removeItem(LEGACY_STORAGE_KEY);
       }
       await reload();
     })();

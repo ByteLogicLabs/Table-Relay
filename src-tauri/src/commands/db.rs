@@ -12,15 +12,15 @@ use adapter_api::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use tauri::{AppHandle, State, ipc::Channel};
+use tauri::{ipc::Channel, AppHandle, State};
 use uuid::Uuid;
 
 use crate::db::adapter_registry::FactoryRegistry;
 use crate::db::reconnect::{rebuild, with_retry};
 use crate::db::registry::{ActiveConnection, ConnectionMeta, Registry};
 use crate::db::subscriptions::{SubscriptionEntry, SubscriptionRegistry};
-use crate::store::Store;
 use crate::store::repo::{self as store_repo, ConnectionProfile, ConnectionProfileInput};
+use crate::store::Store;
 
 /// Open (or re-open) a connection using credentials stored in the plain store.
 ///
@@ -54,11 +54,8 @@ pub async fn db_connect(
 
     // Read the profile + plaintext password inside a short-lived lock.
     let profile = {
-        let guard = store
-            .db
-            .lock()
-            .map_err(|_| AdapterError::Other("store db mutex poisoned".into()))?;
-        store_repo::find_by_id(&guard, &connection_id)
+        store
+            .with_conn(false, |guard| store_repo::find_by_id(guard, &connection_id))
             .map_err(|e| AdapterError::Other(e.to_string()))?
             .ok_or_else(|| {
                 AdapterError::NotFound(format!("connection {connection_id} not in store"))
@@ -73,7 +70,9 @@ pub async fn db_connect(
     })?;
     let factory = factories.get(adapter_id)?;
     let manifest = factory.manifest();
-    let adapter = factory.connect(profile.to_adapter_profile(adapter_id)).await?;
+    let adapter = factory
+        .connect(profile.to_adapter_profile(adapter_id))
+        .await?;
 
     let server = adapter.ping().await?;
     let meta = ConnectionMeta {
@@ -175,7 +174,9 @@ pub async fn db_test_connection(
     // Stage 1+2 collapsed — the factory owns SSH + DB connect. On
     // failure we disambiguate by error kind.
     let t_connect = std::time::Instant::now();
-    let adapter_result = factory.connect(profile.to_adapter_profile(adapter_id)).await;
+    let adapter_result = factory
+        .connect(profile.to_adapter_profile(adapter_id))
+        .await;
     let connect_ms = t_connect.elapsed().as_secs_f64() * 1000.0;
 
     let adapter = match adapter_result {
@@ -247,7 +248,11 @@ pub async fn db_test_connection(
                 duration_ms: 0.0,
                 message: None,
             });
-            return Ok(TestReport { steps, server: None, ok: false });
+            return Ok(TestReport {
+                steps,
+                server: None,
+                ok: false,
+            });
         }
     };
 
@@ -280,7 +285,9 @@ pub async fn db_test_connection(
 
     adapter.shutdown().await;
 
-    let ok = steps.iter().all(|s| !matches!(s.status, TestStepStatus::Failed));
+    let ok = steps
+        .iter()
+        .all(|s| !matches!(s.status, TestStepStatus::Failed));
     Ok(TestReport { steps, server, ok })
 }
 
@@ -303,9 +310,13 @@ pub async fn db_ping(
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<ServerInfo, AdapterError> {
-    with_retry(&app, &registry, &factories, &connection_id, |a| async move {
-        a.ping().await
-    })
+    with_retry(
+        &app,
+        &registry,
+        &factories,
+        &connection_id,
+        |a| async move { a.ping().await },
+    )
     .await
 }
 
@@ -323,9 +334,13 @@ pub async fn db_list_schemas(
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<Vec<SchemaInfo>, AdapterError> {
-    with_retry(&app, &registry, &factories, &connection_id, |a| async move {
-        a.list_schemas().await
-    })
+    with_retry(
+        &app,
+        &registry,
+        &factories,
+        &connection_id,
+        |a| async move { a.list_schemas().await },
+    )
     .await
 }
 
@@ -336,9 +351,13 @@ pub async fn db_list_databases(
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<Vec<String>, AdapterError> {
-    with_retry(&app, &registry, &factories, &connection_id, |a| async move {
-        a.list_databases().await
-    })
+    with_retry(
+        &app,
+        &registry,
+        &factories,
+        &connection_id,
+        |a| async move { a.list_databases().await },
+    )
     .await
 }
 
@@ -435,7 +454,10 @@ pub async fn db_run_query(
     with_retry(&app, &registry, &factories, &connection_id, |a| {
         let statement = statement.clone();
         let schema = schema.clone();
-        async move { a.execute_raw_scoped(&statement, row_limit, schema.as_deref()).await }
+        async move {
+            a.execute_raw_scoped(&statement, row_limit, schema.as_deref())
+                .await
+        }
     })
     .await
 }
@@ -465,7 +487,8 @@ pub async fn db_run_query_stream(
         let schema = schema.clone();
         let sink = tx.clone();
         async move {
-            a.execute_raw_scoped_stream(&statement, row_limit, schema.as_deref(), sink).await
+            a.execute_raw_scoped_stream(&statement, row_limit, schema.as_deref(), sink)
+                .await
         }
     })
     .await;
@@ -553,7 +576,9 @@ pub async fn db_update_rows(
         async move { a.mutate(req).await }
     })
     .await?;
-    Ok(UpdateRowsResult { rows_affected: mutation.records_affected })
+    Ok(UpdateRowsResult {
+        rows_affected: mutation.records_affected,
+    })
 }
 
 /// Wire shape for `db_modify_indexes`. Translates the host-side
@@ -671,7 +696,9 @@ pub async fn db_delete_rows(
         async move { a.mutate(req).await }
     })
     .await?;
-    Ok(DeleteRowsResult { rows_affected: mutation.records_affected })
+    Ok(DeleteRowsResult {
+        rows_affected: mutation.records_affected,
+    })
 }
 
 #[tauri::command]
@@ -738,7 +765,8 @@ pub async fn db_create_database(
         let charset = charset.clone();
         let collation = collation.clone();
         async move {
-            a.create_schema(&name, charset.as_deref(), collation.as_deref()).await
+            a.create_schema(&name, charset.as_deref(), collation.as_deref())
+                .await
         }
     })
     .await
@@ -754,9 +782,13 @@ pub async fn db_list_charsets(
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<Vec<String>, AdapterError> {
-    with_retry(&app, &registry, &factories, &connection_id, |a| async move {
-        a.list_charsets().await
-    })
+    with_retry(
+        &app,
+        &registry,
+        &factories,
+        &connection_id,
+        |a| async move { a.list_charsets().await },
+    )
     .await
 }
 
@@ -900,9 +932,13 @@ pub async fn db_process_list(
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<Vec<ProcessInfo>, AdapterError> {
-    with_retry(&app, &registry, &factories, &connection_id, |a| async move {
-        a.process_list().await
-    })
+    with_retry(
+        &app,
+        &registry,
+        &factories,
+        &connection_id,
+        |a| async move { a.process_list().await },
+    )
     .await
 }
 

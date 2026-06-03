@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Zap } from 'lucide-react';
+import { AlertCircle, Check, CheckCircle2, Download, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Upload, Zap } from 'lucide-react';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '../../components/ui/dialog';
@@ -14,14 +16,16 @@ import {
   type CredentialProfile,
   deleteCredential,
   getActiveCredentialId,
+  hydrateCredentials,
   loadCredentials,
   saveCredential,
   setActiveCredentialId,
 } from '../../lib/ai-credentials';
 import {
-  type AppTheme, type NullDisplay,
+  type AppSettings, type AppTheme, type NullDisplay,
   applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
 } from '../../lib/settings-store';
+import { connectionsStore, type ConnectionProfileRecord } from '../../lib/connections-store';
 import { toast } from 'sonner';
 
 // ── Small reusable controls ─────────────────────────────────────────────────────
@@ -48,6 +52,31 @@ function Row({ title, desc, children }: { title: string; desc?: string; children
         {desc && <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>}
       </div>
       <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
+
+/** A backup/transfer list row: label + description on the left, Export / Import on the right. */
+function DataRow({ label, desc, onExport, onImport }: {
+  label: string;
+  desc: string;
+  onExport: () => void;
+  onImport: () => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 px-4 py-3">
+      <div className="min-w-0">
+        <div className="text-sm">{label}</div>
+        <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{desc}</div>
+      </div>
+      <div className="shrink-0 flex items-center gap-1.5">
+        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={onExport}>
+          <Download className="w-3.5 h-3.5" /> Export
+        </Button>
+        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={onImport}>
+          <Upload className="w-3.5 h-3.5" /> Import
+        </Button>
+      </div>
     </div>
   );
 }
@@ -120,6 +149,53 @@ const NULL_DISPLAY_OPTIONS: { value: NullDisplay; label: string }[] = [
   { value: 'symbol',    label: '∅' },
 ];
 
+function isObject(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function asNumber(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return undefined;
+}
+
+function connectionInputFromUnknown(value: unknown) {
+  if (!isObject(value)) return null;
+  const name = asString(value.name);
+  const driver = asString(value.driver) as ConnectionProfileRecord['driver'] | undefined;
+  const host = asString(value.host);
+  const port = asNumber(value.port);
+  if (!name || !driver || !host || port === undefined) return null;
+  return {
+    id: asString(value.id),
+    name,
+    driver,
+    host,
+    port,
+    user: asString(value.user),
+    password: asString(value.password),
+    database: asString(value.database),
+    sslMode: asString(value.sslMode),
+    sshEnabled: Boolean(value.sshEnabled),
+    sshHost: asString(value.sshHost),
+    sshPort: asNumber(value.sshPort),
+    sshUser: asString(value.sshUser),
+    sshAuthKind: asString(value.sshAuthKind) as 'password' | 'key' | undefined,
+    sshKeyPath: asString(value.sshKeyPath),
+    sshPassword: asString(value.sshPassword),
+    sshKeyPassphrase: asString(value.sshKeyPassphrase),
+    color: asString(value.color),
+    isFavorite: Boolean(value.isFavorite),
+  };
+}
+
 // ── Component ──────────────────────────────────────────────────────────────────
 
 interface SettingsDialogProps {
@@ -159,10 +235,15 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   // Load credentials when dialog opens
   useEffect(() => {
     if (!open) return;
-    setCredentials(loadCredentials());
-    setActiveId(getActiveCredentialId());
+    let cancelled = false;
+    void hydrateCredentials().then(() => {
+      if (cancelled) return;
+      setCredentials(loadCredentials());
+      setActiveId(getActiveCredentialId());
+    });
     setAiMode('list');
     setEditingId(null);
+    return () => { cancelled = true; };
   }, [open]);
 
   // ── Appearance handlers
@@ -177,6 +258,225 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     setTheme(loadSettings().theme);
     applyTheme(loadSettings().theme);
     toast.success('Settings reset to defaults');
+  };
+
+  const exportJson = async (defaultPath: string, payload: unknown, label: string) => {
+    const path = await saveDialog({
+      defaultPath,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (!path) return;
+    await writeTextFile(path, JSON.stringify(payload, null, 2));
+    toast.success(`${label} exported`);
+  };
+
+  const importJson = async (): Promise<unknown | null> => {
+    const path = await openDialog({
+      multiple: false,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (!path || Array.isArray(path)) return null;
+    return JSON.parse(await readTextFile(path));
+  };
+
+  const handleExportSettings = async () => {
+    try {
+      await exportJson('table-relay-settings.json', {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        settings: loadSettings(),
+      }, 'Settings');
+    } catch (err) {
+      toast.error(`Settings export failed: ${String(err)}`);
+    }
+  };
+
+  const handleImportSettings = async () => {
+    try {
+      const payload = await importJson();
+      if (!payload) return;
+      const imported = isObject(payload) && isObject(payload.settings)
+        ? payload.settings
+        : isObject(payload) ? payload : null;
+      if (!imported) {
+        toast.error('Settings import failed: invalid JSON shape');
+        return;
+      }
+      saveSettings(imported as Partial<AppSettings>);
+      setTheme(loadSettings().theme);
+      applyTheme(loadSettings().theme);
+      toast.success('Settings imported');
+    } catch (err) {
+      toast.error(`Settings import failed: ${String(err)}`);
+    }
+  };
+
+  const handleExportConnections = async () => {
+    const ok = window.confirm('Export saved connections as plaintext JSON? This includes database passwords and SSH secrets.');
+    if (!ok) return;
+    try {
+      const connections = await connectionsStore.list();
+      await exportJson('table-relay-connections.json', {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        connections,
+      }, 'Connections');
+    } catch (err) {
+      toast.error(`Connections export failed: ${String(err)}`);
+    }
+  };
+
+  const handleImportConnections = async () => {
+    const ok = window.confirm('Import connections from JSON? Existing records with the same id will be updated.');
+    if (!ok) return;
+    try {
+      const payload = await importJson();
+      if (!payload) return;
+      const rawConnections = isObject(payload) && Array.isArray(payload.connections)
+        ? payload.connections
+        : Array.isArray(payload) ? payload : null;
+      if (!rawConnections) {
+        toast.error('Connections import failed: invalid JSON shape');
+        return;
+      }
+      let imported = 0;
+      let skipped = 0;
+      for (const item of rawConnections) {
+        const input = connectionInputFromUnknown(item);
+        if (!input) {
+          skipped += 1;
+          continue;
+        }
+        await connectionsStore.save(input);
+        imported += 1;
+      }
+      window.dispatchEvent(new CustomEvent('tablerelay:connections-changed'));
+      toast.success(`Imported ${imported} connection${imported === 1 ? '' : 's'}${skipped ? `, skipped ${skipped}` : ''}`);
+    } catch (err) {
+      toast.error(`Connections import failed: ${String(err)}`);
+    }
+  };
+
+  const handleExportCredentials = async () => {
+    const ok = window.confirm('Export AI credentials as plaintext JSON? This includes provider API keys.');
+    if (!ok) return;
+    try {
+      await hydrateCredentials();
+      await exportJson('table-relay-ai-credentials.json', {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        credentials: loadCredentials(),
+        activeCredentialId: getActiveCredentialId(),
+      }, 'AI credentials');
+    } catch (err) {
+      toast.error(`AI credentials export failed: ${String(err)}`);
+    }
+  };
+
+  const handleImportCredentials = async () => {
+    const ok = window.confirm('Import AI credentials from JSON? Credentials with the same id will be overwritten.');
+    if (!ok) return;
+    try {
+      const payload = await importJson();
+      if (!payload) return;
+      // Accept either { credentials: [...] } or a bare array.
+      const rawCreds = isObject(payload) && Array.isArray(payload.credentials)
+        ? payload.credentials
+        : Array.isArray(payload) ? payload : null;
+      if (!rawCreds) {
+        toast.error('AI credentials import failed: invalid JSON shape');
+        return;
+      }
+      await hydrateCredentials();
+      let importedCreds = 0;
+      for (const item of rawCreds) {
+        if (!isObject(item) || typeof item.name !== 'string' || typeof item.kind !== 'string') continue;
+        saveCredential({
+          id: typeof item.id === 'string' ? item.id : undefined,
+          name: item.name,
+          kind: item.kind as AiProviderKind,
+          apiKey: typeof item.apiKey === 'string' ? item.apiKey : undefined,
+          model: typeof item.model === 'string' ? item.model : '',
+          baseUrl: typeof item.baseUrl === 'string' ? item.baseUrl : undefined,
+        });
+        importedCreds += 1;
+      }
+      if (isObject(payload) && typeof payload.activeCredentialId === 'string') {
+        setActiveCredentialId(payload.activeCredentialId);
+      }
+      window.dispatchEvent(new CustomEvent('tablerelay:credentials-changed'));
+      toast.success(`Imported ${importedCreds} credential${importedCreds === 1 ? '' : 's'}`);
+    } catch (err) {
+      toast.error(`AI credentials import failed: ${String(err)}`);
+    }
+  };
+
+  const handleExportConversations = async () => {
+    try {
+      const conversationSummaries = await ai.conversationList();
+      // conversationList omits messages — fetch each full conversation so the
+      // export round-trips the actual chat history, not just the headers.
+      const conversations = await Promise.all(
+        conversationSummaries.map(c => ai.conversationGet(c.id)),
+      );
+      await exportJson('table-relay-conversations.json', {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        conversations: conversations.filter(Boolean),
+      }, 'Conversations');
+    } catch (err) {
+      toast.error(`Conversations export failed: ${String(err)}`);
+    }
+  };
+
+  const handleImportConversations = async () => {
+    const ok = window.confirm('Import conversations from JSON? Conversations with the same id will be overwritten.');
+    if (!ok) return;
+    try {
+      const payload = await importJson();
+      if (!payload) return;
+      // Accept either { conversations: [...] } or a bare array.
+      const rawConvs = isObject(payload) && Array.isArray(payload.conversations)
+        ? payload.conversations
+        : Array.isArray(payload) ? payload : null;
+      if (!rawConvs) {
+        toast.error('Conversations import failed: invalid JSON shape');
+        return;
+      }
+      let importedConvs = 0;
+      for (const conv of rawConvs) {
+        if (!isObject(conv) || typeof conv.id !== 'string') continue;
+        await ai.conversationCreate(conv.id, {
+          connectionId: typeof conv.connectionId === 'string' ? conv.connectionId : undefined,
+          providerKind: typeof conv.providerKind === 'string' ? conv.providerKind : undefined,
+          model: typeof conv.model === 'string' ? conv.model : undefined,
+        });
+        if (typeof conv.title === 'string' && conv.title) {
+          await ai.conversationUpdateTitle(conv.id, conv.title);
+        }
+        await ai.conversationClearMessages(conv.id);
+        if (Array.isArray(conv.messages)) {
+          for (const m of conv.messages) {
+            if (!isObject(m) || typeof m.role !== 'string') continue;
+            await ai.conversationSaveMessage(
+              conv.id,
+              typeof m.id === 'string' ? m.id : crypto.randomUUID(),
+              m.role,
+              typeof m.content === 'string' ? m.content : '',
+              {
+                toolCallsJson: typeof m.toolCallsJson === 'string' ? m.toolCallsJson : undefined,
+                toolCallId: typeof m.toolCallId === 'string' ? m.toolCallId : undefined,
+                kind: typeof m.kind === 'string' ? m.kind : undefined,
+              },
+            );
+          }
+        }
+        importedConvs += 1;
+      }
+      toast.success(`Imported ${importedConvs} conversation${importedConvs === 1 ? '' : 's'}`);
+    } catch (err) {
+      toast.error(`Conversations import failed: ${String(err)}`);
+    }
   };
 
   // Persist the toggle locally, and clear the backend in-memory flags when the
@@ -349,8 +649,8 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent showCloseButton className="sm:max-w-175 p-0 gap-0 overflow-hidden">
-        <div className="flex h-130">
+      <DialogContent showCloseButton className="sm:max-w-225 p-0 gap-0 overflow-hidden">
+        <div className="flex h-150">
 
           {/* Left nav */}
           <div className="w-48 shrink-0 border-r border-border bg-muted/30 flex flex-col pt-4 pb-3 gap-0.5 px-2">
@@ -378,7 +678,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
           </div>
 
           {/* Content */}
-          <div className="flex-1 overflow-y-auto p-6 min-w-0">
+          <div className="flex-1 overflow-y-auto px-8 py-6 min-w-0">
 
             {/* ── Appearance ── */}
             {section === 'appearance' && (
@@ -465,9 +765,19 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                 </Row>
 
                 <div className="pt-4 mt-2 border-t border-border">
-                  <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={handleReset}>
-                    <RotateCcw className="w-3.5 h-3.5" /> Reset all settings to defaults
-                  </Button>
+                  <h4 className="text-xs font-medium text-muted-foreground mb-2">Backup &amp; transfer</h4>
+                  <div className="rounded-md border border-border divide-y divide-border">
+                    <DataRow label="Settings" desc="Appearance, editor and behaviour preferences" onExport={handleExportSettings} onImport={handleImportSettings} />
+                    <DataRow label="Connections" desc="Saved databases — includes passwords &amp; SSH secrets" onExport={handleExportConnections} onImport={handleImportConnections} />
+                    <DataRow label="AI credentials" desc="Provider profiles — includes API keys" onExport={handleExportCredentials} onImport={handleImportCredentials} />
+                    <DataRow label="Conversations" desc="Full AI chat history" onExport={handleExportConversations} onImport={handleImportConversations} />
+                  </div>
+
+                  <div className="flex justify-end mt-3">
+                    <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={handleReset}>
+                      <RotateCcw className="w-3.5 h-3.5" /> Reset all settings to defaults
+                    </Button>
+                  </div>
                 </div>
               </div>
             )}

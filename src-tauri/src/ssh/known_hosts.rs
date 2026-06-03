@@ -8,7 +8,7 @@ use std::sync::Arc;
 use adapter_api::ssh_hosts::KnownHostsStore;
 use adapter_api::AdapterError;
 use chrono::Utc;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{params, OptionalExtension};
 
 use crate::store::Store;
 
@@ -26,33 +26,32 @@ impl KnownHostsSqlite {
 
 impl KnownHostsStore for KnownHostsSqlite {
     fn get(&self, host: &str, port: u16) -> Result<Option<String>, AdapterError> {
-        let guard = self
-            .store
-            .db
-            .lock()
-            .map_err(|_| AdapterError::SshTunnel("store mutex poisoned".into()))?;
-        guard
-            .query_row(
-                "SELECT fingerprint FROM ssh_known_hosts WHERE host = ?1 AND port = ?2",
-                params![host, port as i64],
-                |r| r.get::<_, String>(0),
-            )
-            .optional()
+        self.store
+            .with_conn(false, |guard| {
+                guard
+                    .query_row(
+                        "SELECT fingerprint FROM ssh_known_hosts WHERE host = ?1 AND port = ?2",
+                        params![host, port as i64],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(crate::store::StoreError::Sqlite)
+            })
             .map_err(|e| AdapterError::SshTunnel(format!("known_hosts read: {e}")))
     }
 
     fn insert(&self, host: &str, port: u16, fingerprint: &str) -> Result<(), AdapterError> {
-        let guard = self
-            .store
-            .db
-            .lock()
-            .map_err(|_| AdapterError::SshTunnel("store mutex poisoned".into()))?;
-        guard
-            .execute(
-                "INSERT INTO ssh_known_hosts (host, port, fingerprint, accepted_at)
+        self.store
+            .with_conn(true, |guard| {
+                guard
+                    .execute(
+                        "INSERT INTO ssh_known_hosts (host, port, fingerprint, accepted_at)
                  VALUES (?1, ?2, ?3, ?4)",
-                params![host, port as i64, fingerprint, Utc::now().timestamp()],
-            )
+                        params![host, port as i64, fingerprint, Utc::now().timestamp()],
+                    )
+                    .map(|_| ())
+                    .map_err(crate::store::StoreError::Sqlite)
+            })
             .map_err(|e| AdapterError::SshTunnel(format!("known_hosts write: {e}")))?;
         Ok(())
     }

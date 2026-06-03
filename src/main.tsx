@@ -4,11 +4,6 @@ import App from './app';
 import './index.css';
 import './lib/monaco-setup';
 import { installAutocorrectDisabler } from './lib/disable-autocorrect';
-import { migrateLegacyStorage } from './lib/storage-migration';
-
-// Carry forward persisted state from the old `dbtable:` key prefix. Must run
-// before any store module reads localStorage, so it sits at the top of boot.
-migrateLegacyStorage();
 
 installAutocorrectDisabler();
 
