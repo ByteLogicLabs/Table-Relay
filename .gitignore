@@ -22,3 +22,6 @@ workspace/*.md
 .kilo
 react-source
 AUDIT.md
+
+# Locally built macOS installers (scripts/make-dmg.sh writes to repo root)
+*.dmg
