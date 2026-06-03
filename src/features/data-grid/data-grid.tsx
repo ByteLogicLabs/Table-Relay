@@ -183,6 +183,18 @@ interface GridRow extends Record<string, unknown> {
   __rowId: string;
 }
 
+/** True when a row holds at least one user-entered value — i.e. any column
+ *  (other than the internal `__rowId`) is non-null and not an empty string.
+ *  Used to tell a "real" draft insert from a blank one created just by
+ *  clicking an empty cell. */
+function rowHasData(row: GridRow): boolean {
+  for (const [k, v] of Object.entries(row)) {
+    if (k === '__rowId') continue;
+    if (v !== null && v !== undefined && v !== '') return true;
+  }
+  return false;
+}
+
 interface GridData {
   cols: string[];
   rows: GridRow[];
@@ -802,7 +814,12 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
   }, [isBusy]);
 
   const hasEdits = Object.keys(editedCells).length > 0;
-  const hasPending = hasEdits || pendingDeletes.size > 0 || pendingInserts.length > 0;
+  // A draft insert only counts as "pending" once it actually holds data. Just
+  // clicking a blank filler cell creates an all-null draft (so the editor can
+  // open there) — that alone must NOT pop the Save/Discard bar. We treat a
+  // draft as real when any column has a non-null, non-empty value.
+  const nonEmptyInserts = pendingInserts.filter(rowHasData);
+  const hasPending = hasEdits || pendingDeletes.size > 0 || nonEmptyInserts.length > 0;
   // Refs let the keyboard handler read current values without re-subscribing
   // on every edit stroke.
   const activeEditRef = useRef(activeEdit);
@@ -830,8 +847,10 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
 
   const pendingSummary = (() => {
     const parts: string[] = [];
-    if (pendingInserts.length > 0) {
-      parts.push(`${pendingInserts.length} new row${pendingInserts.length === 1 ? '' : 's'}`);
+    // Count only drafts with real data — blank drafts (from clicking an empty
+    // cell) aren't "pending" and shouldn't inflate the summary.
+    if (nonEmptyInserts.length > 0) {
+      parts.push(`${nonEmptyInserts.length} new row${nonEmptyInserts.length === 1 ? '' : 's'}`);
     }
     if (hasEdits) {
       const n = Object.keys(editedCells).length;
@@ -1297,6 +1316,25 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
     return () => window.removeEventListener('paste', onPaste);
   }, [viewMode, pasteRows]);
 
+  // Auto-remove a draft insert IFF it still holds no data. Called when the
+  // user opens a blank draft (by clicking an empty cell) then leaves without
+  // typing — keeps phantom empty rows out of `pendingInserts` so the
+  // Save/Discard bar doesn't appear for a no-op click. Not an undo step.
+  const discardEmptyDraft = (rowId: string) => {
+    setPendingInserts(prev => {
+      const draft = prev.find(r => r.__rowId === rowId);
+      if (!draft || rowHasData(draft)) return prev; // real data → keep it
+      return prev.filter(r => r.__rowId !== rowId);
+    });
+    setSelectedRows(prev => {
+      if (!prev.has(rowId)) return prev;
+      const next = new Set(prev);
+      next.delete(rowId);
+      return next;
+    });
+    setLastSelectedRowId(prev => (prev === rowId ? null : prev));
+  };
+
   const discardInsert = (rowId: string) => {
     pushHistory();
     setPendingInserts(prev => prev.filter(r => r.__rowId !== rowId));
@@ -1337,7 +1375,11 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
     const deletes = Array.from(pendingDeletes)
       .map(id => data.rows.find(r => r.__rowId === id))
       .filter((r): r is GridRow => !!r);
-    if (edits.length === 0 && deletes.length === 0 && pendingInserts.length === 0) return;
+    // Only commit drafts that actually hold data. Blank drafts (from clicking
+    // an empty cell without typing) are dropped here so they neither trip the
+    // required-field check nor INSERT an empty row.
+    const inserts = pendingInserts.filter(rowHasData);
+    if (edits.length === 0 && deletes.length === 0 && inserts.length === 0) return;
 
     // Group edits by row. Skip any column that isn't in the base table's
     // schema — for example, a SELECT alias or a view column that doesn't map
@@ -1424,7 +1466,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
       // — the user explicitly clearing a cell to `NULL` still emits NULL via
       // the string `"NULL"` (same convention as the Set-to-NULL menu item).
       let insertCount = 0;
-      if (pendingInserts.length > 0) {
+      if (inserts.length > 0) {
         // NOT-NULL columns without a server-side default must be filled by
         // the user (or via AUTO_INCREMENT) before we can send the INSERT.
         // Catch this here with a clear message instead of letting the server
@@ -1441,7 +1483,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
           && !isAutoIncrement(c.extra),
         );
         const missing: { rowIndex: number; cols: string[] }[] = [];
-        pendingInserts.forEach((draft, i) => {
+        inserts.forEach((draft, i) => {
           const gaps: string[] = [];
           for (const c of requiredCols) {
             const v = draft[c.name];
@@ -1460,7 +1502,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
 
         const started = performance.now();
         try {
-          for (const draft of pendingInserts) {
+          for (const draft of inserts) {
             const values: Record<string, unknown> = {};
             for (const c of structure.columns) {
               const raw = draft[c.name];
@@ -1477,7 +1519,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
           }
         } catch (err) {
           const msg = isDbError(err) ? err.message : String(err);
-          onLogQuery?.(`insert ${pendingInserts.length} row${pendingInserts.length === 1 ? '' : 's'} into ${structure.schema}.${structure.name}`, {
+          onLogQuery?.(`insert ${inserts.length} row${inserts.length === 1 ? '' : 's'} into ${structure.schema}.${structure.name}`, {
             source: 'grid',
             status: 'error',
             message: msg,
@@ -1486,7 +1528,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
           toast.error(`Insert failed: ${msg}`);
           return;
         }
-        insertCount = pendingInserts.length;
+        insertCount = inserts.length;
         const elapsed = performance.now() - started;
         onLogQuery?.(`insert ${insertCount} row${insertCount === 1 ? '' : 's'} into ${structure.schema}.${structure.name}`, {
           source: 'grid',
@@ -1752,14 +1794,27 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, isAct
 
   const commitActiveEdit = useCallback(() => {
     setActiveEdit(prev => {
-      if (prev) handleCellEdit(prev.rowId, prev.col, prev.value);
+      if (prev) {
+        handleCellEdit(prev.rowId, prev.col, prev.value);
+        // If the user committed a blank value into a brand-new draft row and
+        // that leaves the whole draft empty, drop the draft — clicking a blank
+        // cell and tabbing away shouldn't leave a phantom pending insert.
+        if (prev.rowId.startsWith('new:') && (prev.value === '' || prev.value == null)) {
+          discardEmptyDraft(prev.rowId);
+        }
+      }
       return null;
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editedCells, pendingDeletes]);
 
   const cancelActiveEdit = useCallback(() => {
+    // Cancelling the edit on a still-empty draft (opened by clicking a blank
+    // cell) should remove that draft so it doesn't count as a pending insert.
+    const ae = activeEditRef.current;
+    if (ae?.rowId.startsWith('new:')) discardEmptyDraft(ae.rowId);
     setActiveEdit(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const closeMenu = useCallback(() => setMenuState(null), []);
