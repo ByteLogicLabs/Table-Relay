@@ -142,28 +142,40 @@ impl MongoDriver {
 
     pub async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
         let dbs = self.list_databases().await?;
-        let mut out = Vec::with_capacity(dbs.len());
-        for db_name in dbs {
-            if db_name == "admin" || db_name == "config" || db_name == "local" {
-                // Hide internal DBs from the primary picker/tree.
-                continue;
-            }
+        // Per-DB `listCollections` is one network round-trip each. Running
+        // them serially is an N+1 stall — on a remote cluster with many DBs it
+        // dominates the post-connect "loading schemas" wait (a 30-DB cluster
+        // pays 30 sequential RTTs). Fire them concurrently and join, so the
+        // total cost is ~one round-trip regardless of DB count. The DB list is
+        // already filtered to user DBs before we issue any collection query.
+        // See the reconnect-latency audit.
+        let user_dbs: Vec<String> = dbs
+            .into_iter()
+            .filter(|d| d != "admin" && d != "config" && d != "local")
+            .collect();
+
+        let futs = user_dbs.into_iter().map(|db_name| {
             let db = self.client.database(&db_name);
-            let collections = db.list_collection_names(None).await.map_err(map_err)?;
-            let tables = collections
-                .into_iter()
-                .map(|name| TableInfo {
-                    name,
-                    kind: TableKind::Collection,
-                    row_count: None,
+            async move {
+                let collections = db.list_collection_names(None).await.map_err(map_err)?;
+                let tables = collections
+                    .into_iter()
+                    .map(|name| TableInfo {
+                        name,
+                        kind: TableKind::Collection,
+                        row_count: None,
+                    })
+                    .collect();
+                Ok::<SchemaInfo, AdapterError>(SchemaInfo {
+                    name: db_name,
+                    tables,
                 })
-                .collect();
-            out.push(SchemaInfo {
-                name: db_name,
-                tables,
-            });
-        }
-        Ok(out)
+            }
+        });
+
+        // try_join_all preserves input order and short-circuits on the first
+        // error, matching the previous serial behaviour's error semantics.
+        futures::future::try_join_all(futs).await
     }
 
     pub async fn describe_schema(&self, schema: &str) -> Result<Vec<TableStructure>, AdapterError> {
@@ -510,7 +522,20 @@ async fn build_client(
         }
     }
 
-    opts.app_name = Some("db-table".to_string());
+    // Bound connect/server-selection. The driver defaults are 10s connect and
+    // a 30s server-selection window, so an unreachable/firewalled/paused host
+    // hangs the connect call (and the upfront `ping`) for up to 30s with no
+    // feedback. In URI mode, only set them if the URI didn't already specify
+    // its own — explicit user values win. 5s fails fast while still tolerating
+    // a brief replica-set election. See the reconnect-latency audit.
+    if opts.connect_timeout.is_none() {
+        opts.connect_timeout = Some(std::time::Duration::from_secs(5));
+    }
+    if opts.server_selection_timeout.is_none() {
+        opts.server_selection_timeout = Some(std::time::Duration::from_secs(5));
+    }
+
+    opts.app_name = Some("Table Relay".to_string());
     Client::with_options(opts).map_err(map_err)
 }
 

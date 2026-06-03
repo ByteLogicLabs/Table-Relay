@@ -168,7 +168,7 @@ export async function ensureTableStructure(
 
 /**
  * Drop every cached structure belonging to a connection. Called by the
- * global `dbtable:reload` listener so any widget that's about to re-read
+ * global `tablerelay:reload` listener so any widget that's about to re-read
  * via `ensureTableStructure` hits a cold cache. Broad-brush by design:
  * DDL in one tab can affect multiple tables (FK changes, renames) so
  * scoping to a single table isn't always enough.
@@ -187,12 +187,12 @@ export function invalidateAllTableStructures(connectionId: string): void {
   }
 }
 
-// Any component that dispatches `dbtable:reload` is telling the app "data may
+// Any component that dispatches `tablerelay:reload` is telling the app "data may
 // have changed"; honour that by dropping the structure cache for the affected
 // connection. If no connectionId is specified the event is global — invalidate
 // everything to stay safe.
 if (typeof window !== 'undefined') {
-  window.addEventListener('dbtable:reload', (e: Event) => {
+  window.addEventListener('tablerelay:reload', (e: Event) => {
     const ce = e as CustomEvent<{ connectionId?: string | null } | undefined>;
     const cid = ce.detail?.connectionId;
     if (cid) {
@@ -265,16 +265,40 @@ export async function refreshTableStructure(
   return ensureTableStructure(connectionId, schema, table);
 }
 
-export async function refreshSchemas(connectionId: string): Promise<void> {
+/**
+ * Re-fetch the schema list for a connection.
+ *
+ * `opts.silent` enables stale-while-revalidate: the cached tree stays on
+ * screen and we do NOT flip `loadingSchemasById` (which would make the sidebar
+ * swap in the loading skeleton). New data is swapped in when it lands; on error
+ * the cached tree is kept rather than surfaced as a failure. Use this for
+ * background revalidation — e.g. switching back to an already-loaded
+ * connection, where a brief socket re-check shouldn't blank the UI. Without
+ * `silent`, the call shows the loading state (first load, manual ⌘+R).
+ *
+ * If a connection has no cached schemas yet, a `silent` call is automatically
+ * promoted to a visible one — there's nothing to keep on screen, so the
+ * skeleton is the right thing to show.
+ */
+export async function refreshSchemas(
+  connectionId: string,
+  opts: { silent?: boolean } = {},
+): Promise<void> {
   const existing = inflightSchemas.get(connectionId);
   if (existing) return existing;
 
+  // Silent only makes sense when there's a cached tree to keep visible.
+  const hasCache = (getSnapshot().schemasById.get(connectionId)?.length ?? 0) > 0;
+  const silent = opts.silent === true && hasCache;
+
   const p = (async () => {
-    mutate(s => {
-      const loadingSchemasById = new Set(s.loadingSchemasById);
-      loadingSchemasById.add(connectionId);
-      return { ...s, loadingSchemasById };
-    });
+    if (!silent) {
+      mutate(s => {
+        const loadingSchemasById = new Set(s.loadingSchemasById);
+        loadingSchemasById.add(connectionId);
+        return { ...s, loadingSchemasById };
+      });
+    }
     try {
       const schemas = await db.listSchemas(connectionId);
       mutate(s => {
@@ -289,6 +313,12 @@ export async function refreshSchemas(connectionId: string): Promise<void> {
       mutate(s => {
         const loadingSchemasById = new Set(s.loadingSchemasById);
         loadingSchemasById.delete(connectionId);
+        // A silent background revalidation that fails leaves the cached tree
+        // in place and stays quiet — don't surface a transient blip as a
+        // connection error. A visible refresh records the error as before.
+        if (silent) {
+          return { ...s, loadingSchemasById };
+        }
         const lastErrorById = new Map(s.lastErrorById);
         lastErrorById.set(connectionId, msg);
         return { ...s, loadingSchemasById, lastErrorById };

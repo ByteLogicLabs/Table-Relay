@@ -53,6 +53,7 @@ import {
   type ViewInfo,
 } from '../../lib/db';
 import DbIcon from '../../components/db-icon';
+import { SidebarListSkeleton } from '../../components/skeleton';
 import { DestructiveConfirmDialog } from '../../components/destructive-confirm-dialog';
 import { useMultiSelection } from '../../hooks/use-multi-selection';
 import { getClickIntent, getKeyIntent } from '../../lib/click-intent';
@@ -198,6 +199,12 @@ export default function Sidebar({
   // where historically everything supported them.
   const supportsRealtime = activeManifest?.capabilities.realtime ?? false;
   const supportsProcessList = activeManifest?.capabilities.processList ?? false;
+  // Generic noun for the primary-entity section header. Document stores (Mongo)
+  // report sql_dialect=none — same flag the data grid uses for isDocumentStore.
+  // We label the section "documents"/"tables" (the kind) rather than the
+  // schema/database name, matching the "views"/"routines" sections below.
+  const isDocumentStore = activeManifest?.capabilities.sqlDialect === 'none';
+  const entityNoun = isDocumentStore ? 'documents' : 'tables';
   // Distinguish "connection exists in store" from "connection is live". When
   // a connect attempt fails we still have `conn` (the profile) but no active
   // driver — this is what the sidebar checks to swap in a clear "failed"
@@ -270,6 +277,12 @@ export default function Sidebar({
   const effectiveSchema = useMemo(() => {
     if (!selectedDb) return null;
     if (schemas.some(s => s.name === selectedDb)) return selectedDb;
+    // Case-insensitive fallback: a rail tile pinned/displayed as `Clipbridge`
+    // must still resolve the real lowercase `clipbridge` schema (Mongo db
+    // names and user casing differ). Without this the match falls through to
+    // schemas[0] and the table list renders blank after reload.
+    const ci = schemas.find(s => s.name.toLowerCase() === selectedDb.toLowerCase());
+    if (ci) return ci.name;
     const pub = schemas.find(s => s.name === 'public');
     if (pub) return pub.name;
     const nonEmpty = schemas.find(s => s.tables.length > 0);
@@ -322,8 +335,8 @@ export default function Sidebar({
         .catch(err => console.warn('reload views/routines failed', err))
         .finally(() => setLoadingExtras(false));
     };
-    window.addEventListener('dbtable:reload', onReload);
-    return () => window.removeEventListener('dbtable:reload', onReload);
+    window.addEventListener('tablerelay:reload', onReload);
+    return () => window.removeEventListener('tablerelay:reload', onReload);
   }, [conn, selectedDb]);
 
   // Lazy-load views + routines whenever the selected database changes.
@@ -428,7 +441,7 @@ export default function Sidebar({
       tableSelection.clearSelection();
       // Trigger the same refresh path that ⌘+R uses so the sidebar
       // re-fetches schemas/views/routines after the structural change.
-      window.dispatchEvent(new CustomEvent('dbtable:reload'));
+      window.dispatchEvent(new CustomEvent('tablerelay:reload'));
     } catch (err) {
       toast.error(`${tableConfirm.kind === 'drop' ? 'Drop' : 'Truncate'} failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -551,7 +564,7 @@ export default function Sidebar({
         break;
       case 'refresh':
         e.preventDefault();
-        window.dispatchEvent(new CustomEvent('dbtable:reload'));
+        window.dispatchEvent(new CustomEvent('tablerelay:reload'));
         break;
     }
   }, [conn, moveTableFocus, onOpenTable, orderedTableIds, requestDropSelected, schemaForActions, supportsDropTable, tableSelection]);
@@ -836,13 +849,22 @@ export default function Sidebar({
             </div>
           )}
 
-          {/* Connecting state — show a spinner instead of silently rendering
-              a zero-row section tree. */}
-          {conn && !isConnected && isConnecting && (
-            <div className="px-4 py-6 flex flex-col items-center gap-2 text-center text-xs text-muted-foreground">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <div>Connecting to {conn.name}…</div>
-            </div>
+          {/* Connecting / pre-connect — show a list skeleton (with a small
+              caption) instead of a bare spinner so the panel reads as content
+              loading. This covers BOTH the in-flight connect (`isConnecting`)
+              AND the async-boot gap on reload where the focused profile has
+              resolved but the reconnect hasn't started yet — so the connection
+              is not in `activeById` (isConnected=false), not in `connectingIds`
+              (isConnecting=false), and has no error. Without the second case
+              none of the branches matched and the body rendered blank. */}
+          {conn && !isConnected && !connectError && (
+            <>
+              <div className="px-4 pt-2 pb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>Connecting to {conn.name}…</span>
+              </div>
+              <SidebarListSkeleton />
+            </>
           )}
 
           {/* Post-connect schema fetch. `connectAndLoad` fires
@@ -856,10 +878,13 @@ export default function Sidebar({
               has selected a db whose tables/views/routines are still
               in flight (`loadingExtras`). */}
           {conn && isConnected && (isLoadingSchemas || schemas.length === 0 || showLoadingFloor) && (
-            <div className="px-4 py-6 flex flex-col items-center gap-2 text-center text-xs text-muted-foreground">
-              <Loader2 className="w-4 h-4 animate-spin" />
-              <div>Loading schemas…</div>
-            </div>
+            <>
+              <div className="px-4 pt-2 pb-1 flex items-center gap-2 text-[11px] text-muted-foreground">
+                <Loader2 className="w-3 h-3 animate-spin" />
+                <span>Loading schemas…</span>
+              </div>
+              <SidebarListSkeleton />
+            </>
           )}
 
           {isConnected && !selectedDb && !isLoadingSchemas && schemas.length > 0 && !showLoadingFloor && (
@@ -874,12 +899,12 @@ export default function Sidebar({
           {isConnected && selectedDb && schemas.length > 0 && !isLoadingSchemas && !showLoadingFloor && (
             <>
               <Section
-                label={schemaForActions.toLowerCase()}
+                label={entityNoun}
                 count={fTables.length}
                 collapsed={collapsed.tables}
                 onToggle={() => toggle('tables')}
                 onAdd={onNewTable ? () => onNewTable(conn.id, schemaForActions) : undefined}
-                addTitle="New table"
+                addTitle={isDocumentStore ? 'New collection' : 'New table'}
               />
               {!collapsed.tables && (
                 <div

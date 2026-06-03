@@ -8,7 +8,7 @@ description  = "Connects to MongoDB and surfaces databases + collections for bro
 tags = ["document", "nosql", "first-party"]
 
 [provenance]
-vendor  = "db-table team"
+vendor  = "Table Relay team"
 license = "Apache-2.0"
 
 [capabilities]
@@ -41,7 +41,7 @@ diagram           = false
 erd_inference     = false
 query_editor      = true
 explain_plan      = false
-ssh_tunnel        = false
+ssh_tunnel        = true
 process_list      = true
 
 import            = []
@@ -57,9 +57,9 @@ hide_column_in_grid    = "_id"
 
 [permissions]
 network_outbound   = true
-ssh_tunnel         = false
-read_ssh_keys      = false
-store_known_hosts  = false
+ssh_tunnel         = true
+read_ssh_keys      = true
+store_known_hosts  = true
 read_credentials   = true
 
 [query_editor]

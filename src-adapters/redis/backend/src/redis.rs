@@ -79,10 +79,17 @@ impl RedisDriver {
         let client = redis::Client::open(conn_info).map_err(map_err)?;
 
         let t_pool = Instant::now();
-        let conn = client
-            .get_multiplexed_tokio_connection()
-            .await
-            .map_err(map_err)?;
+        // Bound the connect. `get_multiplexed_tokio_connection` has no timeout
+        // of its own, so a blackholed/firewalled host hangs on the OS TCP
+        // timeout (30–75s on some platforms) with the UI stuck on a spinner.
+        // 5s fails fast with a clear Timeout. See the reconnect-latency audit.
+        let conn = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.get_multiplexed_tokio_connection(),
+        )
+        .await
+        .map_err(|_| AdapterError::Timeout)?
+        .map_err(map_err)?;
         log_line!(
             "redis_connect",
             "  connected ({:.1}ms)",

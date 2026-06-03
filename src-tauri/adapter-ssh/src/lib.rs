@@ -81,7 +81,19 @@ impl Tunnel {
             cfg.auth_kind,
         );
         let ssh_config = Arc::new(client::Config {
-            inactivity_timeout: Some(Duration::from_secs(3600)),
+            // Keepalive matters now that we REUSE tunnels across operations
+            // (db_connect is idempotent). Without it an idle SSH session is
+            // silently dropped by NAT/firewall/server idle-timeout, and the
+            // next forwarded DB connection floods "open channel: Channel send
+            // error" against the dead session. A keepalive every 20s keeps the
+            // session warm; 4 unanswered probes (~80s) declares the peer dead
+            // so the transport closes and the reconnect supervisor rebuilds a
+            // fresh tunnel instead of hammering a corpse.
+            keepalive_interval: Some(Duration::from_secs(20)),
+            keepalive_max: 4,
+            // Backstop: if truly nothing is heard for a few minutes, drop the
+            // session (keepalives normally keep this from ever firing).
+            inactivity_timeout: Some(Duration::from_secs(300)),
             ..Default::default()
         });
 

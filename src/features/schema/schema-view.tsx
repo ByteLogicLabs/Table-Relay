@@ -499,7 +499,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
         });
         const total = drop.length + create.length;
         toast.success(`Applied ${total} index change${total === 1 ? '' : 's'}`);
-        window.dispatchEvent(new CustomEvent('dbtable:reload', { detail: { connectionId: connection.id } }));
+        window.dispatchEvent(new CustomEvent('tablerelay:reload', { detail: { connectionId: connection.id } }));
         try {
           const fresh = await refreshTableStructure(connection.id, effectiveSchema, nameForSave);
           setStructure(fresh);
@@ -554,7 +554,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
       // Saving a table can add / rename / drop columns and FKs — tell the
       // rest of the app to refresh its schema view. Sidebar, DiagramView,
       // autocomplete and any open DataGrid listen for this event.
-      window.dispatchEvent(new CustomEvent('dbtable:reload', { detail: { connectionId: connection.id } }));
+      window.dispatchEvent(new CustomEvent('tablerelay:reload', { detail: { connectionId: connection.id } }));
       try {
         const fresh = await refreshTableStructure(connection.id, effectiveSchema, nameForSave);
         setStructure(fresh);

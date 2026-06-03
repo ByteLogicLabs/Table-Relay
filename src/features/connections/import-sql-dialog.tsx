@@ -166,13 +166,13 @@ export default function ImportSqlDialog({
       // whenever we ran SQL against the connection — even a partial
       // import may have created some tables, and the user needs to see
       // them without manually hitting ⌘+R. We fire both a schema refresh
-      // and the global `dbtable:reload` event (which DataGrid, Sidebar,
+      // and the global `tablerelay:reload` event (which DataGrid, Sidebar,
       // and DiagramView all listen for). Runs on success AND failure —
       // an import that failed at statement 40 of 60 might still have
       // created the first 39 tables.
       void refreshSchemas(connectionId);
       window.dispatchEvent(
-        new CustomEvent('dbtable:reload', { detail: { connectionId } }),
+        new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
       );
 
       if (failed === 0) {
@@ -411,7 +411,7 @@ function buildPayload(
   // re-enabled by an import.
   if (dialect === 'mysql') {
     const prologue = [
-      '-- Import safety prologue (db-table)',
+      '-- Import safety prologue (Table Relay)',
       'SET @_OLD_FOREIGN_KEY_CHECKS = @@FOREIGN_KEY_CHECKS;',
       'SET @_OLD_UNIQUE_CHECKS = @@UNIQUE_CHECKS;',
       'SET @_OLD_SQL_MODE = @@SQL_MODE;',
@@ -420,7 +420,7 @@ function buildPayload(
       "SET SQL_MODE = 'NO_AUTO_VALUE_ON_ZERO';",
     ].join('\n');
     const epilogue = [
-      '-- Import safety epilogue (db-table)',
+      '-- Import safety epilogue (Table Relay)',
       'SET SQL_MODE = @_OLD_SQL_MODE;',
       'SET UNIQUE_CHECKS = @_OLD_UNIQUE_CHECKS;',
       'SET FOREIGN_KEY_CHECKS = @_OLD_FOREIGN_KEY_CHECKS;',
@@ -434,10 +434,10 @@ function buildPayload(
     // matches the defaults we set on connect (`foreign_keys(true)` in
     // the driver), so a re-enable won't surprise anyone.
     return [
-      '-- Import safety prologue (db-table)',
+      '-- Import safety prologue (Table Relay)',
       'PRAGMA foreign_keys = OFF;',
       out,
-      '-- Import safety epilogue (db-table)',
+      '-- Import safety epilogue (Table Relay)',
       'PRAGMA foreign_keys = ON;',
       '',
     ].join('\n');

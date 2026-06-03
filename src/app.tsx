@@ -69,7 +69,7 @@ export default function App() {
   // Forward native menu "Settings…" click to the frontend.
   useEffect(() => {
     const unsub = listen<void>('menu-app-settings', () => {
-      window.dispatchEvent(new CustomEvent('dbtable:open-settings'));
+      window.dispatchEvent(new CustomEvent('tablerelay:open-settings'));
     });
     return () => { void unsub.then(fn => fn()); };
   }, []);
@@ -104,6 +104,13 @@ export default function App() {
         const existing = reconnectToastIds.current.get(connectionId);
         toast.success(`Reconnected to ${name}`, { id: existing });
         reconnectToastIds.current.delete(connectionId);
+        // Re-add to the active set. `connection:lost` removed it (unmounting
+        // the connection's data grids), so without this its tabs stay blank
+        // even after the socket recovers — the user had to manually re-focus
+        // it to bring them back. Re-adding remounts the grids, which seed
+        // instantly from the surviving tab-data cache (Chrome-tab behaviour:
+        // a backgrounded connection keeps its rows and comes back on its own).
+        setActiveConnectionIds(prev => (prev.includes(connectionId) ? prev : [...prev, connectionId]));
       });
       const unC = await listen<ReconnectEvent>('connection:lost', (ev) => {
         const { connectionId, error } = ev.payload;
@@ -122,26 +129,37 @@ export default function App() {
     return () => { unlisteners.forEach(u => u()); };
   }, []);
 
-  // On boot, auto-reconnect to every server referenced by a persisted rail
-  // pin so the user lands right back on the databases they had open. If the
-  // rail is empty we intentionally do nothing — the WelcomeView takes over
-  // and the user explicitly picks a connection.
+  // On boot, auto-reconnect ONLY the connection the user last had focused, so
+  // they land back on the database they were looking at — WITHOUT eagerly
+  // connecting every other pinned server (which fired N× db_connect +
+  // N× list_schemas on startup and hammered the network for connections the
+  // user isn't even looking at). The other tiles still restore into the rail;
+  // they connect lazily the moment the user clicks one (handleFocusTile in
+  // workspace-view connects on demand). If the rail is empty the WelcomeView
+  // takes over and the user explicitly picks a connection.
   useEffect(() => {
     if (connections.length === 0) return;
+    // Tiles still restore into the rail regardless; this setting only governs
+    // whether we auto-reconnect on boot. One-shot effect, so read the store
+    // directly rather than via the hook.
+    if (!loadSettings().restoreOnStartup) return;
     const tiles = getRailSnapshot();
     if (tiles.length === 0) return;
-    const serverIds = Array.from(new Set(tiles.map(t => t.serverId)));
+    // Resolve the focused server: the tile the user last had open, else the
+    // first pinned tile. Only this one connects on boot.
+    let focusedTileId: string | null = null;
+    try { focusedTileId = window.localStorage.getItem('tablerelay:focusedTile:v1'); } catch { /* noop */ }
+    const focusedTile = (focusedTileId && tiles.find(t => t.id === focusedTileId)) || tiles[0];
+    const sid = focusedTile?.serverId;
+    if (!sid || !connections.find(c => c.id === sid)) return;
     void (async () => {
-      for (const sid of serverIds) {
-        if (!connections.find(c => c.id === sid)) continue;
-        try {
-          await connectAndLoad(sid);
-          setActiveConnectionIds(prev => (prev.includes(sid) ? prev : [...prev, sid]));
-        } catch (err) {
-          // Don't toast for every failure on cold-boot — the rail tile will
-          // just render in a disconnected state and the user can retry.
-          console.warn('Auto-reconnect failed', sid, err);
-        }
+      try {
+        await connectAndLoad(sid);
+        setActiveConnectionIds(prev => (prev.includes(sid) ? prev : [...prev, sid]));
+      } catch (err) {
+        // Don't toast on cold-boot — the rail tile renders disconnected and
+        // the user can retry / it connects on next focus.
+        console.warn('Auto-reconnect (focused) failed', sid, err);
       }
     })();
     // Only fires when the connections list first becomes available; we don't
@@ -187,11 +205,14 @@ export default function App() {
   }, [reload]);
 
   const handleConnect = async (id: string) => {
+    const name = connectionsRef.current.find(c => c.id === id)?.name ?? 'database';
+    const toastId = toast.loading(`Connecting to ${name}…`);
     try {
       await connectAndLoad(id);
       setActiveConnectionIds(prev => (prev.includes(id) ? prev : [...prev, id]));
+      toast.success(`Connected to ${name}`, { id: toastId });
     } catch (err) {
-      toast.error(isDbError(err) ? err.message : String(err));
+      toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
     }
   };
 
@@ -247,10 +268,12 @@ export default function App() {
     // sidebar has a chance to render any loading UI, and the user perceives
     // an unexplained blank pane for those seconds.
     setActiveConnectionIds(prev => (prev.includes(savedId) ? prev : [...prev, savedId]));
+    const toastId = toast.loading(`Connecting to ${conn.name}…`);
     try {
       await connectAndLoad(savedId);
+      toast.success(`Connected to ${conn.name}`, { id: toastId });
     } catch (err) {
-      toast.error(isDbError(err) ? err.message : String(err));
+      toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
     }
   };
 

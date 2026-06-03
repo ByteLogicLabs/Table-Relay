@@ -10,20 +10,35 @@ use adapter_api::{
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::Mutex;
 
 use crate::browse;
 use crate::execute;
 use crate::mutate;
 use crate::subscribe;
-use crate::RedisDriver;
+use crate::{RedisDriver, Tunnel};
 
 pub struct RedisAdapter {
     pub(crate) driver: Arc<RedisDriver>,
+    /// SSH tunnel kept alive for the lifetime of the adapter. `None`
+    /// when the connection is direct. Wrapped in `Mutex<Option<_>>` so
+    /// `shutdown()` can take ownership and tear it down exactly once.
+    tunnel: Mutex<Option<Tunnel>>,
 }
 
 impl RedisAdapter {
     pub fn new(driver: RedisDriver) -> Self {
-        Self { driver: Arc::new(driver) }
+        Self {
+            driver: Arc::new(driver),
+            tunnel: Mutex::new(None),
+        }
+    }
+
+    pub fn new_with_tunnel(driver: RedisDriver, tunnel: Option<Tunnel>) -> Self {
+        Self {
+            driver: Arc::new(driver),
+            tunnel: Mutex::new(tunnel),
+        }
     }
 }
 
@@ -101,5 +116,8 @@ impl Adapter for RedisAdapter {
 
     async fn shutdown(&self) {
         self.driver.shutdown().await;
+        if let Some(mut t) = self.tunnel.lock().await.take() {
+            t.shutdown().await;
+        }
     }
 }

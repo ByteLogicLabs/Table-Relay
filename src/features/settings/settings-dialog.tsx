@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, Sparkles, Trash2, Zap } from 'lucide-react';
+import { AlertCircle, Check, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Zap } from 'lucide-react';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '../../components/ui/dialog';
@@ -18,8 +18,39 @@ import {
   saveCredential,
   setActiveCredentialId,
 } from '../../lib/ai-credentials';
-import { type AppTheme, applyTheme, loadSettings, saveSettings } from '../../lib/settings-store';
+import {
+  type AppTheme, type NullDisplay,
+  applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
+} from '../../lib/settings-store';
 import { toast } from 'sonner';
+
+// ── Small reusable controls ─────────────────────────────────────────────────────
+
+function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      onClick={() => onChange(!checked)}
+      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${checked ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+    >
+      <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
+    </button>
+  );
+}
+
+function Row({ title, desc, children }: { title: string; desc?: string; children: React.ReactNode }) {
+  return (
+    <div className="flex items-center justify-between gap-4 py-2.5">
+      <div className="min-w-0">
+        <div className="text-sm">{title}</div>
+        {desc && <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>}
+      </div>
+      <div className="shrink-0">{children}</div>
+    </div>
+  );
+}
 
 // ── Provider meta ──────────────────────────────────────────────────────────────
 
@@ -79,8 +110,15 @@ function formFromProfile(p: CredentialProfile): ProfileForm {
   return { name: p.name, kind: p.kind, apiKey: p.apiKey ?? '', model: p.model, baseUrl: p.baseUrl ?? '', showKey: false };
 }
 
-type Section = 'appearance' | 'ai';
+type Section = 'appearance' | 'general' | 'editor' | 'ai';
 type AiMode  = 'list' | 'form';
+
+const ROW_LIMIT_OPTIONS = [50, 100, 250, 500, 1000];
+const NULL_DISPLAY_OPTIONS: { value: NullDisplay; label: string }[] = [
+  { value: 'blank',     label: 'Blank' },
+  { value: 'null-text', label: 'NULL' },
+  { value: 'symbol',    label: '∅' },
+];
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
@@ -94,6 +132,13 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
 
   // ── Appearance
   const [theme, setTheme] = useState<AppTheme>(() => loadSettings().theme);
+
+  // ── General / Editor / AI prefs (live via the settings store subscription)
+  const settings = useSettings();
+
+  // ── AI auto-approval persistence toggle (separate from the in-memory flags
+  // the chat panel manages). When ON, granted permissions survive restart.
+  const [aiPermsBusy, setAiPermsBusy] = useState(false);
 
   // ── AI credentials
   const [credentials, setCredentials]   = useState<CredentialProfile[]>([]);
@@ -125,6 +170,32 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     setTheme(t);
     saveSettings({ theme: t });
     applyTheme(t);
+  };
+
+  const handleReset = () => {
+    resetSettings();
+    setTheme(loadSettings().theme);
+    applyTheme(loadSettings().theme);
+    toast.success('Settings reset to defaults');
+  };
+
+  // Persist the toggle locally, and clear the backend in-memory flags when the
+  // user turns persistence OFF so a stale "remembered" grant can't linger.
+  const handlePersistApprovals = async (v: boolean) => {
+    saveSettings({ persistAiApprovals: v });
+    if (!v) {
+      setAiPermsBusy(true);
+      try {
+        await ai.setAutoApprovals({
+          read_schema: true, read_structure: true,
+          call_query: false,
+          call_query_read: false, call_query_write: false,
+          call_query_create: false, call_query_delete: false,
+          write_query_tab: false, publish_notify: false, subscribe_channel: false,
+        });
+      } catch { /* backend may not be started; toggle still persisted */ }
+      finally { setAiPermsBusy(false); }
+    }
   };
 
   // ── AI handlers
@@ -286,7 +357,12 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
             <DialogHeader className="px-2 pb-3">
               <DialogTitle className="text-sm">Settings</DialogTitle>
             </DialogHeader>
-            {([ ['appearance', Palette, 'Appearance'], ['ai', Sparkles, 'AI Providers'] ] as const).map(
+            {([
+              ['appearance', Palette, 'Appearance'],
+              ['general', Settings2, 'General'],
+              ['editor', SquarePen, 'Editor'],
+              ['ai', Sparkles, 'AI Providers'],
+            ] as const).map(
               ([id, Icon, label]) => (
                 <button
                   key={id}
@@ -341,6 +417,108 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                     ))}
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* ── General ── */}
+            {section === 'general' && (
+              <div className="space-y-1">
+                <div className="mb-2">
+                  <h3 className="text-sm font-medium mb-0.5">General</h3>
+                  <p className="text-xs text-muted-foreground">Data grid and app behaviour.</p>
+                </div>
+
+                <Row title="Default row limit" desc="Page size used when opening a new table tab.">
+                  <Select
+                    value={String(settings.defaultRowLimit)}
+                    onValueChange={(v) => saveSettings({ defaultRowLimit: Number(v) })}
+                  >
+                    <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {ROW_LIMIT_OPTIONS.map(n => (
+                        <SelectItem key={n} value={String(n)} className="text-xs">{n}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Row>
+
+                <Row title="NULL display" desc="How NULL / empty cells render in the grid.">
+                  <Select
+                    value={settings.nullDisplay}
+                    onValueChange={(v) => saveSettings({ nullDisplay: v as NullDisplay })}
+                  >
+                    <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {NULL_DISPLAY_OPTIONS.map(o => (
+                        <SelectItem key={o.value} value={o.value} className="text-xs">{o.label}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Row>
+
+                <Row title="Confirm destructive queries" desc="Warn before running DELETE / UPDATE / DROP without a WHERE.">
+                  <Toggle checked={settings.confirmDestructive} onChange={(v) => saveSettings({ confirmDestructive: v })} />
+                </Row>
+
+                <Row title="Restore session on startup" desc="Reconnect to pinned databases when the app launches.">
+                  <Toggle checked={settings.restoreOnStartup} onChange={(v) => saveSettings({ restoreOnStartup: v })} />
+                </Row>
+
+                <div className="pt-4 mt-2 border-t border-border">
+                  <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={handleReset}>
+                    <RotateCcw className="w-3.5 h-3.5" /> Reset all settings to defaults
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* ── Editor ── */}
+            {section === 'editor' && (
+              <div className="space-y-1">
+                <div className="mb-2">
+                  <h3 className="text-sm font-medium mb-0.5">Editor</h3>
+                  <p className="text-xs text-muted-foreground">Preferences for the SQL / query editor.</p>
+                </div>
+
+                <Row title="Font size" desc="Editor font size in pixels.">
+                  <Select
+                    value={String(settings.editorFontSize)}
+                    onValueChange={(v) => saveSettings({ editorFontSize: Number(v) })}
+                  >
+                    <SelectTrigger className="h-8 text-xs w-20"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {[11, 12, 13, 14, 15, 16, 18].map(n => (
+                        <SelectItem key={n} value={String(n)} className="text-xs">{n}px</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Row>
+
+                <Row title="Tab size" desc="Spaces per indent level.">
+                  <Select
+                    value={String(settings.editorTabSize)}
+                    onValueChange={(v) => saveSettings({ editorTabSize: Number(v) })}
+                  >
+                    <SelectTrigger className="h-8 text-xs w-20"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {[2, 4, 8].map(n => (
+                        <SelectItem key={n} value={String(n)} className="text-xs">{n}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Row>
+
+                <Row title="Word wrap" desc="Wrap long lines instead of scrolling horizontally.">
+                  <Toggle checked={settings.editorWordWrap} onChange={(v) => saveSettings({ editorWordWrap: v })} />
+                </Row>
+
+                <Row title="Minimap" desc="Show the code minimap on the right edge.">
+                  <Toggle checked={settings.editorMinimap} onChange={(v) => saveSettings({ editorMinimap: v })} />
+                </Row>
+
+                <Row title="Autocomplete" desc="Schema-aware suggestions while typing.">
+                  <Toggle checked={settings.editorAutocomplete} onChange={(v) => saveSettings({ editorAutocomplete: v })} />
+                </Row>
               </div>
             )}
 
@@ -600,6 +778,58 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                         Cancel
                       </Button>
                     </div>
+                  </div>
+                )}
+
+                {/* ── Assistant behavior ── */}
+                {aiMode === 'list' && (
+                  <div className="mt-6 pt-4 border-t border-border space-y-1">
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <Sparkles className="w-3.5 h-3.5 text-muted-foreground" />
+                      <h4 className="text-xs font-medium">Assistant behavior</h4>
+                    </div>
+
+                    <Row
+                      title="Max tool steps per message"
+                      desc="How many tool-calling rounds (schema reads, queries) the assistant may take before it must answer. Raise it for capable agentic models; lower it to fail fast on models that over-explore."
+                    >
+                      <Select
+                        value={String(settings.aiMaxToolIterations)}
+                        onValueChange={(v) => saveSettings({ aiMaxToolIterations: Number(v) })}
+                      >
+                        <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {[3, 6, 9, 12, 16, 20, 30].map(n => (
+                            <SelectItem key={n} value={String(n)} className="text-xs">{n} steps</SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Row>
+                  </div>
+                )}
+
+                {/* ── Security & permissions ── */}
+                {aiMode === 'list' && (
+                  <div className="mt-6 pt-4 border-t border-border space-y-1">
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <ShieldCheck className="w-3.5 h-3.5 text-muted-foreground" />
+                      <h4 className="text-xs font-medium">Security &amp; permissions</h4>
+                    </div>
+
+                    <Row
+                      title="Remember AI permissions across restarts"
+                      desc="Off by default — auto-approval grants are cleared every launch so the assistant can't act unattended."
+                    >
+                      {aiPermsBusy
+                        ? <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
+                        : <Toggle checked={settings.persistAiApprovals} onChange={(v) => void handlePersistApprovals(v)} />}
+                    </Row>
+
+                    <p className="text-[11px] text-muted-foreground/80 leading-relaxed pt-1">
+                      API keys are stored unencrypted on this machine (dev mode). The AI assistant
+                      reads schema freely, but every query it runs requires explicit approval unless
+                      you grant auto-approval in the chat panel.
+                    </p>
                   </div>
                 )}
               </div>

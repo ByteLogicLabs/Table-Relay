@@ -2,7 +2,7 @@
 name = "adapter-mysql"
 version = "0.1.0"
 edition = "2021"
-description = "Built-in MySQL adapter for db-table"
+description = "Built-in MySQL adapter for Table Relay"
 
 [build-dependencies]
 manifest-build = { path = "../../../src-tauri/manifest-build" }

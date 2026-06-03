@@ -2,5 +2,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    db_table_lib::run()
+    // touch v5: force tauri-dev relaunch so the webview reloads the fresh frontend
+    table_relay_lib::run()
 }

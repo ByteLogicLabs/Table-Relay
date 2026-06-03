@@ -119,6 +119,12 @@ export interface ToolCallFinishedEvent {
   result: string;
 }
 
+/** Operation tier a `call_query` statement classifies into (mirrors the Rust
+ *  `QueryTier`). Drives per-operation auto-approval + the approval-card badge.
+ *  `destructive` (no-WHERE DELETE/UPDATE, DROP, TRUNCATE) can never be
+ *  auto-approved. */
+export type QueryTier = 'read' | 'write' | 'create' | 'delete' | 'destructive';
+
 /** Per-tool auto-approval flags. Matches `AutoApprovalFlags` on the Rust side.
  *  `call_query` is the new name for the legacy `call_sql` tool. */
 export interface AutoApprovalFlags {
@@ -127,7 +133,15 @@ export interface AutoApprovalFlags {
   read_schema: boolean;
   /** Allow `describe_table` to run without prompting. Defaults to `true`. */
   read_structure: boolean;
+  /** Legacy master switch — grants every non-destructive tier. Kept for
+   *  back-compat with configs saved before the per-tier split. */
   call_query: boolean;
+  /** Per-operation auto-approval for `call_query`. Destructive statements
+   *  are never covered by any of these. */
+  call_query_read: boolean;
+  call_query_write: boolean;
+  call_query_create: boolean;
+  call_query_delete: boolean;
   write_query_tab: boolean;
   publish_notify: boolean;
   subscribe_channel: boolean;
@@ -146,6 +160,9 @@ export interface ApprovalRequestEvent {
   mode?: 'new' | 'replace';
   /** Populated when `name === 'write_query_tab'`: optional tab title. */
   title?: string;
+  /** Populated when `name === 'call_query'`: the operation tier the SQL
+   *  classified into. Drives the approval card's tier badge. */
+  tier?: QueryTier;
 }
 
 /** Fires after the user approves a `write_query_tab` call. The frontend
@@ -353,7 +370,7 @@ export const ai = {
     ),
 
   onApprovalRequest: (cb: (e: ApprovalRequestEvent) => void): Promise<UnlistenFn> =>
-    listen<{ tool_call_id: string; name: string; sql?: string; summary?: string; mode?: 'new' | 'replace'; title?: string }>(
+    listen<{ tool_call_id: string; name: string; sql?: string; summary?: string; mode?: 'new' | 'replace'; title?: string; tier?: QueryTier }>(
       'ai://tool/approval_request',
       (ev) => {
         cb({
@@ -363,6 +380,7 @@ export const ai = {
           summary: ev.payload.summary,
           mode: ev.payload.mode,
           title: ev.payload.title,
+          tier: ev.payload.tier,
         });
       },
     ),
@@ -448,6 +466,7 @@ export const ai = {
       kind?: ChatKind;
       sql?: string;
       errorMessage?: string;
+      maxIterations?: number;
     },
   ) =>
     invoke<void>('ai_chat_send', {
@@ -460,6 +479,7 @@ export const ai = {
         kind: opts?.kind,
         sql: opts?.sql,
         error_message: opts?.errorMessage,
+        max_iterations: opts?.maxIterations,
       },
     }),
 

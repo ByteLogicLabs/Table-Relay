@@ -14,12 +14,14 @@ import { ConnectionProfile, DataViewMode } from '../../types';
 import DiagramView from '../diagram/diagram-view';
 import SchemaView, { type SchemaViewHandle } from '../schema/schema-view';
 import { Checkbox } from '../../components/ui/checkbox';
+import { GridSkeleton } from '../../components/skeleton';
 import { db, isDbError, type BrowseFilter, type BrowseFilterOp, type BrowseResult, type TableStructure } from '../../lib/db';
 import { classifyColumn, coerceForColumn, validateEditorValue, dialectFromManifest, type EditorKind } from './editor-kinds';
 import { readCachedGrid, writeCachedGrid, clearCachedGrid } from '../../state/tab-data-cache';
 import { ensureTableStructure } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { getMonacoThemeId } from '../../lib/monaco-setup';
+import { useSettings, type NullDisplay } from '../../lib/settings-store';
 
 type FilterOperator =
   | 'eq' | 'neq'
@@ -159,6 +161,12 @@ interface DataGridProps {
   /** Stable id for the owning tab — used as a cache key so switching between
    *  open data tabs doesn't refetch from the server. */
   tabId?: string;
+  /** True when this is the visible tab. Hidden data tabs stay mounted (to
+   *  keep their fetched rows), but should NOT eagerly refetch on a global
+   *  `tablerelay:reload` — they mark themselves stale and refetch lazily when
+   *  the user switches back. Defaults to true so the grid still works if a
+   *  caller doesn't pass it. */
+  isActive?: boolean;
   connection: ConnectionProfile;
   viewMode: DataViewMode;
   onViewModeChange: (mode: DataViewMode) => void;
@@ -202,10 +210,11 @@ function truncateForCell(s: string): [string, boolean] {
   return [s.slice(0, CELL_MAX_RENDER_CHARS), true];
 }
 
-export default function DataGrid({ connectionId, schema, tableName, tabId, connection, viewMode, onViewModeChange, onLogQuery, onImportSql, onOpenRealtime }: DataGridProps) {
+export default function DataGrid({ connectionId, schema, tableName, tabId, isActive = true, connection, viewMode, onViewModeChange, onLogQuery, onImportSql, onOpenRealtime }: DataGridProps) {
   // Seed from the tab's in-memory cache so switching back to an already-opened
   // tab renders instantly without a round trip. First boot / post-reload the
   // cache is empty (it's not persisted), so behavior matches "fetch fresh".
+  const settings = useSettings();
   const cached = tabId ? readCachedGrid(tabId) : undefined;
   const [data, setData] = useState<GridData>(() => cached
     ? { cols: cached.cols, rows: cached.rows as GridRow[] }
@@ -216,7 +225,9 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
   const [editedCells, setEditedCells] = useState<Record<string, unknown>>({});
   const [activeEdit, setActiveEdit] = useState<{ rowId: string, col: string, value: string } | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [limit, setLimit] = useState(cached?.limit ?? '100');
+  // New tabs use the user's default row limit; an already-adjusted tab keeps
+  // its cached value.
+  const [limit, setLimit] = useState(cached?.limit ?? String(settings.defaultRowLimit));
   // 1-based page index. Bumped by the pager buttons; reset to 1 whenever the
   // limit, filters, or target change (handled in effects below). Surviving
   // tab switches via the grid cache so returning to a tab keeps your spot.
@@ -228,6 +239,29 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
   const [filters, setFilters] = useState<FilterCondition[]>([]);
   const [sortBy, setSortBy] = useState<SortState>(null);
   const [executionMs, setExecutionMs] = useState<number | null>(cached?.executionMs ?? null);
+  // Track the grid viewport height so we can pad the table with empty
+  // spreadsheet-style filler rows when the result set is short — otherwise a
+  // 2-row table leaves a large blank void below it.
+  const gridScrollRef = useRef<HTMLDivElement | null>(null);
+  const headerRowRef = useRef<HTMLTableRowElement | null>(null);
+  const [gridViewportH, setGridViewportH] = useState(0);
+  // Measured row height — the real height of a rendered header row, so the
+  // filler-row count is accurate regardless of theme/font/padding (a guessed
+  // constant under- or over-filled and left a gap / scrollbar).
+  const [measuredRowH, setMeasuredRowH] = useState(0);
+  useEffect(() => {
+    const el = gridScrollRef.current;
+    if (!el) return;
+    const measure = () => {
+      setGridViewportH(el.clientHeight);
+      const h = headerRowRef.current?.offsetHeight ?? 0;
+      if (h > 0) setMeasuredRowH(h);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
   const [schemaDirty, setSchemaDirty] = useState(false);
   const [schemaSaving, setSchemaSaving] = useState(false);
   const [selectedRows, setSelectedRows] = useState<Set<string>>(new Set());
@@ -261,7 +295,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
   // Bump whenever we push/pop, so buttons re-render with current enablement.
   const [historyTick, setHistoryTick] = useState(0);
   const [editorTheme, setEditorTheme] = useState<string>(
-    getMonacoThemeId(document.documentElement.dataset.theme ?? 'one-dark'),
+    getMonacoThemeId(document.documentElement.dataset.theme ?? 'monokai'),
   );
   const jsonEditorRef = useRef<MonacoEditorNs.IStandaloneCodeEditor | null>(null);
   // Dirty-tracking for the JSON Tree editor. We don't mirror the full text
@@ -387,7 +421,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
 
   useEffect(() => {
     const root = document.documentElement;
-    const sync = () => setEditorTheme(getMonacoThemeId(root.dataset.theme ?? 'one-dark'));
+    const sync = () => setEditorTheme(getMonacoThemeId(root.dataset.theme ?? 'monokai'));
     sync();
     const observer = new MutationObserver(sync);
     observer.observe(root, { attributes: true, attributeFilter: ['class', 'data-theme'] });
@@ -575,14 +609,27 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
     });
   };
 
-  // Reload whenever the target changes. Skip the fetch on the very first
-  // mount if we hydrated from cache — the cached snapshot is already in state
-  // and issuing a network call here would defeat the whole point of caching.
-  const skipNextFetchRef = useRef(!!cached);
-  // Changing the limit, filter set, or server-side sort means our current page index might
-  // point past the end of the result — reset to page 1. This effect runs on
-  // *change*, not mount; the initial value came from the cache (or 1).
+  // Identity of the target + params the grid currently holds loaded. A ref so
+  // it survives StrictMode's simulated remount — we never double-fetch the
+  // same target. `null` = nothing loaded yet for this grid.
+  const loadTargetKey = () =>
+    `${connectionId}|${schema}|${tableName}|${page}|${limit}|${JSON.stringify(activeFilters)}|${JSON.stringify(activeServerSort)}`;
+  const loadedTargetRef = useRef<string | null>(null);
+  // Seed from cache on first render: if we hydrated from the tab cache, that
+  // snapshot already IS the loaded state, so the loader must not refetch it.
+  // (Lazy ref init — the React-recommended pattern; runs once.)
+  if (loadedTargetRef.current === null && cached) {
+    loadedTargetRef.current = loadTargetKey();
+  }
+  // Reset page to 1 when limit/filters/sort change. Runs on *change*, not
+  // mount; the initial value came from cache (or 1).
   const firstRunRef = useRef(true);
+  // `isActiveRef` mirrors the `isActive` prop so the reload listener reads the
+  // live value without re-subscribing on every tab switch. `isStaleRef` marks
+  // that a tab owes a fetch (deferred while hidden, or a reload arrived) — it
+  // forces the loader past the loadedTarget short-circuit.
+  const isActiveRef = useRef(isActive);
+  const isStaleRef = useRef(false);
   useEffect(() => {
     if (firstRunRef.current) {
       firstRunRef.current = false;
@@ -593,28 +640,12 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
     // underlying `filters` change, which is what we actually want to watch.
   }, [limit, activeFilters, activeServerSort]);
 
-  // Refetch when the user moves to a new page, changes the limit, updates
-  // filters, or changes sort. Structure is preserved (the target hasn't changed), so
-  // the fetch is cheap.
+  // Reset edit/selection state whenever the TARGET (connection/schema/table)
+  // changes — switching to a different table must drop pending edits, undo
+  // history, etc. Param changes (page/limit/filter/sort) do NOT wipe; they
+  // just refetch via the loader below. Keyed only on the target so it never
+  // fires on a tab switch or a param change.
   useEffect(() => {
-    if (skipNextFetchRef.current) return;
-    let cancelled = false;
-    queueMicrotask(() => { if (!cancelled) void fetchData({ showRefresh: true }); });
-    return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, limit, activeFilters, activeServerSort]);
-
-  useEffect(() => {
-    if (skipNextFetchRef.current) {
-      skipNextFetchRef.current = false;
-      return;
-    }
-    // React 18 StrictMode mounts every effect twice in dev. Without a
-    // cancel flag we fire two concurrent `db_describe_table` + `db_run_query`
-    // invocations — each pays a full SSH round-trip, doubling perceived
-    // latency for every table open. The flag ensures only the *latest*
-    // mount's fetch runs; the earlier one sets cancelled=true and bails.
-    let cancelled = false;
     setStructure(null);
     setData(EMPTY_DATA);
     setEditedCells({});
@@ -627,39 +658,105 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
     undoStackRef.current = [];
     redoStackRef.current = [];
     setHistoryTick(0);
-    // Defer one microtask so the cleanup from StrictMode's throwaway mount
-    // has a chance to flip `cancelled` before we dispatch Tauri commands.
-    queueMicrotask(() => { if (!cancelled) void fetchData(); });
-    return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectionId, schema, tableName]);
+
+  // THE single fetch authority. A hidden tab browsing is structurally
+  // impossible: the loader returns immediately unless THIS grid is the active
+  // (visible) one. The previous design split fetching across three effects
+  // (mount/target, params, activation) each guarded by a ref snapshot; a
+  // params effect leaked because its first-run guard was defeated by
+  // StrictMode's double-invoke (same instance, persisting refs) and by
+  // `activeFilters` taking a new array identity during the mount cascade — so
+  // every hidden grid browsed on reload. This consolidates all of it:
+  //
+  //   - Not active  → never fetch. Mark stale iff there's nothing cached, so
+  //                   the first activation loads it (lazy). Cached-but-hidden
+  //                   tabs stay un-stale → instant cache on activation.
+  //   - Active      → fetch only if the target+params we hold differ from what
+  //                   we last loaded (loadedTargetRef), or a reload marked us
+  //                   stale. Idempotent under StrictMode's double-invoke and
+  //                   re-activation with nothing changed (no redundant browse).
+  //
+  // Deps include page/limit/filters/sort so a param change on the visible tab
+  // still refetches (the key differs) — but a hidden tab's deps changing can't
+  // fetch because of the `!isActive` guard.
+  useEffect(() => {
+    isActiveRef.current = isActive;
+    if (!isActive) {
+      const hasCachedRows = (tabId ? readCachedGrid(tabId)?.rows.length : 0) ?? 0;
+      isStaleRef.current = hasCachedRows === 0;
+      return;
+    }
+    const key = loadTargetKey();
+    if (loadedTargetRef.current === key && !isStaleRef.current) return;
+    // Uncommitted edits + a reload-driven refetch → confirm instead of wiping.
+    if (isStaleRef.current && hasPendingRef.current) {
+      setConfirmRefreshOpen(true);
+      return;
+    }
+    // CRITICAL: claim the target (set loadedTargetRef/clear isStaleRef) INSIDE
+    // the microtask, only when the fetch actually runs. Under StrictMode the
+    // effect runs setup→cleanup→setup on one instance: if we claimed it here
+    // (synchronously) the first setup's fetch gets cancelled by the cleanup,
+    // and the second setup would see loadedTargetRef already === key and
+    // short-circuit → ZERO fetches (active tab stuck on a skeleton). Deferring
+    // the claim means the second setup still sees the old key and re-queues; of
+    // the two microtasks only the live one (second) runs and claims.
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (cancelled) return;
+      loadedTargetRef.current = key;
+      isStaleRef.current = false;
+      void fetchData({ showRefresh: data.rows.length > 0 });
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isActive, connectionId, schema, tableName, page, limit, activeFilters, activeServerSort]);
 
   // Soft reload (⌘+R) — refetch rows without touching the filter / column
   // state. Scoped to this grid's connection (or global if the event was
   // dispatched without a connection id).
+  //
+  // Lazy-load: a single ⌘+R (or a post-reconnect refresh) fires this event on
+  // EVERY mounted data tab for the connection. Eagerly refetching all of them
+  // re-pulls every open table from the server at once — wasteful, and the cost
+  // the user is asking us to avoid. So only the VISIBLE tab refetches now;
+  // hidden tabs just flag themselves stale and refetch when switched back to
+  // (see the `isActive` effect below).
   useEffect(() => {
     const onReload = (e: Event) => {
       const ce = e as CustomEvent<{ connectionId: string | null }>;
       const target = ce.detail?.connectionId;
       if (target && target !== connectionId) return;
-      // If the user has uncommitted changes, route through the same
-      // confirmation dialog the toolbar Refresh button uses instead of
-      // wiping pending edits silently.
+      // Hidden tab → defer. Invalidate what we hold + mark stale; the loader
+      // refetches once this tab is next shown (its `isActive` effect re-runs).
+      if (!isActiveRef.current) {
+        loadedTargetRef.current = null;
+        isStaleRef.current = true;
+        return;
+      }
+      // Active tab → refetch now. Uncommitted edits route through the same
+      // confirmation dialog the toolbar Refresh button uses instead of wiping.
       if (hasPendingRef.current) {
         setConfirmRefreshOpen(true);
         return;
       }
       setEditedCells({});
       setActiveEdit(null);
+      loadedTargetRef.current = loadTargetKey();
       void fetchData({ showRefresh: true });
     };
-    window.addEventListener('dbtable:reload', onReload);
-    return () => window.removeEventListener('dbtable:reload', onReload);
+    window.addEventListener('tablerelay:reload', onReload);
+    return () => window.removeEventListener('tablerelay:reload', onReload);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connectionId, schema, tableName]);
 
+  // (The former "activation" effect is gone — the unified loader above owns
+  // re-fetching a hidden tab when it becomes visible, gated on `isActive`.)
+
   // File menu → Export bridge. Workspace-view routes the native "Export…"
-  // menu click into a `dbtable:menu-export` event tagged with the active
+  // menu click into a `tablerelay:menu-export` event tagged with the active
   // tab id. Only the matching data-grid opens its export modal so we
   // don't fan out to every hidden tab.
   useEffect(() => {
@@ -668,8 +765,8 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
       const detail = (ev as CustomEvent<{ tabId?: string }>).detail;
       if (detail?.tabId === tabId) setIsExportModalOpen(true);
     };
-    window.addEventListener('dbtable:menu-export', onMenuExport);
-    return () => window.removeEventListener('dbtable:menu-export', onMenuExport);
+    window.addEventListener('tablerelay:menu-export', onMenuExport);
+    return () => window.removeEventListener('tablerelay:menu-export', onMenuExport);
   }, [tabId]);
 
   // Top progress bar driver. When any async work is active we creep from 0 to
@@ -1111,6 +1208,25 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
       const el = document.querySelector(`tr[data-row-id="${CSS.escape(id)}"]`);
       el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     });
+  };
+
+  // Spreadsheet-style insert: clicking any blank filler cell starts a NEW row
+  // and opens the clicked column for editing immediately. Same draft machinery
+  // as the "Add row" button (a `new:` row in pendingInserts, flushed as an
+  // INSERT on commit) — the draft appears at the top of the blank zone.
+  const beginInsertAt = (col: string) => {
+    if (!structure && data.cols.length === 0) return; // no columns yet → nothing to insert into
+    pushHistory();
+    const id = `new:${crypto.randomUUID()}`;
+    const blank: GridRow = { __rowId: id };
+    if (structure) for (const c of structure.columns) blank[c.name] = null;
+    else for (const c of data.cols) blank[c] = null;
+    setPendingInserts(prev => [...prev, blank]);
+    setSelectedRows(new Set([id]));
+    setLastSelectedRowId(id);
+    // Open the clicked column for editing right away (setActiveEdit directly —
+    // beginEdit is declared later in the component).
+    setActiveEdit({ rowId: id, col, value: '' });
   };
 
   // Paste TSV/CSV rows as draft inserts. We map by header names when the first
@@ -1971,7 +2087,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => window.dispatchEvent(new CustomEvent('dbtable:toggle-chat'))}
+            onClick={() => window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'))}
             title="AI Chat"
           >
             <Sparkles className="w-4 h-4 mr-2" />
@@ -1982,10 +2098,18 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
 
       {/* Grid Area */}
       <div
+        ref={gridScrollRef}
         className="flex-1 min-h-0 overflow-auto bg-background relative"
         style={{ maxWidth: 'var(--content-max-w, calc(100vw - 328px))' }}
       >
-        {loading && (
+        {/* First load (no rows yet) → skeleton grid so the pane looks like a
+            table materializing rather than a spinner on an empty page.
+            Refreshes (rows already on screen) keep the lighter translucent
+            spinner so the existing data stays visible underneath. */}
+        {loading && rowsForView.length === 0 && !loadError && (
+          <GridSkeleton />
+        )}
+        {loading && rowsForView.length > 0 && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/70 backdrop-blur-sm text-muted-foreground text-xs gap-2">
             <Loader2 className="w-4 h-4 animate-spin" /> Loading…
           </div>
@@ -1999,10 +2123,23 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
             </div>
           </div>
         )}
+        {/* Empty-result message — a centered overlay over the (filler-filled)
+            sheet, so an empty table still reads as a full grid with a clear
+            label rather than a void. pointer-events-none so it never blocks
+            the toolbar / scrolling. */}
+        {viewMode === 'table' && rowsForView.length === 0 && !loading && !loadError && (
+          <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+            <span className="text-sm text-muted-foreground bg-background/80 rounded px-3 py-1.5">
+              {activeFilters.length > 0
+                ? (isDocumentStore ? 'No documents match the current filters.' : 'No rows match the current filters.')
+                : (isDocumentStore ? 'No documents.' : 'Table is empty.')}
+            </span>
+          </div>
+        )}
         {viewMode === 'table' && (
           <table className="text-sm text-left border-collapse" style={{ width: 'max-content', minWidth: '100%' }}>
             <thead className="text-xs text-muted-foreground bg-muted sticky top-0 z-10 shadow-sm">
-              <tr>
+              <tr ref={headerRowRef}>
                 <th className="w-12 px-4 py-2 border-b border-r border-border font-medium text-center whitespace-nowrap">#</th>
                 {displayCols.map(col => (
                   <th
@@ -2024,16 +2161,6 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
               </tr>
             </thead>
             <tbody>
-              {rowsForView.length === 0 && !loading && !loadError && (
-                <tr>
-                  <td
-                    colSpan={displayCols.length + 1}
-                    className="px-4 py-10 text-center text-sm text-muted-foreground border-b border-border"
-                  >
-                    {activeFilters.length > 0 ? 'No rows match the current filters.' : 'Table is empty.'}
-                  </td>
-                </tr>
-              )}
               {rowsForView.map((row, rowIndex) => (
                 <DataRow
                   key={row.__rowId}
@@ -2047,6 +2174,7 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
                   activeEdit={activeEdit}
                   isSelected={selectedRows.has(row.__rowId)}
                   isPendingDelete={pendingDeletes.has(row.__rowId)}
+                  nullDisplay={settings.nullDisplay}
                   onRowClick={handleRowSelect}
                   onOpenMenu={openMenu}
                   onBeginEdit={beginEdit}
@@ -2056,6 +2184,49 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
                   inputRef={inputRef}
                 />
               ))}
+              {/* Spreadsheet-style filler rows — pad the table to the full
+                  viewport height when the result set is short (or empty) so
+                  the grid reads as a continuous sheet instead of a small block
+                  of rows (or a lone "empty" message) floating over a big black
+                  void. Empty, non-interactive, only the subtle grid lines
+                  show. Capped so a giant viewport can't render thousands. The
+                  "Table is empty" message renders as a centered overlay on top
+                  of these (see below) rather than as a tall table row. */}
+              {(() => {
+                // Real row height, measured from the rendered header (falls
+                // back to a sane default until the first measurement lands).
+                const ROW_H = measuredRowH > 0 ? measuredRowH : 37;
+                if (loading || loadError || gridViewportH === 0) return null;
+                const usable = gridViewportH - ROW_H; // minus the sticky header
+                // Ceil so the last filler row reaches the bottom edge (a tiny
+                // overshoot just scrolls 1px; flooring left a visible gap).
+                const fit = Math.ceil(usable / ROW_H);
+                const fillerCount = Math.min(500, Math.max(0, fit - rowsForView.length));
+                if (fillerCount === 0) return null;
+                return Array.from({ length: fillerCount }).map((_, i) => (
+                  <tr key={`filler-${i}`} className="group/filler">
+                    {/* # cell — a faint "+" on the first blank row hints that
+                        clicking starts a new row (insert). */}
+                    <td
+                      className="w-12 border-b border-r border-border/40 text-center align-middle text-muted-foreground/30 select-none"
+                      style={{ height: ROW_H }}
+                    >
+                      {i === 0 ? '+' : ''}
+                    </td>
+                    {displayCols.map(col => (
+                      // Clicking a blank cell inserts a new row and edits this
+                      // column — spreadsheet style. Hover highlight + text
+                      // cursor signal it's editable.
+                      <td
+                        key={col}
+                        onClick={() => beginInsertAt(col)}
+                        className="border-b border-r border-border/40 px-4 cursor-text hover:bg-accent/30"
+                        title="Click to add a new row"
+                      />
+                    ))}
+                  </tr>
+                ));
+              })()}
             </tbody>
           </table>
         )}
@@ -2252,9 +2423,13 @@ export default function DataGrid({ connectionId, schema, tableName, tabId, conne
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="100">100</SelectItem>
-                <SelectItem value="500">500</SelectItem>
-                <SelectItem value="1000">1000</SelectItem>
+                {/* Always include the current limit so a custom default (e.g.
+                    from settings) has a matching option to render. */}
+                {Array.from(new Set([limit, '25', '50', '100', '250', '500', '1000']))
+                  .sort((a, b) => Number(a) - Number(b))
+                  .map(opt => (
+                    <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                  ))}
               </SelectContent>
             </Select>
           </div>
@@ -2387,6 +2562,7 @@ interface DataRowProps {
   activeEdit: { rowId: string; col: string; value: string } | null;
   isSelected: boolean;
   isPendingDelete: boolean;
+  nullDisplay: NullDisplay;
   onRowClick: (rowId: string, e: React.MouseEvent) => void;
   onOpenMenu: (e: React.MouseEvent, rowId: string, col: string | null) => void;
   onBeginEdit: (rowId: string, col: string, value: string) => void;
@@ -2397,7 +2573,7 @@ interface DataRowProps {
 }
 
 const DataRow = memo(function DataRow({
-  row, rowIndex, cols, columnKinds, columnDataTypes, requiredColumnNames, editedCells, activeEdit, isSelected, isPendingDelete,
+  row, rowIndex, cols, columnKinds, columnDataTypes, requiredColumnNames, editedCells, activeEdit, isSelected, isPendingDelete, nullDisplay,
   onRowClick, onOpenMenu, onBeginEdit, onCommitEdit, onCancelEdit, onActiveEditChange, inputRef,
 }: DataRowProps) {
   const isDraft = row.__rowId.startsWith('new:');
@@ -2436,9 +2612,16 @@ const DataRow = memo(function DataRow({
         const rawValue = isDraft
           ? row[col]
           : (isEdited ? editedCells[cellKey] : row[col]);
-        const fullValue = rawValue === null || rawValue === undefined
+        const isNull = rawValue === null || rawValue === undefined;
+        // Real cell value is always '' for NULL (edit/length/blob logic keys off
+        // an empty string); the NULL marker is purely a display concern.
+        const fullValue = isNull
           ? ''
           : typeof rawValue === 'object' ? JSON.stringify(rawValue) : String(rawValue);
+        // Display-only marker for NULL cells, per the user's nullDisplay setting.
+        const nullMarker = isNull && nullDisplay === 'null-text' ? 'NULL'
+          : isNull && nullDisplay === 'symbol' ? '∅'
+          : '';
         // BLOB-ish columns decode as long byte strings; showing them raw is
         // useless and slow. Replace with a size summary. Context-menu copy
         // actions still hand out the real bytes.
@@ -2498,8 +2681,8 @@ const DataRow = memo(function DataRow({
                 onCancel={onCancelEdit}
               />
             ) : (
-              <div className={`px-4 py-1.5 truncate ${isBlobCol && fullValue.length > 0 ? 'italic text-muted-foreground' : ''}`}>
-                {value}
+              <div className={`px-4 py-1.5 truncate ${isBlobCol && fullValue.length > 0 ? 'italic text-muted-foreground' : ''} ${isNull && nullMarker ? 'italic text-muted-foreground/60' : ''}`}>
+                {isNull && nullMarker ? nullMarker : value}
                 {didTruncate && !isBlobCol && (
                   <span className="ml-2 text-[10px] text-muted-foreground/70 not-italic">
                     +{(fullValue.length - CELL_MAX_RENDER_CHARS).toLocaleString()} more
@@ -2546,9 +2729,10 @@ function CellEditor({ kind, value, error, inputRef, onChange, onCommit, onCancel
     </div>
   );
 
-  // boolean + enum use a text input wired to a <datalist> so users can type
-  // freely while still seeing suggestions. A <select> would steal keystrokes
-  // and feel like the input is eating characters.
+  // boolean + enum use a self-contained inline dropdown (SelectCellEditor).
+  // It renders its option list in-tree (no portal) so picking a value can't
+  // race with the grid's outside-click/blur commit logic — the failure mode
+  // the portaled Base UI <Select> hit, which made the dropdown feel dead.
   if (kind.kind === 'boolean') {
     // Normalize any truthy/falsy string the data pipeline may have produced
     // (e.g. JS booleans get stringified as "true"/"false") into the canonical
@@ -2657,44 +2841,115 @@ interface SelectCellEditorProps {
 function SelectCellEditor({
   value, options, error, onChange, onCommit, onCancel,
 }: SelectCellEditorProps) {
-  // Auto-open once when the editor mounts so double-clicking the cell feels
-  // like clicking a dropdown: the menu appears immediately instead of
-  // requiring a second click.
-  const [open, setOpen] = useState(true);
-  const triggerCls = `w-full h-full flex items-center justify-between px-4 py-1.5 bg-background text-foreground outline-none border-2 ${
-    error ? 'border-destructive' : 'border-primary'
-  }`;
+  // A self-contained custom dropdown rendered INSIDE the cell editor (no
+  // portal). The Base UI <Select> portals its popup to document.body, which
+  // lands outside the cell's DOM — so the grid's outside-click / blur commit
+  // logic treats picking an option as a click-outside and cancels the edit
+  // before the value lands. Keeping the menu in-tree (absolute, inside the
+  // editor's relative wrapper) sidesteps that race entirely.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
+  // Highlight starts on the current value (or the first option) so keyboard
+  // nav and the visual cursor agree from the first keypress.
+  const initialIndex = Math.max(0, options.findIndex(o => o.value === value));
+  const [highlight, setHighlight] = useState(initialIndex);
+
+  const pick = (v: string) => {
+    onChange(v);
+    // Commit on the next tick so the parent's onChange has flushed first and
+    // the commit reads the freshly-picked value (matching the prior behavior).
+    setTimeout(onCommit, 0);
+  };
+
+  // Close-on-outside-click. Anything outside this editor cancels the edit,
+  // mirroring the plain text input's blur/Escape behavior.
+  useEffect(() => {
+    const onDown = (e: MouseEvent) => {
+      if (rootRef.current?.contains(e.target as Node)) return;
+      onCancel();
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [onCancel]);
+
+  // Focus the list on mount so arrow keys / Enter / Escape work immediately
+  // without a second click — the cell editor opens "already focused" like a
+  // native <select> popup.
+  useEffect(() => {
+    listRef.current?.focus();
+  }, []);
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlight(h => Math.min(options.length - 1, h + 1));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlight(h => Math.max(0, h - 1));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const opt = options[highlight];
+      if (opt) pick(opt.value);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      onCancel();
+    } else if (e.key === 'Tab') {
+      // Commit the highlighted option on Tab so editing flows like a form.
+      const opt = options[highlight];
+      if (opt) pick(opt.value);
+    }
+  };
+
+  const borderCls = error ? 'border-destructive' : 'border-primary';
+  const current = options.find(o => o.value === value);
 
   return (
-    <Select
-      value={value}
-      onValueChange={(v) => {
-        onChange(String(v));
-        // Commit on the next tick so parent state sees the new value.
-        setTimeout(onCommit, 0);
-      }}
-      open={open}
-      onOpenChange={(next) => {
-        setOpen(next);
-        // Dismissing without picking counts as cancel, matching the plain text
-        // input's Escape behavior.
-        if (!next) setTimeout(onCancel, 0);
-      }}
-    >
-      <SelectTrigger
-        className={triggerCls}
-        onKeyDown={(e) => { if (e.key === 'Escape') onCancel(); }}
+    <div ref={rootRef} className="relative w-full h-full">
+      {/* Trigger row showing the current value, styled like the other editors. */}
+      <div
+        className={`w-full h-full flex items-center justify-between px-4 py-1.5 bg-background text-foreground outline-none border-2 ${borderCls}`}
       >
-        <SelectValue placeholder="(unset)" />
-      </SelectTrigger>
-      <SelectContent>
-        {options.map(o => (
-          <SelectItem key={o.value} value={o.value} className="text-xs">
-            {o.label}
-          </SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+        <span className={current ? '' : 'text-muted-foreground'}>
+          {current ? current.label : '(unset)'}
+        </span>
+        <ChevronDown className="size-4 text-muted-foreground shrink-0" />
+      </div>
+      {/* Inline option list. min-w matches the cell; max-h keeps long enums
+          scrollable. Rendered in-tree, no portal. */}
+      <div
+        ref={listRef}
+        role="listbox"
+        tabIndex={-1}
+        onKeyDown={onKeyDown}
+        className="absolute left-0 top-full z-40 mt-1 min-w-full max-h-60 overflow-y-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10 p-1 outline-none"
+      >
+        {options.map((o, i) => {
+          const selected = o.value === value;
+          const active = i === highlight;
+          return (
+            <button
+              key={o.value}
+              type="button"
+              role="option"
+              aria-selected={selected}
+              // mousedown (not click) so the pick fires before the window
+              // mousedown outside-handler can ever see it as a blur.
+              onMouseDown={(e) => { e.preventDefault(); pick(o.value); }}
+              onMouseEnter={() => setHighlight(i)}
+              className={`relative flex w-full items-center justify-between gap-2 rounded-md py-1.5 pl-2.5 pr-8 text-left text-xs cursor-pointer select-none ${
+                active ? 'bg-accent text-accent-foreground' : ''
+              }`}
+            >
+              <span className="truncate">{o.label}</span>
+              {selected && <Check className="absolute right-2 size-4 shrink-0" />}
+            </button>
+          );
+        })}
+        {options.length === 0 && (
+          <div className="px-2.5 py-1.5 text-xs text-muted-foreground">No options</div>
+        )}
+      </div>
+    </div>
   );
 }
 

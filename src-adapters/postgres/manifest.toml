@@ -23,7 +23,7 @@ binding and double-quoted identifiers.
 tags = ["sql", "relational", "first-party"]
 
 [provenance]
-vendor  = "db-table team"
+vendor  = "Table Relay team"
 license = "Apache-2.0"
 
 [capabilities]

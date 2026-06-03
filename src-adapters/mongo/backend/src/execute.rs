@@ -15,6 +15,10 @@ pub(crate) async fn execute_raw(
     command: &str,
     row_limit: Option<u32>,
 ) -> Result<QueryResult, AdapterError> {
+    // Defense-in-depth: tolerate a leading SQL `USE <schema>;` line. The host
+    // only injects it for SQL adapters, but a stray prefix (older host, manual
+    // paste) would otherwise make every `db.…` command fail the `db.` check.
+    let command = strip_leading_use(command);
     let statements = split_statements(command);
     let mut out = Vec::with_capacity(statements.len());
 
@@ -255,6 +259,19 @@ fn parse_limit(tail: &str) -> Result<Option<i64>, AdapterError> {
         column: None,
     })?;
     Ok(Some(n))
+}
+
+/// Drop a leading `USE <schema>;` statement if present (case-insensitive).
+/// MongoDB has no `USE` verb; this only guards against a SQL prefix leaking
+/// in from the host. Returns the remainder untouched if there's no such line.
+fn strip_leading_use(input: &str) -> &str {
+    let trimmed = input.trim_start();
+    if trimmed.len() >= 4 && trimmed[..4].eq_ignore_ascii_case("use ") {
+        if let Some(semi) = trimmed.find(';') {
+            return trimmed[semi + 1..].trim_start();
+        }
+    }
+    input
 }
 
 fn split_statements(input: &str) -> Vec<String> {
@@ -635,6 +652,24 @@ mod tests {
         assert_eq!(op, "find");
         assert_eq!(args, "{}");
         assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn strip_leading_use_drops_sql_prefix() {
+        // A leaked SQL `USE …;` prefix must not break the `db.` command.
+        assert_eq!(
+            strip_leading_use("USE `clipbridge`;\ndb.systemevents.find()"),
+            "db.systemevents.find()"
+        );
+        assert_eq!(
+            strip_leading_use("use clipbridge ;db.x.find()"),
+            "db.x.find()"
+        );
+        // No prefix → untouched.
+        assert_eq!(
+            strip_leading_use("db.getCollection('x').find()"),
+            "db.getCollection('x').find()"
+        );
     }
 
     #[test]

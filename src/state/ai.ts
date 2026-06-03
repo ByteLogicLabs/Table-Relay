@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
-import { ai, isAiError, type AiProviderKind, type ChatFocus, type ChatKind, type Conversation, type StartInput } from '../lib/ai';
+import { ai, isAiError, type AiProviderKind, type ChatFocus, type ChatKind, type Conversation, type StartInput, type QueryTier } from '../lib/ai';
+import { loadSettings } from '../lib/settings-store';
 
 export interface ChatMessage {
   id: string;
@@ -25,6 +26,9 @@ export interface ChatMessage {
       toolName?: string;
       mode?: 'new' | 'replace';
       title?: string;
+      /** Operation tier for `call_query` approvals — drives the card's
+       *  tier badge. Undefined for non-query tools. */
+      tier?: QueryTier;
     };
     approved?: boolean;
     denied?: boolean;
@@ -269,6 +273,7 @@ async function ensureWired() {
             toolName: ev.name,
             mode: ev.mode,
             title: ev.title,
+            tier: ev.tier,
           },
         },
       };
@@ -316,7 +321,21 @@ export async function start(input: StartInput) {
   await ensureWired();
   mutate(s => ({ ...s, status: 'starting', lastError: undefined }));
   try {
-    const status = await ai.start(input);
+    let status;
+    try {
+      status = await ai.start(input);
+    } catch (e) {
+      // Single-slot session race: a prior session is still installed (e.g. an
+      // end() teardown that hadn't finished, or a stale session that survived
+      // a reload). Tear it down — awaited this time — and retry once so a
+      // credential/model swap can't get wedged into an unstartable state.
+      if (isAiError(e) && e.kind === 'SessionAlreadyActive') {
+        await ai.end().catch(() => {});
+        status = await ai.start(input);
+      } else {
+        throw e;
+      }
+    }
     mutate(s => ({
       ...s,
       status: 'active',
@@ -411,17 +430,24 @@ export async function deleteConversation(id: string) {
   return ai.conversationDelete(id);
 }
 
-export async function end() {
+export async function end(opts?: { awaitBackend?: boolean }) {
   // Reset UI state immediately so the StartScreen appears without waiting
   // on backend teardown. The backend unload is fire-and-forget: local llama
   // can take a few seconds to kill the subprocess, and hosted-provider
   // cleanup is near-instant but still async. Either way the user has
   // already said "end this" — they shouldn't have to stare at a spinner.
   mutate(() => ({ status: 'inactive', byConnection: {} }));
-  ai.end().catch(e => {
+  // When swapping credential/model we MUST await the backend teardown before
+  // the follow-up start(): the backend session slot is single-slot, so a
+  // start() that races ahead of end()'s `guard.take()` hits SessionAlreadyActive
+  // and the swap silently fails — leaving the frontend `inactive` while the old
+  // backend session lingers, so the next sendMessage no-ops ("can't send,
+  // nothing happens"). Plain "End" stays fire-and-forget for snappy UX.
+  const teardown = ai.end().catch(e => {
     if (isAiError(e) && e.kind === 'NoActiveSession') return; // expected
     mutate(s => ({ ...s, lastError: errMsg(e) }));
   });
+  if (opts?.awaitBackend) await teardown;
 }
 
 export async function sendMessage(
@@ -494,7 +520,11 @@ export async function sendMessage(
   }
 
   try {
-    await ai.chatSend(requestId, trimmed, context);
+    // Pass the user's per-turn tool-iteration cap through to the backend loop.
+    await ai.chatSend(requestId, trimmed, {
+      ...context,
+      maxIterations: loadSettings().aiMaxToolIterations,
+    });
   } catch (e) {
     mutate(s => {
       const chat = chatOf(s, connKey);
@@ -601,10 +631,10 @@ export interface ChatPrefill {
 
 /**
  * Route a shortcut into the chat panel. The panel opens the drawer (via
- * `dbtable:toggle-chat` if currently closed), then either auto-sends the
+ * `tablerelay:toggle-chat` if currently closed), then either auto-sends the
  * prefill immediately (when the session is already active) or stashes it
  * and waits for the user to Start Chat — see the listener in ChatPanel.
  */
 export function prefillChat(prefill: ChatPrefill) {
-  window.dispatchEvent(new CustomEvent<ChatPrefill>('dbtable:ai-prefill', { detail: prefill }));
+  window.dispatchEvent(new CustomEvent<ChatPrefill>('tablerelay:ai-prefill', { detail: prefill }));
 }

@@ -2,7 +2,7 @@
 name = "adapter-mongo"
 version = "0.1.0"
 edition = "2021"
-description = "Built-in MongoDB adapter for db-table"
+description = "Built-in MongoDB adapter for Table Relay"
 
 [build-dependencies]
 manifest-build = { path = "../../../src-tauri/manifest-build" }
@@ -15,3 +15,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 mongodb = { version = "2.8", default-features = true }
+
+# SSH tunnel support is provided by the shared `adapter-ssh` crate;
+# the adapter just re-exports `SshConfig` + `Tunnel`.
+adapter-ssh = { path = "../../../src-tauri/adapter-ssh" }

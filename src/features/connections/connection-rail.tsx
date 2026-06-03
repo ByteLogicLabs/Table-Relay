@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, GripVertical, Settings, Unplug, Pencil, FileUp } from 'lucide-react';
+import { Database, GripVertical, Settings, Unplug, Pencil, FileUp, Loader2 } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -59,8 +59,8 @@ export default function ConnectionRail({
   const [settingsOpen, setSettingsOpen] = useState(false);
   useEffect(() => {
     const handler = () => setSettingsOpen(true);
-    window.addEventListener('dbtable:open-settings', handler);
-    return () => window.removeEventListener('dbtable:open-settings', handler);
+    window.addEventListener('tablerelay:open-settings', handler);
+    return () => window.removeEventListener('tablerelay:open-settings', handler);
   }, []);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
@@ -136,6 +136,7 @@ export default function ConnectionRail({
             ? `${ver} · ${tile.databaseName}`
             : `${server?.driver ?? '?'} · ${tile.databaseName}`;
           const connected = connectedServerIds.has(tile.serverId);
+          const isConnecting = connState.connectingIds.has(tile.serverId);
           const isDragging = draggingId === tile.id;
           const isOver = overId === tile.id;
           return (
@@ -152,6 +153,11 @@ export default function ConnectionRail({
                   {isOver && <div className="absolute -top-px left-1 right-1 h-0.5 rounded-full bg-primary z-10" />}
                 <button
                   type="button"
+                  // Focusing a tile must always work — even while it (or
+                  // another tile) is mid-connect. A slow connect, especially
+                  // over SSH, shouldn't trap the user on the connecting tile;
+                  // they need to be able to switch to a different connection.
+                  // The spinner badge still signals the in-flight state.
                   onClick={() => onFocusTile(tile)}
                   title={expanded ? undefined : `${primary} · ${secondary}`}
                   className={`relative w-full rounded-md text-left transition-colors cursor-pointer
@@ -170,20 +176,42 @@ export default function ConnectionRail({
                     style={server?.color ? { color: server.color } : undefined}
                   >
                     {server ? driverIcon(server.driver, 'w-5 h-5') : <Database className="w-5 h-5" />}
-                    {connected && (
+                    {isConnecting ? (
+                      <Loader2 className="absolute -top-0.5 -right-1 w-2.5 h-2.5 animate-spin text-primary" />
+                    ) : connected ? (
                       <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-background" />
-                    )}
+                    ) : null}
                   </span>
                   {expanded ? (
                     <span className="min-w-0 flex-1 transition-opacity duration-150 opacity-100">
                       <span className="block text-[13px] font-medium truncate leading-tight">{primary}</span>
-                      <span className="block text-[10.5px] text-muted-foreground truncate leading-tight">
-                        {secondary}
+                      {/* SSH-tunnel marker — a tiny "SSH" text badge in the meta
+                          line so the user can tell which connections route
+                          through a jump host. Kept off the driver logo (overlap
+                          looked cluttered) and inline so it never collides. */}
+                      <span className="flex items-center gap-1 text-[10.5px] text-muted-foreground leading-tight min-w-0">
+                        {server?.sshEnabled && (
+                          <span
+                            className="shrink-0 rounded px-1 py-px text-[8px] font-semibold tracking-wide leading-none bg-primary text-primary-foreground"
+                            title={server.sshHost ? `SSH tunnel via ${server.sshHost}` : 'SSH tunnel'}
+                          >
+                            SSH
+                          </span>
+                        )}
+                        <span className="truncate">{secondary}</span>
                       </span>
                     </span>
                   ) : (
-                    <span className="block w-full text-[9px] font-medium text-center truncate leading-tight">
-                      {tile.databaseName}
+                    <span className="flex w-full items-center justify-center gap-0.5 text-[9px] font-medium leading-tight min-w-0">
+                      {server?.sshEnabled && (
+                        <span
+                          className="shrink-0 rounded px-0.5 text-[7px] font-semibold tracking-wide leading-none bg-primary text-primary-foreground"
+                          title="SSH tunnel"
+                        >
+                          SSH
+                        </span>
+                      )}
+                      <span className="truncate">{tile.databaseName}</span>
                     </span>
                   )}
                 </button>

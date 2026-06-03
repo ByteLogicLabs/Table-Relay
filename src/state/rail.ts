@@ -8,7 +8,7 @@ interface State {
   tiles: RailTile[];
 }
 
-const STORAGE_KEY = 'dbtable:rail:v1';
+const STORAGE_KEY = 'tablerelay:rail:v1';
 
 function loadInitial(): State {
   if (typeof window === 'undefined') return { tiles: [] };

@@ -79,6 +79,13 @@ impl Registry {
             .ok_or_else(|| AdapterError::NotFound(format!("connection {id} is not active")))
     }
 
+    /// The `ConnectionMeta` (server info) captured when this connection was
+    /// established. `None` if not active. Lets `db_connect` return an existing
+    /// live connection without re-running the handshake.
+    pub async fn meta(&self, id: &str) -> Option<ConnectionMeta> {
+        self.inner.read().await.get(id).map(|c| c.meta.clone())
+    }
+
     /// Manifest of the adapter backing this connection. The manifest
     /// is `&'static`, so this is cheap — no clone, no dyn lookup.
     pub async fn manifest(&self, id: &str) -> Result<&'static AdapterManifest, AdapterError> {

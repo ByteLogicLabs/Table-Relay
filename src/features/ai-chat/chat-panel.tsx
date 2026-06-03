@@ -8,7 +8,7 @@ import { RadioGroup, RadioGroupItem } from '../../components/ui/radio-group';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { Checkbox } from '../../components/ui/checkbox';
 import { useAi, start, end, sendMessage, stopStreaming, syncStatus, approveToolCall, newChat, setFocusedConnection, currentChat, type ChatMessage as StoreChatMessage, type ChatPrefill } from '../../state/ai';
-import { ai, isAiError, type AiProviderKind, type ChatFocus, type LocalModelInfo, type DownloadDoneEvent, type LlamaRuntimeStatus, type AutoApprovalFlags } from '../../lib/ai';
+import { ai, isAiError, type AiProviderKind, type ChatFocus, type LocalModelInfo, type DownloadDoneEvent, type LlamaRuntimeStatus, type AutoApprovalFlags, type QueryTier } from '../../lib/ai';
 import {
   type CredentialProfile,
   getActiveCredentialId,
@@ -119,16 +119,19 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
       pendingPrefillRef.current = detail;
       setPrefillTick(t => t + 1);
     };
-    window.addEventListener('dbtable:ai-prefill', onPrefill);
-    return () => window.removeEventListener('dbtable:ai-prefill', onPrefill);
+    window.addEventListener('tablerelay:ai-prefill', onPrefill);
+    return () => window.removeEventListener('tablerelay:ai-prefill', onPrefill);
   }, []);
 
   return (
     <div className="h-full flex flex-col bg-background min-w-0 relative">
       <div className="h-12 shrink-0 border-b border-border flex items-center justify-between px-3 bg-muted/10">
-        <div className="flex items-center gap-2 min-w-0">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
           <Sparkles className="w-4 h-4 text-primary shrink-0" />
-          <span className="text-sm font-medium truncate">AI Chat</span>
+          {/* Hide the static "AI Chat" label once a session is active — the
+              credential + model pickers need the horizontal room, and without
+              this they overflowed under the right-side action buttons. */}
+          {!showActive && <span className="text-sm font-medium truncate">AI Chat</span>}
           {showActive && <ActiveCredentialPicker />}
           {showActive && <ActiveModelPicker providerKind={s.providerKind} model={s.model} />}
         </div>
@@ -202,6 +205,10 @@ function PermissionsButton() {
       read_schema: true,
       read_structure: true,
       call_query: false,
+      call_query_read: false,
+      call_query_write: false,
+      call_query_create: false,
+      call_query_delete: false,
       write_query_tab: false,
       publish_notify: false,
       subscribe_channel: false,
@@ -310,13 +317,33 @@ const PERMISSION_GROUPS: Array<{ label: string; permissions: Permission[] }> = [
     ],
   },
   {
-    label: 'Write',
+    label: 'Run queries',
     permissions: [
       {
-        key: 'call_query',
-        label: 'Run queries (call_query)',
-        description: 'Let the AI execute read/write queries against your connected database.',
+        key: 'call_query_read',
+        label: 'Read (SELECT)',
+        description: 'Run read-only queries — SELECT, SHOW, EXPLAIN. Returns up to 25 rows to the model.',
       },
+      {
+        key: 'call_query_write',
+        label: 'Write (INSERT / UPDATE)',
+        description: 'Insert rows and update existing rows (UPDATE must have a WHERE clause).',
+      },
+      {
+        key: 'call_query_create',
+        label: 'Create (CREATE / ALTER)',
+        description: 'Create or alter tables, indexes, views, columns. Schema-changing DDL.',
+      },
+      {
+        key: 'call_query_delete',
+        label: 'Delete (DELETE)',
+        description: 'Delete rows (DELETE must have a WHERE clause). DROP / TRUNCATE / no-WHERE deletes always prompt and can never be auto-approved.',
+      },
+    ],
+  },
+  {
+    label: 'Editor',
+    permissions: [
       {
         key: 'write_query_tab',
         label: 'Open / replace query tabs',
@@ -344,7 +371,7 @@ const PERMISSION_GROUPS: Array<{ label: string; permissions: Permission[] }> = [
 const PERMISSIONS: Permission[] = PERMISSION_GROUPS.flatMap(g => g.permissions);
 
 function openSettings() {
-  window.dispatchEvent(new CustomEvent('dbtable:open-settings'));
+  window.dispatchEvent(new CustomEvent('tablerelay:open-settings'));
 }
 
 // Pretty labels for AI tool calls. Falls back to a generic snake → Title
@@ -433,7 +460,10 @@ function ActiveCredentialPicker() {
     if (!next || switching || id === activeId) return;
     setSwitching(true);
     try {
-      await end();
+      // Await the backend teardown before starting the new session — the slot
+      // is single-slot and a racing start() would throw SessionAlreadyActive,
+      // leaving the chat unsendable. See end({ awaitBackend }) in state/ai.ts.
+      await end({ awaitBackend: true });
       await start({
         kind:    next.kind,
         model:   next.model,
@@ -462,12 +492,12 @@ function ActiveCredentialPicker() {
     >
       <SelectTrigger
         size="sm"
-        className="h-7 text-[11px] font-medium text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
+        className="h-7 max-w-32 min-w-0 text-[11px] font-medium text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
         title="Switch credential — keeps chat open"
       >
         {switching
           ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> switching…</>
-          : <SelectValue placeholder={label}>{label}</SelectValue>}
+          : <SelectValue placeholder={label} className="truncate">{label}</SelectValue>}
       </SelectTrigger>
       <SelectContent>
         {credentials.length === 0 && (
@@ -543,7 +573,9 @@ function ActiveModelPicker({
         toast.error('Saved credentials missing — use Switch/End to pick a provider first.');
         return;
       }
-      await end();
+      // Await backend teardown before restart — same single-slot race as the
+      // credential picker (see end({ awaitBackend }) in state/ai.ts).
+      await end({ awaitBackend: true });
       await start({
         kind: providerKind,
         model: nextModel,
@@ -579,12 +611,12 @@ function ActiveModelPicker({
     >
       <SelectTrigger
         size="sm"
-        className="h-7 text-[11px] font-mono text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
+        className="h-7 max-w-44 min-w-0 text-[11px] font-mono text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
         title="Switch model — keeps credentials, clears history"
       >
         {swapping
           ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> switching…</>
-          : <SelectValue placeholder={label}>{label}</SelectValue>}
+          : <SelectValue placeholder={label} className="truncate">{label}</SelectValue>}
       </SelectTrigger>
       <SelectContent>
         {loading && (
@@ -613,16 +645,16 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
   // open/close cycle of the settings dialog by polling localStorage on focus
   // and listening to the open-settings event isn't enough since settings
   // closes silently. A `storage` event would only fire across tabs, so we
-  // refresh on mount + on a custom `dbtable:credentials-changed` event the
+  // refresh on mount + on a custom `tablerelay:credentials-changed` event the
   // settings dialog can fire (cheap if not wired yet — just reads localStorage).
   const [credentials, setCredentials] = useState<CredentialProfile[]>(() => loadCredentials());
   const reload = () => setCredentials(loadCredentials());
   useEffect(() => {
     window.addEventListener('focus', reload);
-    window.addEventListener('dbtable:credentials-changed', reload);
+    window.addEventListener('tablerelay:credentials-changed', reload);
     return () => {
       window.removeEventListener('focus', reload);
-      window.removeEventListener('dbtable:credentials-changed', reload);
+      window.removeEventListener('tablerelay:credentials-changed', reload);
     };
   }, []);
 
@@ -1435,6 +1467,7 @@ function ToolBubble({ message }: { message: StoreChatMessage }) {
             toolName={t.pendingApproval.toolName ?? t.name}
             mode={t.pendingApproval.mode}
             title={t.pendingApproval.title}
+            tier={t.pendingApproval.tier}
           />
         ) : (
           <ToolCardBody name={t.name} args={t.arguments} result={t.result} denied={denied} />
@@ -1749,6 +1782,7 @@ function ApprovalCard({
   toolName,
   mode,
   title,
+  tier,
 }: {
   toolCallId: string;
   sql?: string;
@@ -1756,6 +1790,7 @@ function ApprovalCard({
   toolName?: string;
   mode?: 'new' | 'replace';
   title?: string;
+  tier?: QueryTier;
 }) {
   const [busy, setBusy] = useState(false);
   const doApprove = async (approve: boolean) => {
@@ -1792,8 +1827,28 @@ function ApprovalCard({
   // block so the card layout stays uniform.
   const hasSql = !!(sql && sql.length > 0);
   const body = hasSql ? sql! : (summary ?? '(no preview)');
+  // Tier badge — only for SQL query approvals carrying a classified tier.
+  // Mirrors the small rounded-full pill style used elsewhere in this file.
+  const tierBadgeClass: Record<QueryTier, string> = {
+    read: 'bg-muted text-muted-foreground',
+    write: 'bg-amber-500/15 text-amber-600 dark:text-amber-400',
+    create: 'bg-blue-500/15 text-blue-600 dark:text-blue-400',
+    delete: 'bg-orange-500/15 text-orange-600 dark:text-orange-400',
+    destructive: 'bg-destructive/15 text-destructive',
+  };
+  const showTier = toolName === 'call_query' && !!tier;
   return (
     <div className="mt-1 space-y-2">
+      {showTier && tier ? (
+        <div className="flex items-center gap-2">
+          <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full ${tierBadgeClass[tier]}`}>
+            {tier.toUpperCase()}
+          </span>
+          {tier === 'destructive' ? (
+            <span className="text-[10px] text-destructive">Irreversible — always requires approval</span>
+          ) : null}
+        </div>
+      ) : null}
       <div className="text-[11px] text-muted-foreground">{prompt}</div>
       {hasSql ? (
         <HighlightedSql

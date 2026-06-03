@@ -15,3 +15,4 @@ include!(concat!(env!("OUT_DIR"), "/manifest_generated.rs"));
 pub use adapter::MongoAdapter;
 pub use factory::MongoFactory;
 pub use mongo::{MongoConfig, MongoDriver};
+pub use adapter_ssh::{SshConfig, Tunnel};

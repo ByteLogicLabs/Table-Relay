@@ -1,26 +1,24 @@
-//! Factory for the Redis adapter. Like the SQLite factory, it takes no
-//! `KnownHostsStore` — there's no SSH tunnel support in the first cut.
+//! Factory for the Redis adapter. Takes an `Arc<dyn KnownHostsStore>`
+//! at construction time so the SSH tunnel can persist fingerprints
+//! without every `Factory::connect` call having to thread one through.
 
 use std::sync::Arc;
 
 use adapter_api::manifest::AdapterManifest;
+use adapter_api::ssh_hosts::KnownHostsStore;
 use adapter_api::{Adapter, AdapterError, ConnectionProfile, Factory};
 use async_trait::async_trait;
 
 use crate::adapter::RedisAdapter;
-use crate::{RedisConfig, RedisDriver, MANIFEST};
+use crate::{RedisConfig, RedisDriver, SshConfig, Tunnel, MANIFEST};
 
-pub struct RedisFactory;
-
-impl RedisFactory {
-    pub fn new() -> Self {
-        Self
-    }
+pub struct RedisFactory {
+    known_hosts: Arc<dyn KnownHostsStore>,
 }
 
-impl Default for RedisFactory {
-    fn default() -> Self {
-        Self::new()
+impl RedisFactory {
+    pub fn new(known_hosts: Arc<dyn KnownHostsStore>) -> Self {
+        Self { known_hosts }
     }
 }
 
@@ -34,6 +32,40 @@ impl Factory for RedisFactory {
         &self,
         profile: ConnectionProfile,
     ) -> Result<Arc<dyn Adapter>, AdapterError> {
+        // Optionally open an SSH tunnel and redirect the DB dial target
+        // to the local forwarded port.
+        let (db_host, db_port, tunnel) = if profile.ssh_enabled {
+            let ssh_host = profile
+                .ssh_host
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| AdapterError::SshTunnel(
+                    "SSH enabled but no SSH host provided".into(),
+                ))?;
+            let ssh_user = profile
+                .ssh_user
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .ok_or_else(|| AdapterError::SshTunnel(
+                    "SSH enabled but no SSH user provided".into(),
+                ))?;
+            let cfg = SshConfig {
+                ssh_host,
+                ssh_port: profile.ssh_port.unwrap_or(22),
+                ssh_user,
+                auth_kind: profile.ssh_auth_kind.clone(),
+                password: profile.ssh_password.clone(),
+                key_path: profile.ssh_key_path.clone(),
+                key_passphrase: profile.ssh_key_passphrase.clone(),
+                remote_host: profile.host.clone(),
+                remote_port: profile.port,
+            };
+            let t = Tunnel::open(cfg, &*self.known_hosts).await?;
+            (t.local_host().to_string(), t.local_port(), Some(t))
+        } else {
+            (profile.host.clone(), profile.port, None)
+        };
+
         // The frontend stores `database` as a string ("0" / "3"); accept
         // integer-parseable values and default to 0 otherwise.
         let database = profile
@@ -42,13 +74,15 @@ impl Factory for RedisFactory {
             .and_then(|s| s.trim().parse::<u32>().ok());
 
         let driver = RedisDriver::connect(RedisConfig {
-            host: profile.host.clone(),
-            port: profile.port,
+            host: db_host,
+            port: db_port,
             user: profile.user.clone(),
             password: profile.password.clone(),
             database,
         })
         .await?;
-        Ok(Arc::new(RedisAdapter::new(driver)))
+
+        let adapter = RedisAdapter::new_with_tunnel(driver, tunnel);
+        Ok(Arc::new(adapter))
     }
 }

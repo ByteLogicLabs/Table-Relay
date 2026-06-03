@@ -14,3 +14,4 @@ include!(concat!(env!("OUT_DIR"), "/manifest_generated.rs"));
 pub use adapter::RedisAdapter;
 pub use factory::RedisFactory;
 pub use redis::{RedisConfig, RedisDriver};
+pub use adapter_ssh::{SshConfig, Tunnel};
