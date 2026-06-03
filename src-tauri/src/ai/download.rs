@@ -27,7 +27,7 @@ use super::AiError;
 ///      ancestor of `cwd` containing a `src-tauri/` or `package.json`.
 ///      This matters in Tauri dev mode, where `cwd` is `<project>/src-tauri/`
 ///      — without this we'd litter weights inside `src-tauri/ai-models/`.
-///   3. The OS app-data directory (`…/com.tablerelay.app/ai-models`). This is
+///   3. The OS app-data directory (`…/me.bytelogic.tablerelay/ai-models`). This is
 ///      the path that matters for PACKAGED builds on macOS / Windows / Linux,
 ///      where there is no project root and `cwd` is read-only (`/`,
 ///      `C:\Windows\System32`, etc.).
@@ -46,14 +46,14 @@ pub fn models_dir() -> PathBuf {
     cwd.join("ai-models")
 }
 
-/// Platform app-data dir for `com.tablerelay.app`, resolved from env without
+/// Platform app-data dir for `me.bytelogic.tablerelay`, resolved from env without
 /// pulling in the `dirs` crate. Mirrors Tauri's `app_data_dir()` layout so
 /// models land beside the encrypted store:
-///   macOS   → ~/Library/Application Support/com.tablerelay.app
-///   Windows → %APPDATA%\com.tablerelay.app
-///   Linux   → $XDG_DATA_HOME/com.tablerelay.app  (or ~/.local/share/…)
+///   macOS   → ~/Library/Application Support/me.bytelogic.tablerelay
+///   Windows → %APPDATA%\me.bytelogic.tablerelay
+///   Linux   → $XDG_DATA_HOME/me.bytelogic.tablerelay  (or ~/.local/share/…)
 fn os_app_data_dir() -> Option<PathBuf> {
-    const BUNDLE_ID: &str = "com.tablerelay.app";
+    const BUNDLE_ID: &str = "me.bytelogic.tablerelay";
 
     #[cfg(target_os = "macos")]
     {
