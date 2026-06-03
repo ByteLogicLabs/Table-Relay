@@ -57,6 +57,25 @@ The first Rust build compiles all five database adapters and can take several mi
 
 > **AI is optional and configured in-app, not via environment variables.** For a hosted provider, open **Settings → AI Providers**, add a credential, and activate it (keys are stored locally on your machine — see [Security](#security)). For a **local model** you need no key at all: pick **Local Llama**, download a GGUF model from the built-in catalog, and Table Relay runs it on-device via `llama.cpp` (install the open-source [`llama.cpp`](https://github.com/ggerganov/llama.cpp) `llama-server` CLI first — e.g. `brew install llama.cpp`). There is no required `.env` file to run the app.
 
+### Installing a downloaded release
+
+Release builds are **not code-signed or notarized**, so the OS will warn you the
+first time you open the app.
+
+**macOS** — you may see *"Table Relay is damaged and can't be opened"* or *"Apple
+cannot check it for malicious software."* This is Gatekeeper quarantining an
+unsigned download, not actual corruption. After dragging the app into
+`/Applications`, clear the quarantine flag once:
+
+```bash
+xattr -dr com.apple.quarantine "/Applications/Table Relay.app"
+```
+
+Then open it normally.
+
+**Windows** — SmartScreen shows *"Windows protected your PC."* Click **More
+info → Run anyway**.
+
 ### Build a release bundle
 
 ```bash

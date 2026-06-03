@@ -30,11 +30,11 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir unavailable");
-            // App was renamed db-table → Table Relay, which changed the bundle
-            // identifier (com.dbtable.app → com.tablerelay.app) and therefore
-            // the app-data directory. Carry the old store + vault + oauth files
-            // forward so existing users keep their saved connections, known SSH
-            // hosts, AI settings and chat history after the rename.
+            // The bundle identifier (and thus the app-data directory) has
+            // changed twice: com.dbtable.app → com.tablerelay.app →
+            // me.bytelogic.tablerelay. Carry the most recent prior store +
+            // vault + oauth files forward so existing users keep their saved
+            // connections, known SSH hosts, AI settings and chat history.
             migrate_legacy_app_data(&dir);
             let store =
                 Arc::new(Store::open(dir.clone()).expect("failed to initialize connection store"));
@@ -247,38 +247,55 @@ pub fn run() {
         .expect("error while running tauri application");
 }
 
-/// One-time carry-forward of the local store after the db-table → Table Relay
-/// rename changed the bundle identifier (and thus the app-data directory) from
-/// `com.dbtable.app` to `com.tablerelay.app`.
+/// One-time carry-forward of the local store after a bundle-identifier change
+/// (and thus a different app-data directory). The id has changed twice:
+/// `com.dbtable.app` → `com.tablerelay.app` → `me.bytelogic.tablerelay`.
 ///
-/// `new_dir` is the current app-data dir (`…/com.tablerelay.app`). We only act
-/// when the NEW `store.db` doesn't exist yet (a fresh post-rename install) and
-/// the OLD dir alongside it has a `store.db` — then we copy `store.db`,
-/// `vault.db` and `gemini_oauth.json` across. Never overwrites a populated new
-/// store, so it's a no-op on every launch after the first.
+/// `new_dir` is the current app-data dir (`…/me.bytelogic.tablerelay`). We only
+/// act when the new dir has no store yet (a fresh post-rename install) and a
+/// sibling dir from a previous identifier does — then we copy the store, vault
+/// and oauth files across, preferring the most recent prior identifier. Never
+/// overwrites a populated new store, so it's a no-op on every later launch.
 fn migrate_legacy_app_data(new_dir: &std::path::Path) {
-    let new_store = new_dir.join("store.db");
-    if new_store.exists() {
+    // A "has data" dir is one that holds either the encrypted store
+    // (`store.db.enc`, current format) or the legacy plaintext `store.db`.
+    let has_store = |dir: &std::path::Path| {
+        dir.join("store.db.enc").exists() || dir.join("store.db").exists()
+    };
+
+    if has_store(new_dir) {
         return; // already migrated (or a normal returning user) — nothing to do
     }
 
-    // Old dir is the sibling whose name is the old bundle identifier.
     let parent = match new_dir.parent() {
         Some(p) => p,
         None => return,
     };
-    let old_dir = parent.join("com.dbtable.app");
-    let old_store = old_dir.join("store.db");
-    if !old_store.exists() {
-        return; // nothing to migrate from
-    }
+
+    // Most recent prior identifier first, so a user upgrading from the
+    // immediately previous build wins over a much older one.
+    let old_dir = match ["com.tablerelay.app", "com.dbtable.app"]
+        .into_iter()
+        .map(|id| parent.join(id))
+        .find(|d| has_store(d))
+    {
+        Some(d) => d,
+        None => return, // nothing to migrate from
+    };
 
     if let Err(e) = std::fs::create_dir_all(new_dir) {
         crate::log::write_line("migrate", &format!("create new app-data dir failed: {e}"));
         return;
     }
 
-    for name in ["store.db", "vault.db", "gemini_oauth.json"] {
+    let from = old_dir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+    for name in [
+        "store.db.enc",         // encrypted store (current)
+        "store.db",             // legacy plaintext store
+        "store.db.plain.backup", // plaintext migration backup, if any
+        "vault.db",
+        "gemini_oauth.json",
+    ] {
         let src = old_dir.join(name);
         if !src.exists() {
             continue;
@@ -287,7 +304,7 @@ fn migrate_legacy_app_data(new_dir: &std::path::Path) {
         match std::fs::copy(&src, &dst) {
             Ok(_) => crate::log::write_line(
                 "migrate",
-                &format!("carried forward {name} from com.dbtable.app"),
+                &format!("carried forward {name} from {from}"),
             ),
             Err(e) => crate::log::write_line("migrate", &format!("copy {name} failed: {e}")),
         }

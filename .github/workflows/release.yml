@@ -95,11 +95,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Cache the Cargo build for the workspace under src-tauri so reruns are fast.
+      # Cache the Cargo build so reruns are fast. This is a virtual workspace
+      # (root Cargo.toml), so the target dir is at the repo root, not src-tauri/.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: src-tauri -> target
+          workspaces: . -> target
           key: ${{ matrix.target }}
 
       - name: Install frontend dependencies
@@ -118,42 +119,33 @@ jobs:
           releaseId: ${{ github.event.release.id }}
           args: ${{ matrix.args }}
 
-      # GitHub's macOS runners removed Finder (June 2025 image change), which
-      # breaks Tauri's bundle_dmg.sh — it drives Finder over AppleScript to set
-      # the window background/icon layout, and even hdiutil detach now fails.
-      # `CI=true` does NOT help (Actions already sets it). So we skip Tauri's DMG
-      # bundler and assemble a plain DMG ourselves with `hdiutil create`, which
-      # never touches Finder. The result is a standard mountable .dmg with the
-      # .app inside and an /Applications symlink for drag-to-install — just
-      # without a custom background image.
+      # macOS .app/.dmg are signed and packaged by the SAME scripts used locally
+      # (scripts/sign-mac.sh + scripts/make-dmg.sh) so CI and `npm run build:mac`
+      # stay in lockstep — fix a bug once, it applies everywhere. The scripts
+      # take the target triple as $1 and read from target/<triple>/...
+      #
+      # Why we do this ourselves instead of Tauri's bundler:
+      #   - Signing: Apple Silicon won't launch an unsigned binary; sign-mac.sh
+      #     applies an ad-hoc signature (no Apple account/cert needed). This is
+      #     NOT notarization — downloaded .dmgs still hit Gatekeeper quarantine,
+      #     fixed once with `xattr -dr com.apple.quarantine` (see README).
+      #   - DMG: GitHub's macOS runners removed Finder (June 2025 image), which
+      #     breaks Tauri's bundle_dmg.sh (AppleScript + hdiutil detach). CI=true
+      #     does NOT help. make-dmg.sh uses plain `hdiutil create`, no Finder.
+      - name: Sign macOS app
+        if: runner.os == 'macOS'
+        run: bash scripts/sign-mac.sh "${{ matrix.target }}"
+
       - name: Build macOS DMG
+        if: runner.os == 'macOS'
+        run: bash scripts/make-dmg.sh "${{ matrix.target }}"
+
+      - name: Upload macOS DMG to release
         if: runner.os == 'macOS'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          bundle_dir="target/${{ matrix.target }}/release/bundle/macos"
-          app_path=$(find "$bundle_dir" -maxdepth 1 -name '*.app' | head -n1)
-          if [ -z "$app_path" ]; then
-            echo "No .app found under $bundle_dir" >&2
-            exit 1
-          fi
-          app_name=$(basename "$app_path" .app)
-          version=$(node -p "require('./package.json').version")
-          arch="${{ matrix.target }}"
-          arch="${arch%%-*}"   # aarch64 / x86_64
-          dmg_name="${app_name// /_}_${version}_${arch}.dmg"
-
-          # Stage the .app plus an /Applications symlink so the mounted volume
-          # offers the usual drag-to-install layout.
-          staging=$(mktemp -d)
-          cp -R "$app_path" "$staging/"
-          ln -s /Applications "$staging/Applications"
-
-          hdiutil create -volname "$app_name" \
-            -srcfolder "$staging" \
-            -ov -format UDZO \
-            "$dmg_name"
-
-          echo "Built $dmg_name"
-          gh release upload "${{ github.event.release.tag_name }}" "$dmg_name" --clobber
+          dmg=$(ls *.dmg | head -n1)
+          echo "Uploading $dmg"
+          gh release upload "${{ github.event.release.tag_name }}" "$dmg" --clobber
