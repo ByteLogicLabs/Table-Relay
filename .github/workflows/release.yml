@@ -11,11 +11,14 @@ name: Release
 #   3. The matrix builds run; each uploads its installer(s) to that release.
 #
 # Builds are UNSIGNED:
-#   - macOS: users right-click the .app/.dmg and choose "Open" the first time to
-#     get past Gatekeeper.
+#   - macOS: users right-click the .app inside the .dmg and choose "Open" the
+#     first time to get past Gatekeeper.
 #   - Windows: SmartScreen shows an "unknown publisher" warning — "More info" ->
 #     "Run anyway".
 # Add code signing later by supplying the cert secrets to tauri-action.
+#
+# macOS .dmg is assembled by hand (hdiutil) in the "Build macOS DMG" step rather
+# than by Tauri's bundler — see that step's comment for why.
 
 on:
   release:
@@ -36,16 +39,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon (M-series)
+          # Apple Silicon (M-series). Build only the .app — we assemble the .dmg
+          # ourselves below because GitHub's macOS runners broke Tauri's
+          # Finder/AppleScript DMG bundler.
           - label: macOS (arm64)
             platform: macos-latest
             target: aarch64-apple-darwin
-            args: --target aarch64-apple-darwin
+            args: --target aarch64-apple-darwin --bundles app
           # Intel Macs
           - label: macOS (x64)
             platform: macos-latest
             target: x86_64-apple-darwin
-            args: --target x86_64-apple-darwin
+            args: --target x86_64-apple-darwin --bundles app
           # Linux .deb / .AppImage / .rpm
           - label: Linux (x64)
             platform: ubuntu-22.04
@@ -102,6 +107,8 @@ jobs:
 
       # tauri-action runs `npm run build` (beforeBuildCommand) then `tauri build`,
       # and uploads the resulting installers to the release identified by tagName.
+      # On macOS we restrict bundles to `app` (see matrix) — the DMG is built in
+      # the next step.
       - name: Build and upload
         uses: tauri-apps/tauri-action@v0
         env:
@@ -110,3 +117,43 @@ jobs:
           tagName: ${{ github.event.release.tag_name }}
           releaseId: ${{ github.event.release.id }}
           args: ${{ matrix.args }}
+
+      # GitHub's macOS runners removed Finder (June 2025 image change), which
+      # breaks Tauri's bundle_dmg.sh — it drives Finder over AppleScript to set
+      # the window background/icon layout, and even hdiutil detach now fails.
+      # `CI=true` does NOT help (Actions already sets it). So we skip Tauri's DMG
+      # bundler and assemble a plain DMG ourselves with `hdiutil create`, which
+      # never touches Finder. The result is a standard mountable .dmg with the
+      # .app inside and an /Applications symlink for drag-to-install — just
+      # without a custom background image.
+      - name: Build macOS DMG
+        if: runner.os == 'macOS'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          bundle_dir="target/${{ matrix.target }}/release/bundle/macos"
+          app_path=$(find "$bundle_dir" -maxdepth 1 -name '*.app' | head -n1)
+          if [ -z "$app_path" ]; then
+            echo "No .app found under $bundle_dir" >&2
+            exit 1
+          fi
+          app_name=$(basename "$app_path" .app)
+          version=$(node -p "require('./package.json').version")
+          arch="${{ matrix.target }}"
+          arch="${arch%%-*}"   # aarch64 / x86_64
+          dmg_name="${app_name// /_}_${version}_${arch}.dmg"
+
+          # Stage the .app plus an /Applications symlink so the mounted volume
+          # offers the usual drag-to-install layout.
+          staging=$(mktemp -d)
+          cp -R "$app_path" "$staging/"
+          ln -s /Applications "$staging/Applications"
+
+          hdiutil create -volname "$app_name" \
+            -srcfolder "$staging" \
+            -ov -format UDZO \
+            "$dmg_name"
+
+          echo "Built $dmg_name"
+          gh release upload "${{ github.event.release.tag_name }}" "$dmg_name" --clobber

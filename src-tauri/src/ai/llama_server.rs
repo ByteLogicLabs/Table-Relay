@@ -36,14 +36,25 @@ pub fn find_binary() -> Option<PathBuf> {
             return Some(path);
         }
     }
+    // `which` is cross-platform: on Windows it honours PATHEXT, so it resolves
+    // `llama-server.exe` from a winget/scoop install on PATH without us
+    // appending the extension ourselves.
     if let Ok(path) = which::which("llama-server") {
         return Some(path);
     }
-    for candidate in [
+    // Fallback locations for installs that don't land on PATH.
+    #[cfg(not(target_os = "windows"))]
+    let candidates: &[&str] = &[
         "/opt/homebrew/bin/llama-server", // Apple Silicon Homebrew
         "/usr/local/bin/llama-server",    // Intel Homebrew + Linux
-        "/usr/bin/llama-server",          // system package
-    ] {
+        "/usr/bin/llama-server",          // system package (apt)
+    ];
+    #[cfg(target_os = "windows")]
+    let candidates: &[&str] = &[
+        r"C:\Program Files\llama.cpp\llama-server.exe",
+        r"C:\llama.cpp\llama-server.exe",
+    ];
+    for candidate in candidates {
         let p = PathBuf::from(candidate);
         if p.is_file() {
             return Some(p);
@@ -69,7 +80,8 @@ impl LlamaServer {
             // in case someone calls the command directly (tests, devtools).
             AiError::Other(
                 "llama-server not found on this machine. Install it first \
-                 (macOS: `brew install llama.cpp`)."
+                 (macOS: `brew install llama.cpp`, Linux: `apt install llama.cpp` \
+                 or build from source, Windows: `winget install llama.cpp`)."
                     .into(),
             )
         })?;
