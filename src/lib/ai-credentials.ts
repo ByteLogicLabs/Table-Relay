@@ -1,4 +1,5 @@
 import type { AiProviderKind } from './ai';
+import { getAppState, setAppState } from './app-state-store';
 
 export interface CredentialProfile {
   id: string;
@@ -12,17 +13,56 @@ export interface CredentialProfile {
 
 const LIST_KEY   = 'tablerelay:ai-credentials:v1';
 const ACTIVE_KEY = 'tablerelay:ai-active-credential:v1';
+const OLD_LIST_KEY = 'dbtable:ai-credentials:v1';
+const OLD_ACTIVE_KEY = 'dbtable:ai-active-credential:v1';
 
-export function loadCredentials(): CredentialProfile[] {
+let credentials: CredentialProfile[] = [];
+let activeCredentialId: string | null = null;
+let hydrated = false;
+
+function loadLegacyCredentials(): CredentialProfile[] {
   try {
-    const raw = localStorage.getItem(LIST_KEY);
+    const raw = localStorage.getItem(LIST_KEY) ?? localStorage.getItem(OLD_LIST_KEY);
     if (raw) return JSON.parse(raw) as CredentialProfile[];
   } catch { /* noop */ }
   return [];
 }
 
+function loadLegacyActiveCredentialId(): string | null {
+  try { return localStorage.getItem(ACTIVE_KEY) ?? localStorage.getItem(OLD_ACTIVE_KEY); } catch { return null; }
+}
+
+export async function hydrateCredentials(): Promise<void> {
+  if (hydrated) return;
+  const [storedCredentials, storedActiveId] = await Promise.all([
+    getAppState<CredentialProfile[]>(LIST_KEY).catch(() => null),
+    getAppState<string | null>(ACTIVE_KEY).catch(() => null),
+  ]);
+  credentials = Array.isArray(storedCredentials) ? storedCredentials : loadLegacyCredentials();
+  activeCredentialId = storedActiveId ?? loadLegacyActiveCredentialId();
+  if (!storedCredentials && credentials.length > 0) {
+    await setAppState(LIST_KEY, credentials);
+  }
+  if (storedActiveId === null && activeCredentialId) {
+    await setAppState(ACTIVE_KEY, activeCredentialId);
+  }
+  try {
+    localStorage.removeItem(LIST_KEY);
+    localStorage.removeItem(ACTIVE_KEY);
+    localStorage.removeItem(OLD_LIST_KEY);
+    localStorage.removeItem(OLD_ACTIVE_KEY);
+  } catch { /* noop */ }
+  hydrated = true;
+  window.dispatchEvent(new CustomEvent('tablerelay:credentials-changed'));
+}
+
+export function loadCredentials(): CredentialProfile[] {
+  return credentials;
+}
+
 function persist(list: CredentialProfile[]): void {
-  localStorage.setItem(LIST_KEY, JSON.stringify(list));
+  credentials = list;
+  void setAppState(LIST_KEY, credentials);
   window.dispatchEvent(new CustomEvent('tablerelay:credentials-changed'));
 }
 
@@ -47,11 +87,11 @@ export function deleteCredential(id: string): void {
 }
 
 export function getActiveCredentialId(): string | null {
-  return localStorage.getItem(ACTIVE_KEY);
+  return activeCredentialId;
 }
 
 export function setActiveCredentialId(id: string | null): void {
-  if (id) localStorage.setItem(ACTIVE_KEY, id);
-  else    localStorage.removeItem(ACTIVE_KEY);
+  activeCredentialId = id;
+  void setAppState(ACTIVE_KEY, id);
   window.dispatchEvent(new CustomEvent('tablerelay:credentials-changed'));
 }

@@ -9,9 +9,18 @@ use crate::store::{Store, StoreError};
 
 type SResult<T> = Result<T, StoreError>;
 
-fn with_conn<R>(store: &Store, f: impl FnOnce(&mut rusqlite::Connection) -> SResult<R>) -> SResult<R> {
-    let mut guard = store.db.lock().expect("store db mutex poisoned");
-    f(&mut guard)
+fn with_conn<R>(
+    store: &Store,
+    f: impl FnOnce(&mut rusqlite::Connection) -> SResult<R>,
+) -> SResult<R> {
+    store.with_conn(false, f)
+}
+
+fn with_conn_persist<R>(
+    store: &Store,
+    f: impl FnOnce(&mut rusqlite::Connection) -> SResult<R>,
+) -> SResult<R> {
+    store.with_conn(true, f)
 }
 
 #[tauri::command]
@@ -21,12 +30,12 @@ pub fn rail_list(store: State<'_, Arc<Store>>) -> SResult<Vec<RailTile>> {
 
 #[tauri::command]
 pub fn rail_pin(store: State<'_, Arc<Store>>, input: RailTileInput) -> SResult<RailTile> {
-    with_conn(&store, |c| repo_rail::pin(c, input))
+    with_conn_persist(&store, |c| repo_rail::pin(c, input))
 }
 
 #[tauri::command]
 pub fn rail_unpin(store: State<'_, Arc<Store>>, id: String) -> SResult<()> {
-    with_conn(&store, |c| repo_rail::unpin(c, &id))
+    with_conn_persist(&store, |c| repo_rail::unpin(c, &id))
 }
 
 #[tauri::command]
@@ -35,10 +44,10 @@ pub fn rail_rename(
     id: String,
     label: Option<String>,
 ) -> SResult<RailTile> {
-    with_conn(&store, |c| repo_rail::rename(c, &id, label.as_deref()))
+    with_conn_persist(&store, |c| repo_rail::rename(c, &id, label.as_deref()))
 }
 
 #[tauri::command]
 pub fn rail_reorder(store: State<'_, Arc<Store>>, ordered_ids: Vec<String>) -> SResult<()> {
-    with_conn(&store, |c| repo_rail::reorder(c, &ordered_ids))
+    with_conn_persist(&store, |c| repo_rail::reorder(c, &ordered_ids))
 }

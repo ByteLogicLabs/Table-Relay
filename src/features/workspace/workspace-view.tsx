@@ -17,6 +17,7 @@ import { ai, type ChatFocus } from '../../lib/ai';
 import { clearCachedGrid, clearCachedGridsWhere } from '../../state/tab-data-cache';
 import { clearQueryResultSnapshot } from '../../state/query-result-cache';
 import { setDebugPage } from '../../state/debug';
+import { getAppState, setAppState } from '../../lib/app-state-store';
 
 const SIDEBAR_WIDTH = 256;
 const CHAT_WIDTH_KEY = 'tablerelay:chatWidth:v1';
@@ -27,6 +28,11 @@ const TABS_STORAGE_KEY = 'tablerelay:tabs:v1';
 const ACTIVE_TAB_KEY = 'tablerelay:activeTab:v1';
 const ACTIVE_TAB_BY_CONN_KEY = 'tablerelay:activeTabByConn:v1';
 const FOCUSED_TILE_KEY = 'tablerelay:focusedTile:v1';
+const OLD_TABS_STORAGE_KEY = 'dbtable:tabs:v1';
+const OLD_ACTIVE_TAB_KEY = 'dbtable:activeTab:v1';
+const OLD_ACTIVE_TAB_BY_CONN_KEY = 'dbtable:activeTabByConn:v1';
+const OLD_FOCUSED_TILE_KEY = 'dbtable:focusedTile:v1';
+const OLD_CHAT_WIDTH_KEY = 'dbtable:chatWidth:v1';
 
 /**
  * Translate the active AppTab into a focus hint the AI context builder can
@@ -71,10 +77,10 @@ function computeFocusHint(tab: AppTab | undefined): ChatFocus | undefined {
   }
 }
 
-function loadPersistedTabs(): AppTab[] {
+function loadLegacyTabs(): AppTab[] {
   if (typeof window === 'undefined') return [];
   try {
-    const raw = window.localStorage.getItem(TABS_STORAGE_KEY);
+    const raw = window.localStorage.getItem(TABS_STORAGE_KEY) ?? window.localStorage.getItem(OLD_TABS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
@@ -104,49 +110,100 @@ export default function WorkspaceView({
   onConnect,
   onAddConnection,
 }: WorkspaceViewProps) {
-  const [tabs, setTabs] = useState<AppTab[]>(() => loadPersistedTabs());
+  const workspaceStateHydrated = useRef(false);
+  const [tabs, setTabs] = useState<AppTab[]>([]);
   // Per-connection active-tab map: each connection remembers its own last
   // active tab, so switching between connections never steals tab focus from
   // the other. Legacy single-id value is read once and folded into the map.
-  const [activeTabByConn, setActiveTabByConn] = useState<Record<string, string>>(() => {
-    try {
-      const raw = window.localStorage.getItem(ACTIVE_TAB_BY_CONN_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          return parsed as Record<string, string>;
-        }
+  const [activeTabByConn, setActiveTabByConn] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const [storedTabs, storedActiveByConn, storedFocusedTile, storedChatWidth] = await Promise.all([
+        getAppState<AppTab[]>(TABS_STORAGE_KEY).catch(() => null),
+        getAppState<Record<string, string>>(ACTIVE_TAB_BY_CONN_KEY).catch(() => null),
+        getAppState<string>(FOCUSED_TILE_KEY).catch(() => null),
+        getAppState<number>(CHAT_WIDTH_KEY).catch(() => null),
+      ]);
+      if (cancelled) return;
+
+      const nextTabs = Array.isArray(storedTabs) ? storedTabs.filter(
+        (t): t is AppTab =>
+          t && typeof t.id === 'string' && typeof t.title === 'string' && typeof t.type === 'string' && typeof t.connectionId === 'string',
+      ) : loadLegacyTabs();
+      setTabs(nextTabs);
+
+      if (storedActiveByConn && typeof storedActiveByConn === 'object' && !Array.isArray(storedActiveByConn)) {
+        setActiveTabByConn(storedActiveByConn);
+      } else {
+        try {
+          const raw = window.localStorage.getItem(ACTIVE_TAB_BY_CONN_KEY)
+            ?? window.localStorage.getItem(OLD_ACTIVE_TAB_BY_CONN_KEY);
+          if (raw) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+              setActiveTabByConn(parsed as Record<string, string>);
+            }
+          } else {
+            const legacy = window.localStorage.getItem(ACTIVE_TAB_KEY)
+              ?? window.localStorage.getItem(OLD_ACTIVE_TAB_KEY);
+            const owner = legacy ? nextTabs.find(t => t.id === legacy) : undefined;
+            if (owner) setActiveTabByConn({ [owner.connectionId]: legacy! });
+          }
+        } catch { /* noop */ }
       }
-    } catch { /* fall through */ }
-    // Legacy migration: if the old single-id key is set, stash it under the
-    // first connection that owns a matching tab so we don't lose focus on
-    // upgrade. Next write overrides it properly.
-    try {
-      const legacy = window.localStorage.getItem(ACTIVE_TAB_KEY);
-      const persistedTabs = loadPersistedTabs();
-      if (legacy) {
-        const owner = persistedTabs.find(t => t.id === legacy);
-        if (owner) return { [owner.connectionId]: legacy };
+
+      if (storedFocusedTile) {
+        setFocusedTileId(storedFocusedTile);
+      } else {
+        try {
+          const legacyFocusedTile = window.localStorage.getItem(FOCUSED_TILE_KEY)
+            ?? window.localStorage.getItem(OLD_FOCUSED_TILE_KEY);
+          if (legacyFocusedTile) setFocusedTileId(legacyFocusedTile);
+        } catch { /* noop */ }
       }
-    } catch { /* noop */ }
-    return {};
-  });
+
+      if (typeof storedChatWidth === 'number' && Number.isFinite(storedChatWidth)
+          && storedChatWidth >= CHAT_MIN_WIDTH && storedChatWidth <= CHAT_MAX_WIDTH) {
+        setChatWidth(storedChatWidth);
+      } else {
+        try {
+          const raw = window.localStorage.getItem(CHAT_WIDTH_KEY) ?? window.localStorage.getItem(OLD_CHAT_WIDTH_KEY);
+          const n = raw ? Number(raw) : NaN;
+          if (Number.isFinite(n) && n >= CHAT_MIN_WIDTH && n <= CHAT_MAX_WIDTH) setChatWidth(n);
+        } catch { /* noop */ }
+      }
+
+      try {
+        window.localStorage.removeItem(TABS_STORAGE_KEY);
+        window.localStorage.removeItem(ACTIVE_TAB_BY_CONN_KEY);
+        window.localStorage.removeItem(ACTIVE_TAB_KEY);
+        window.localStorage.removeItem(FOCUSED_TILE_KEY);
+        window.localStorage.removeItem(CHAT_WIDTH_KEY);
+        window.localStorage.removeItem(OLD_TABS_STORAGE_KEY);
+        window.localStorage.removeItem(OLD_ACTIVE_TAB_BY_CONN_KEY);
+        window.localStorage.removeItem(OLD_ACTIVE_TAB_KEY);
+        window.localStorage.removeItem(OLD_FOCUSED_TILE_KEY);
+        window.localStorage.removeItem(OLD_CHAT_WIDTH_KEY);
+      } catch { /* noop */ }
+
+      workspaceStateHydrated.current = true;
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Persist tabs + per-connection active tab so reopening the app lands you
   // back in the same workspace with each connection's tabs intact.
   useEffect(() => {
-    try {
-      window.localStorage.setItem(TABS_STORAGE_KEY, JSON.stringify(tabs));
-    } catch { /* quota / private mode: silent fallback */ }
+    if (!workspaceStateHydrated.current) return;
+    void setAppState(TABS_STORAGE_KEY, tabs);
   }, [tabs]);
   useEffect(() => {
-    try {
-      window.localStorage.setItem(ACTIVE_TAB_BY_CONN_KEY, JSON.stringify(activeTabByConn));
-    } catch { /* noop */ }
+    if (!workspaceStateHydrated.current) return;
+    void setAppState(ACTIVE_TAB_BY_CONN_KEY, activeTabByConn);
   }, [activeTabByConn]);
-  const [focusedTileId, setFocusedTileId] = useState<string | null>(() => {
-    try { return window.localStorage.getItem(FOCUSED_TILE_KEY); } catch { return null; }
-  });
+  const [focusedTileId, setFocusedTileId] = useState<string | null>(null);
   // When the user picks a connection (not a tile), we track it explicitly so
   // the sidebar knows which server to show even before a database is chosen.
   const [focusedConnectionId, setFocusedConnectionId] = useState<string | null>(null);
@@ -154,16 +211,10 @@ export default function WorkspaceView({
   // Connection id the Import SQL dialog is bound to. `null` = dialog closed.
   const [importSqlForId, setImportSqlForId] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatWidth, setChatWidth] = useState<number>(() => {
-    try {
-      const raw = window.localStorage.getItem(CHAT_WIDTH_KEY);
-      const n = raw ? Number(raw) : NaN;
-      if (Number.isFinite(n) && n >= CHAT_MIN_WIDTH && n <= CHAT_MAX_WIDTH) return n;
-    } catch { /* noop */ }
-    return CHAT_DEFAULT_WIDTH;
-  });
+  const [chatWidth, setChatWidth] = useState<number>(CHAT_DEFAULT_WIDTH);
   useEffect(() => {
-    try { window.localStorage.setItem(CHAT_WIDTH_KEY, String(chatWidth)); } catch { /* noop */ }
+    if (!workspaceStateHydrated.current) return;
+    void setAppState(CHAT_WIDTH_KEY, chatWidth);
   }, [chatWidth]);
   const [railExpanded, setRailExpanded] = useState(false);
 
@@ -293,10 +344,8 @@ export default function WorkspaceView({
   // database. Without this the user was prompted to re-pick a database on
   // every launch even though the pins themselves survived.
   useEffect(() => {
-    try {
-      if (focusedTileId) window.localStorage.setItem(FOCUSED_TILE_KEY, focusedTileId);
-      else window.localStorage.removeItem(FOCUSED_TILE_KEY);
-    } catch { /* noop */ }
+    if (!workspaceStateHydrated.current) return;
+    void setAppState(FOCUSED_TILE_KEY, focusedTileId);
   }, [focusedTileId]);
 
   // Clear focus if the focused tile has been unpinned. If the rail still has

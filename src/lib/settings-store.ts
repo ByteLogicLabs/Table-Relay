@@ -1,4 +1,5 @@
 import { useSyncExternalStore } from 'react';
+import { getAppState, setAppState } from './app-state-store';
 
 export type AppTheme = 'one-dark' | 'latte' | 'monokai' | 'dracula' | 'nord' | 'tokyo-night' | 'github-dark';
 
@@ -28,6 +29,7 @@ export interface AppSettings {
 }
 
 const KEY = 'tablerelay:settings:v1';
+const OLD_KEY = 'dbtable:settings:v1';
 
 export const DEFAULTS: AppSettings = {
   theme: 'monokai',
@@ -45,20 +47,18 @@ export const DEFAULTS: AppSettings = {
 };
 
 // ── Module-level state + subscription ──────────────────────────────────────────
-// Read once from localStorage, then kept in memory. Consumers subscribe via
-// useSettings() so a change in the dialog applies live without a reload — the
-// store was previously read-once, which is why earlier settings only took
-// effect on remount.
+// Kept in memory after unlock. Persistence goes through encrypted app_state.
 
-function read(): AppSettings {
+function readLegacyLocalStorage(): Partial<AppSettings> | null {
   try {
-    const raw = localStorage.getItem(KEY);
-    if (raw) return { ...DEFAULTS, ...(JSON.parse(raw) as Partial<AppSettings>) };
+    const raw = localStorage.getItem(KEY) ?? localStorage.getItem(OLD_KEY);
+    if (raw) return JSON.parse(raw) as Partial<AppSettings>;
   } catch { /* noop */ }
-  return { ...DEFAULTS };
+  return null;
 }
 
-let current: AppSettings = read();
+let current: AppSettings = { ...DEFAULTS };
+let hydrated = false;
 const listeners = new Set<() => void>();
 
 function emit() {
@@ -74,15 +74,41 @@ export function loadSettings(): AppSettings {
   return current;
 }
 
+export async function hydrateSettings(): Promise<AppSettings> {
+  if (hydrated) return current;
+  try {
+    const stored = await getAppState<Partial<AppSettings>>(KEY);
+    if (stored) {
+      current = { ...DEFAULTS, ...stored };
+    } else {
+      const legacy = readLegacyLocalStorage();
+      if (legacy) {
+        current = { ...DEFAULTS, ...legacy };
+        await setAppState(KEY, current);
+        try {
+          localStorage.removeItem(KEY);
+          localStorage.removeItem(OLD_KEY);
+        } catch { /* noop */ }
+      }
+    }
+  } catch {
+    const legacy = readLegacyLocalStorage();
+    current = legacy ? { ...DEFAULTS, ...legacy } : { ...DEFAULTS };
+  }
+  hydrated = true;
+  emit();
+  return current;
+}
+
 export function saveSettings(patch: Partial<AppSettings>): void {
   current = { ...current, ...patch };
-  localStorage.setItem(KEY, JSON.stringify(current));
+  void setAppState(KEY, current);
   emit();
 }
 
 export function resetSettings(): void {
   current = { ...DEFAULTS };
-  localStorage.setItem(KEY, JSON.stringify(current));
+  void setAppState(KEY, current);
   emit();
 }
 

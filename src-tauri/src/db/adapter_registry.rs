@@ -18,7 +18,9 @@ pub struct FactoryRegistry {
 
 impl FactoryRegistry {
     pub fn new() -> Self {
-        Self { inner: RwLock::new(HashMap::new()) }
+        Self {
+            inner: RwLock::new(HashMap::new()),
+        }
     }
 
     pub fn register(&self, factory: Arc<dyn Factory>) {
@@ -149,6 +151,7 @@ mod tests {
             query_editor: false,
             explain_plan: false,
             ssh_tunnel: false,
+            process_list: false,
             import: &[],
             export: &[],
             realtime: false,

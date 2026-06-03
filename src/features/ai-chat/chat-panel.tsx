@@ -12,6 +12,7 @@ import { ai, isAiError, type AiProviderKind, type ChatFocus, type LocalModelInfo
 import {
   type CredentialProfile,
   getActiveCredentialId,
+  hydrateCredentials,
   loadCredentials,
   setActiveCredentialId,
 } from '../../lib/ai-credentials';
@@ -451,8 +452,13 @@ function ActiveCredentialPicker() {
   // without forcing a full chat-panel remount.
   useEffect(() => {
     if (!opened) return;
-    setCredentials(loadCredentials());
-    setActiveId(getActiveCredentialId());
+    let cancelled = false;
+    void hydrateCredentials().then(() => {
+      if (cancelled) return;
+      setCredentials(loadCredentials());
+      setActiveId(getActiveCredentialId());
+    });
+    return () => { cancelled = true; };
   }, [opened]);
 
   const swap = async (id: string) => {
@@ -641,15 +647,14 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
   const s = useAi();
   const starting = s.status === 'starting';
 
-  // Reload credentials when the user returns from Settings — listen for the
-  // open/close cycle of the settings dialog by polling localStorage on focus
-  // and listening to the open-settings event isn't enough since settings
-  // closes silently. A `storage` event would only fire across tabs, so we
-  // refresh on mount + on a custom `tablerelay:credentials-changed` event the
-  // settings dialog can fire (cheap if not wired yet — just reads localStorage).
+  // Reload credentials when the user returns from Settings. The credential
+  // module keeps a decrypted in-memory copy after the app unlocks.
   const [credentials, setCredentials] = useState<CredentialProfile[]>(() => loadCredentials());
-  const reload = () => setCredentials(loadCredentials());
+  const reload = () => {
+    void hydrateCredentials().then(() => setCredentials(loadCredentials()));
+  };
   useEffect(() => {
+    reload();
     window.addEventListener('focus', reload);
     window.addEventListener('tablerelay:credentials-changed', reload);
     return () => {
