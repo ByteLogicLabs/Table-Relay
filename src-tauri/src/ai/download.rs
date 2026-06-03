@@ -27,7 +27,11 @@ use super::AiError;
 ///      ancestor of `cwd` containing a `src-tauri/` or `package.json`.
 ///      This matters in Tauri dev mode, where `cwd` is `<project>/src-tauri/`
 ///      — without this we'd litter weights inside `src-tauri/ai-models/`.
-///   3. `<cwd>/ai-models/` as a last-resort fallback.
+///   3. The OS app-data directory (`…/com.tablerelay.app/ai-models`). This is
+///      the path that matters for PACKAGED builds on macOS / Windows / Linux,
+///      where there is no project root and `cwd` is read-only (`/`,
+///      `C:\Windows\System32`, etc.).
+///   4. `<cwd>/ai-models/` as a last-resort fallback.
 pub fn models_dir() -> PathBuf {
     if let Ok(p) = std::env::var("DBTABLE_MODEL_DIR") {
         return PathBuf::from(p);
@@ -36,7 +40,49 @@ pub fn models_dir() -> PathBuf {
     if let Some(root) = find_project_root(&cwd) {
         return root.join("ai-models");
     }
+    if let Some(data) = os_app_data_dir() {
+        return data.join("ai-models");
+    }
     cwd.join("ai-models")
+}
+
+/// Platform app-data dir for `com.tablerelay.app`, resolved from env without
+/// pulling in the `dirs` crate. Mirrors Tauri's `app_data_dir()` layout so
+/// models land beside the encrypted store:
+///   macOS   → ~/Library/Application Support/com.tablerelay.app
+///   Windows → %APPDATA%\com.tablerelay.app
+///   Linux   → $XDG_DATA_HOME/com.tablerelay.app  (or ~/.local/share/…)
+fn os_app_data_dir() -> Option<PathBuf> {
+    const BUNDLE_ID: &str = "com.tablerelay.app";
+
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(BUNDLE_ID),
+        )
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        Some(PathBuf::from(appdata).join(BUNDLE_ID))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            return Some(PathBuf::from(xdg).join(BUNDLE_ID));
+        }
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(BUNDLE_ID),
+        )
+    }
 }
 
 fn find_project_root(start: &Path) -> Option<PathBuf> {
