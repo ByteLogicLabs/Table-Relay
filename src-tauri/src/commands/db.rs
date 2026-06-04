@@ -836,6 +836,7 @@ pub async fn db_browse(
         let req = BrowseRequest {
             schema: request.schema.clone(),
             table: request.table.clone(),
+            columns: request.columns.clone(),
             filters: request.filters.clone(),
             sort: request.sort.clone(),
             page: Page {

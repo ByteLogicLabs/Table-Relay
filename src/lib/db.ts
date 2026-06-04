@@ -401,6 +401,8 @@ export interface BrowseSort {
 export interface BrowseRequest {
   schema: string;
   table: string;
+  /** Optional projection. Empty/omitted means all columns. */
+  columns?: string[];
   filters?: BrowseFilter[];
   sort?: BrowseSort[];
   page: Page;

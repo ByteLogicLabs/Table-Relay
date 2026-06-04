@@ -27,7 +27,16 @@ pub(crate) async fn browse(
     let page_size = req.page.size.max(1);
     let offset = (page_number as u64 - 1) * (page_size as u64);
 
-    let mut sql = String::from("SELECT * FROM ");
+    let projection = if req.columns.is_empty() {
+        "*".to_string()
+    } else {
+        req.columns
+            .iter()
+            .map(|c| quote_ident(c))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let mut sql = format!("SELECT {projection} FROM ");
     sql.push_str(&quote_ident(&req.table));
 
     let (where_sql, filter_values) = build_where(&req.filters)?;
@@ -52,11 +61,12 @@ pub(crate) async fn browse(
 
     log_line!(
         "browse",
-        "{}.{} page={} size={} filters={} sort={} offset={}",
+        "{}.{} page={} size={} cols={} filters={} sort={} offset={}",
         req.schema,
         req.table,
         page_number,
         page_size,
+        req.columns.len(),
         req.filters.len(),
         req.sort.len(),
         offset,
