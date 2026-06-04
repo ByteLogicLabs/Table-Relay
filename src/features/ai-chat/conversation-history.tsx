@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { History, Loader2, MessageSquare, X } from 'lucide-react';
+import { toast } from 'sonner';
+import { History, Loader2, MessageSquare, Trash2, X } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import {
   ContextMenu,
@@ -50,9 +51,15 @@ export function ConversationHistory({ onSelect }: Props) {
   }, [open, selection.clearSelection]);
 
   const openConversation = useCallback(async (id: string) => {
-    await loadConversation(id);
-    setOpen(false);
-    onSelect?.();
+    try {
+      await loadConversation(id);
+      setOpen(false);
+      onSelect?.();
+    } catch (e) {
+      // e.g. no credentials to start a session with. Keep the overlay open and
+      // surface why instead of silently doing nothing.
+      toast.error(e instanceof Error ? e.message : String(e));
+    }
   }, [onSelect]);
 
   const requestDelete = useCallback((ids: string[]) => {
@@ -248,7 +255,7 @@ export function ConversationHistory({ onSelect }: Props) {
                         aria-selected={isSelected}
                         data-focused={isFocused || undefined}
                         className={
-                          'flex items-center gap-3 px-4 py-3 cursor-pointer ' +
+                          'group/conv flex items-center gap-3 px-4 py-3 cursor-pointer ' +
                           (isSelected
                             ? 'bg-accent/70 hover:bg-accent'
                             : 'hover:bg-accent') +
@@ -268,6 +275,22 @@ export function ConversationHistory({ onSelect }: Props) {
                             {new Date(conv.updatedAt).toLocaleString()}
                           </div>
                         </div>
+                        {/* Per-row delete — visible on hover (and always on
+                            touch). Stops propagation so it doesn't open the
+                            conversation. */}
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive opacity-0 group-hover/conv:opacity-100 focus:opacity-100 transition-opacity"
+                          title="Delete conversation"
+                          aria-label={`Delete ${conv.title}`}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            requestDelete([conv.id]);
+                          }}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
                       </div>
                     </ContextMenuTrigger>
                     <ContextMenuContent className="w-48">

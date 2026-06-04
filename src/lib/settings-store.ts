@@ -26,6 +26,7 @@ export interface AppSettings {
   // AI
   persistAiApprovals: boolean;    // remember auto-approval flags across restarts
   aiMaxToolIterations: number;    // cap on tool-calling rounds per turn (1–50)
+  aiMaxRepeatCalls: number;       // how many identical consecutive tool calls before the loop-guard stops (1–50)
 }
 
 const KEY = 'tablerelay:settings:v1';
@@ -43,7 +44,8 @@ export const DEFAULTS: AppSettings = {
   editorMinimap: false,
   editorAutocomplete: true,
   persistAiApprovals: false,
-  aiMaxToolIterations: 12,
+  aiMaxToolIterations: 50,
+  aiMaxRepeatCalls: 50,
 };
 
 // ── Module-level state + subscription ──────────────────────────────────────────

@@ -29,6 +29,11 @@ import { connectionsStore, type ConnectionProfileRecord } from '../../lib/connec
 import TablePlusImportDialog from './tableplus-import-dialog';
 import { toast } from 'sonner';
 
+// Sentinel for "no practical limit" on the AI tool-step / repeat-call caps.
+// The backend clamps to [1, 1000] and still uses this as a hard runaway
+// backstop, so it's effectively unlimited for any real conversation.
+const AI_LIMIT_UNLIMITED = 1000;
+
 // ── Small reusable controls ─────────────────────────────────────────────────────
 
 function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
@@ -493,6 +498,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
           call_query: false,
           call_query_read: false, call_query_write: false,
           call_query_create: false, call_query_delete: false,
+          cross_database: false,
           write_query_tab: false, publish_notify: false, subscribe_channel: false,
         });
       } catch { /* backend may not be started; toggle still persisted */ }
@@ -1123,8 +1129,29 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                       >
                         <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
                         <SelectContent>
-                          {[3, 6, 9, 12, 16, 20, 30].map(n => (
-                            <SelectItem key={n} value={String(n)} className="text-xs">{n} steps</SelectItem>
+                          {[3, 6, 9, 12, 16, 20, 30, 50, 100, AI_LIMIT_UNLIMITED].map(n => (
+                            <SelectItem key={n} value={String(n)} className="text-xs">
+                              {n === AI_LIMIT_UNLIMITED ? 'Unlimited' : `${n} steps`}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </Row>
+
+                    <Row
+                      title="Repeat-call limit"
+                      desc="How many times the assistant may call the same tool with identical arguments before the loop-guard stops the turn. Raise it for agentic flows that legitimately repeat a tool (e.g. writing many query tabs); lower it to stop runaway loops sooner."
+                    >
+                      <Select
+                        value={String(settings.aiMaxRepeatCalls)}
+                        onValueChange={(v) => saveSettings({ aiMaxRepeatCalls: Number(v) })}
+                      >
+                        <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          {[3, 5, 10, 15, 20, 30, 50, 100, AI_LIMIT_UNLIMITED].map(n => (
+                            <SelectItem key={n} value={String(n)} className="text-xs">
+                              {n === AI_LIMIT_UNLIMITED ? 'Unlimited' : `${n} calls`}
+                            </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>

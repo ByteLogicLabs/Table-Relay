@@ -1,11 +1,15 @@
 import { useSyncExternalStore } from 'react';
 import { ai, isAiError, type AiProviderKind, type ChatFocus, type ChatKind, type Conversation, type StartInput, type QueryTier } from '../lib/ai';
 import { loadSettings } from '../lib/settings-store';
+import { loadCredentials, setActiveCredentialId } from '../lib/ai-credentials';
 
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'tool';
   content: string;
+  /** Epoch millis when the message was created. Shown under each bubble and
+   *  preserved when a conversation is reloaded from history. */
+  createdAt?: number;
   /** When true, tokens are still streaming into `content`. */
   streaming?: boolean;
   /** Populated on the final chunk. */
@@ -204,6 +208,7 @@ async function ensureWired() {
         id: ev.toolCallId,
         role: 'tool',
         content: '',
+        createdAt: Date.now(),
         tool: { name: ev.name, arguments: ev.arguments },
       };
       const next = [...chat.messages];
@@ -376,7 +381,36 @@ export function newChat() {
 export async function loadConversation(conversationId: string) {
   const conv = await ai.conversationGet(conversationId);
   if (!conv || !conv.messages) return;
-  const connKey = conv.connectionId ?? state.focusedConnectionId ?? GLOBAL_KEY;
+
+  // If there's no active session (e.g. the user opened history straight from
+  // the credential picker), start one before loading — otherwise the messages
+  // load into state but `showActive` stays false and the UI is stuck on the
+  // picker. Pick the credential that best matches the conversation's saved
+  // provider + model, falling back to the first available credential.
+  if (state.status !== 'active') {
+    const creds = loadCredentials();
+    if (creds.length === 0) {
+      throw new Error('Add a provider credential in Settings to open saved chats.');
+    }
+    const match =
+      creds.find(c => c.kind === conv.providerKind && c.model === conv.model) ??
+      creds.find(c => c.kind === conv.providerKind) ??
+      creds[0];
+    await start({
+      kind: match.kind,
+      model: match.model,
+      apiKey: match.apiKey,
+      baseUrl: match.baseUrl,
+    });
+    setActiveCredentialId(match.id);
+  }
+
+  // Load into the bucket the user is CURRENTLY viewing, not the one the
+  // conversation was originally saved under. `currentChat` renders from
+  // `focusedConnectionId ?? GLOBAL_KEY`; if we wrote to the conversation's own
+  // connectionId and that differs from the current view, the messages would
+  // land in an off-screen bucket and the conversation would appear not to load.
+  const connKey = state.focusedConnectionId ?? GLOBAL_KEY;
   const messages: ChatMessage[] = conv.messages
     .filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
     .map(m => {
@@ -402,6 +436,7 @@ export async function loadConversation(conversationId: string) {
           id:        m.id,
           role:      'tool' as const,
           content:   m.content,
+          createdAt: m.createdAt ? Date.parse(m.createdAt) || undefined : undefined,
           streaming: false,
           tool:      tool ?? { name: '?', arguments: '' },
         };
@@ -410,6 +445,7 @@ export async function loadConversation(conversationId: string) {
         id:        m.id,
         role:      m.role as 'user' | 'assistant',
         content:   m.content,
+        createdAt: m.createdAt ? Date.parse(m.createdAt) || undefined : undefined,
         streaming: false,
       };
     });
@@ -465,7 +501,22 @@ export async function sendMessage(
   // survived a page reload — otherwise the very first send after HMR
   // bails on the stale `inactive` default and the user sees nothing.
   await ensureWired();
-  if (state.status !== 'active') return false;
+  // If the local status says inactive, double-check the backend before giving
+  // up — `ensureWired` only reconciles once, so a status that drifted out of
+  // sync (e.g. after loading a conversation) would otherwise wedge sends. If
+  // the backend session is live, adopt it and proceed.
+  if (state.status !== 'active') {
+    try {
+      const status = await ai.status();
+      if (status.active) {
+        mutate(s => ({ ...s, status: 'active', providerKind: status.providerKind, model: status.model }));
+      } else {
+        return false;
+      }
+    } catch {
+      return false;
+    }
+  }
   const trimmed = content.trim();
   if (!trimmed) return false;
   // Route the turn into the connection bucket the user is interacting
@@ -506,8 +557,8 @@ export async function sendMessage(
       pendingRequestId: requestId,
       messages: [
         ...chat.messages,
-        { id: userId, role: 'user', content: displayed },
-        { id: requestId, role: 'assistant', content: '', streaming: true },
+        { id: userId, role: 'user', content: displayed, createdAt: Date.now() },
+        { id: requestId, role: 'assistant', content: '', streaming: true, createdAt: Date.now() },
       ],
     });
   });
@@ -520,10 +571,12 @@ export async function sendMessage(
   }
 
   try {
-    // Pass the user's per-turn tool-iteration cap through to the backend loop.
+    // Pass the user's per-turn tool-iteration cap + repeat-call guard through
+    // to the backend loop.
     await ai.chatSend(requestId, trimmed, {
       ...context,
       maxIterations: loadSettings().aiMaxToolIterations,
+      maxRepeatCalls: loadSettings().aiMaxRepeatCalls,
     });
   } catch (e) {
     mutate(s => {
