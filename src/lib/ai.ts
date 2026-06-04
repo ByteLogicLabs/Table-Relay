@@ -142,6 +142,9 @@ export interface AutoApprovalFlags {
   call_query_write: boolean;
   call_query_create: boolean;
   call_query_delete: boolean;
+  /** Allow the AI to read/query databases other than the active one. Defaults
+   *  to `false` — the AI is locked to the current database. */
+  cross_database: boolean;
   write_query_tab: boolean;
   publish_notify: boolean;
   subscribe_channel: boolean;
@@ -467,6 +470,7 @@ export const ai = {
       sql?: string;
       errorMessage?: string;
       maxIterations?: number;
+      maxRepeatCalls?: number;
     },
   ) =>
     invoke<void>('ai_chat_send', {
@@ -480,6 +484,7 @@ export const ai = {
         sql: opts?.sql,
         error_message: opts?.errorMessage,
         max_iterations: opts?.maxIterations,
+        max_repeat_calls: opts?.maxRepeatCalls,
       },
     }),
 

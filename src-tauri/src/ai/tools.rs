@@ -255,9 +255,20 @@ pub struct ToolFunction {
     pub parameters: Value,
 }
 
-/// Static catalog of every tool we expose. Callers pass this verbatim to
-/// the provider.
-pub fn catalog() -> Vec<ToolDef> {
+/// Catalog filtered for the current scope. When `cross_database` is false the
+/// model is locked to the active database, so we DROP `list_schemas` entirely:
+/// the active DB is already stated in the context, and exposing the tool only
+/// invited weak models to loop-call it (and hit the loop-guard abort). With it
+/// gone, the model can't enumerate or fixate on databases it can't reach.
+pub fn catalog_scoped(cross_database: bool) -> Vec<ToolDef> {
+    let mut tools = catalog_all();
+    if !cross_database {
+        tools.retain(|t| t.function.name != "list_schemas");
+    }
+    tools
+}
+
+fn catalog_all() -> Vec<ToolDef> {
     vec![
         ToolDef {
             kind: "function",
@@ -304,7 +315,7 @@ pub fn catalog() -> Vec<ToolDef> {
             kind: "function",
             function: ToolFunction {
                 name: "call_query",
-                description: "Execute a SQL statement against the active database connection. May require user approval (the user sees the SQL and approves or denies) — when the user has granted auto-approval for queries via the permissions panel, the tool runs without prompting. Use whenever you need real data to answer the question (SELECT / counts / samples). Keep queries single-statement and add LIMIT to SELECTs unless the user explicitly asked for everything.",
+                description: "YOU execute this SQL against the live database and receive the rows back — this is how you actually run queries and get data. May require user approval (the user sees the SQL and approves or denies); with auto-approval granted it runs without prompting. Use whenever the task needs real data or a real change: SELECT / counts / samples, and INSERT/UPDATE/CREATE the user asked you to perform. This is the tool for getting an answer or doing the work. Keep queries single-statement and add LIMIT to SELECTs unless the user explicitly asked for everything.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -318,7 +329,7 @@ pub fn catalog() -> Vec<ToolDef> {
             kind: "function",
             function: ToolFunction {
                 name: "write_query_tab",
-                description: "Put SQL into the user's query editor — either as a new tab or by replacing the current query tab's content. REQUIRES USER APPROVAL before writing — the user sees a diff of the change and accepts or rejects. Use this when the user asks you to scaffold, refactor, or rewrite a query. Don't use this to *run* SQL — use `call_sql` for that.",
+                description: "Does NOT run anything — it only places SQL into the user's query editor for THEM to review and run manually. Use ONLY when the user explicitly wants the SQL in their editor (\"put it in a tab\", \"write/draft/scaffold this query\", \"open in editor\", or to tweak before running). REQUIRES USER APPROVAL (they see a diff). If the user wants an answer or wants the work actually done, use `call_query` instead — writing a tab leaves the query UNEXECUTED, so do not treat it as completing a data task.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -373,6 +384,87 @@ pub struct ToolContext {
     pub default_schema: Option<String>,
 }
 
+/// Detect whether `sql` references a database OTHER than `active`. Catches the
+/// two ways to escape the active DB in a MySQL-style dialect: an explicit
+/// `USE otherdb`, and a qualified `otherdb.table` reference.
+///
+/// CRITICAL: a qualified `x.y` token is ambiguous — it can be `database.table`,
+/// `table.column`, OR `alias.column`. We must NOT flag table/column/alias
+/// references (those are normal same-DB SQL). So we only flag `x.` when `x`
+/// matches an ACTUAL other database name in `known_databases`. Table aliases
+/// like `films f` → `f.id` won't match a real database, so they pass through.
+/// `known_databases` is the live `list_schemas` result; comparison is
+/// case-insensitive and ignores backticks.
+fn references_other_database(
+    sql: &str,
+    active: &str,
+    known_databases: &[String],
+) -> Option<String> {
+    let active_norm = active.trim_matches('`').to_ascii_lowercase();
+    // The set of OTHER database names we should block references to.
+    let others: std::collections::HashSet<String> = known_databases
+        .iter()
+        .map(|d| d.trim_matches('`').to_ascii_lowercase())
+        .filter(|d| *d != active_norm)
+        .collect();
+
+    // 1) `USE <db>` — binds the session to another database. Block any USE that
+    // targets a real other database (not the active one).
+    let upper = sql.trim_start().to_ascii_uppercase();
+    if upper.starts_with("USE ") {
+        let db = sql.trim_start()[4..]
+            .trim()
+            .trim_end_matches(';')
+            .trim()
+            .trim_matches('`')
+            .to_ascii_lowercase();
+        if others.contains(&db) {
+            return Some(db);
+        }
+    }
+
+    // 2) Qualified `db.table` references — but ONLY flag when the left
+    // identifier is a known other database. Aliases and table-qualified columns
+    // (`f.id`, `films.title`) won't be in `others`, so they're allowed.
+    if others.is_empty() {
+        return None;
+    }
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        let is_ident_start = c.is_ascii_alphabetic() || c == '_' || c == '`';
+        if !is_ident_start {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        if c == '`' {
+            i += 1;
+            while i < bytes.len() && bytes[i] != b'`' {
+                i += 1;
+            }
+            i += 1; // closing backtick
+        } else {
+            while i < bytes.len() {
+                let ch = bytes[i] as char;
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        if i < bytes.len() && bytes[i] == b'.' {
+            let ident = sql[start..i].trim_matches('`').to_ascii_lowercase();
+            if others.contains(&ident) {
+                return Some(ident);
+            }
+        }
+    }
+    None
+}
+
 /// Result of a tool invocation. We always serialize to a string because
 /// that's what the model sees as the `tool` message content.
 pub struct ToolResult {
@@ -386,6 +478,14 @@ impl ToolResult {
     fn error(msg: impl Into<String>) -> Self {
         Self {
             content: json!({ "error": msg.into() }).to_string(),
+        }
+    }
+    /// A non-error result that carries a steering instruction back to the model
+    /// (e.g. "you already have this — stop calling and proceed"). Not flagged as
+    /// an error so the loop-guard's error path doesn't fire on it.
+    pub fn directive(msg: impl Into<String>) -> Self {
+        Self {
+            content: json!({ "note": msg.into() }).to_string(),
         }
     }
 }
@@ -450,6 +550,14 @@ pub struct AutoApprovalFlags {
     pub call_query_create: bool,
     #[serde(default)]
     pub call_query_delete: bool,
+    /// Allow the model to read/query databases OTHER than the one the user
+    /// is currently focused on. Defaults to `false` — the AI is locked to the
+    /// active database so it can't enumerate or touch the other (often dozens
+    /// of) databases on the same server. When `false`, `list_schemas` returns
+    /// only the active schema and `list_tables`/`describe_table`/`call_query`
+    /// reject references to any other database.
+    #[serde(default)]
+    pub cross_database: bool,
     /// Allow `write_query_tab` to open / replace editor tabs.
     #[serde(default)]
     pub write_query_tab: bool,
@@ -473,6 +581,7 @@ impl Default for AutoApprovalFlags {
             call_query_write: false,
             call_query_create: false,
             call_query_delete: false,
+            cross_database: false,
             write_query_tab: false,
             publish_notify: false,
             subscribe_channel: false,
@@ -487,6 +596,11 @@ impl AutoApprovals {
 
     pub async fn set(&self, flags: AutoApprovalFlags) {
         *self.inner.lock().await = flags;
+    }
+
+    /// Whether the model may reach databases other than the active one.
+    async fn cross_database(&self) -> bool {
+        self.inner.lock().await.cross_database
     }
 
     async fn allows(&self, tool: &str) -> bool {
@@ -586,6 +700,32 @@ async fn require_approval(
     }
 }
 
+/// Guard for shape tools (`list_tables`, `describe_table`): when cross-database
+/// access is OFF, reject any `schema` that isn't the active one. Returns
+/// `Some(error)` to short-circuit, `None` to proceed.
+async fn guard_active_database(
+    auto_approvals: &Arc<AutoApprovals>,
+    ctx: &ToolContext,
+    requested_schema: &str,
+) -> Option<ToolResult> {
+    if auto_approvals.cross_database().await {
+        return None;
+    }
+    let active = ctx.default_schema.as_deref().unwrap_or_default();
+    // No active schema set → nothing to scope against; allow.
+    if active.is_empty() {
+        return None;
+    }
+    if !requested_schema.eq_ignore_ascii_case(active) {
+        return Some(ToolResult::error(format!(
+            "Blocked: `{requested_schema}` is a different database. Cross-database access is disabled — \
+             you are locked to the active database `{active}`. Ask the user to enable \
+             \"Cross-database access\" in AI permissions to reach other databases."
+        )));
+    }
+    None
+}
+
 /// Execute one tool call and return a stringified JSON result. `call_query`
 /// waits on the approval registry before touching the database.
 pub async fn dispatch(
@@ -612,6 +752,23 @@ pub async fn dispatch(
 
     match name {
         "list_schemas" => {
+            // Hard backstop: when cross-database access is OFF, `list_schemas`
+            // is removed from the catalog — but a weak model can replay the tool
+            // name from earlier history or hallucinate it. Return a directive
+            // ERROR (not a success) so the model stops re-calling and proceeds
+            // with the active database it already knows. A successful result
+            // here is what caused the 3×-loop-then-abort behaviour.
+            if !auto_approvals.cross_database().await {
+                let active = ctx.default_schema.clone().unwrap_or_default();
+                let active_label = if active.is_empty() { "the active database".to_string() } else { format!("`{active}`") };
+                return ToolResult::error(format!(
+                    "`list_schemas` is disabled — cross-database access is OFF and you are already \
+                     connected to {active_label}. Do NOT call this tool again. Proceed using \
+                     {active_label}: call `describe_table` or `call_query` directly with bare table \
+                     names. To work across databases, the user must enable \"Cross-database access\" \
+                     in AI permissions."
+                ));
+            }
             if let Err(deny) = require_approval(
                 auto_approvals,
                 approvals,
@@ -639,6 +796,9 @@ pub async fn dispatch(
                 .unwrap_or_default();
             if schema.is_empty() {
                 return ToolResult::error("schema is required (no active schema on this session)");
+            }
+            if let Some(err) = guard_active_database(auto_approvals, ctx, &schema).await {
+                return err;
             }
             if let Err(deny) = require_approval(
                 auto_approvals,
@@ -678,6 +838,9 @@ pub async fn dispatch(
                 .unwrap_or_default();
             if schema.is_empty() {
                 return ToolResult::error("schema is required (no active schema on this session)");
+            }
+            if let Some(err) = guard_active_database(auto_approvals, ctx, &schema).await {
+                return err;
             }
             if let Err(deny) = require_approval(
                 auto_approvals,
@@ -740,6 +903,27 @@ pub async fn dispatch(
             };
             if sql.is_empty() {
                 return ToolResult::error("sql is empty");
+            }
+
+            // Lock to the active database unless cross-database access is granted.
+            // We only block a qualified reference when the qualifier is a REAL
+            // other database (from `list_schemas`) — never a table alias or a
+            // table-qualified column, which share the same `x.y` syntax.
+            if !auto_approvals.cross_database().await {
+                if let Some(active) = ctx.default_schema.as_deref() {
+                    let known: Vec<String> = adapter
+                        .list_schemas()
+                        .await
+                        .map(|list| list.into_iter().map(|s| s.name).collect())
+                        .unwrap_or_default();
+                    if let Some(other) = references_other_database(&sql, active, &known) {
+                        return ToolResult::error(format!(
+                            "Blocked: query references database `{other}`, but cross-database access is disabled. \
+                             You are locked to the active database `{active}`. Ask the user to enable \
+                             \"Cross-database access\" in AI permissions to query other databases."
+                        ));
+                    }
+                }
             }
 
             let started = Instant::now();

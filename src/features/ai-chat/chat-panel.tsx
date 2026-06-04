@@ -210,6 +210,7 @@ function PermissionsButton() {
       call_query_write: false,
       call_query_create: false,
       call_query_delete: false,
+      cross_database: false,
       write_query_tab: false,
       publish_notify: false,
       subscribe_channel: false,
@@ -318,6 +319,16 @@ const PERMISSION_GROUPS: Array<{ label: string; permissions: Permission[] }> = [
     ],
   },
   {
+    label: 'Scope',
+    permissions: [
+      {
+        key: 'cross_database',
+        label: 'Cross-database access',
+        description: 'Off by default — the AI is locked to your active database. It only sees that one database and cannot list, describe, or query others. Turn on to let it reach every database on the connection.',
+      },
+    ],
+  },
+  {
     label: 'Run queries',
     permissions: [
       {
@@ -373,6 +384,20 @@ const PERMISSIONS: Permission[] = PERMISSION_GROUPS.flatMap(g => g.permissions);
 
 function openSettings() {
   window.dispatchEvent(new CustomEvent('tablerelay:open-settings'));
+}
+
+// Per-message timestamp shown under each chat bubble. Shows just the time for
+// messages sent today, and date + time for older ones (so a reloaded history
+// conversation reads correctly).
+function formatMessageTime(ms: number): string {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+  const time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return sameDay ? time : `${d.toLocaleDateString([], { month: 'short', day: 'numeric' })} ${time}`;
 }
 
 // Pretty labels for AI tool calls. Falls back to a generic snake → Title
@@ -805,6 +830,10 @@ function ActiveSession({
   // When the user arrives via a `focusOnly` prefill (e.g. Generate from an
   // empty editor) we remember the kind so the next Send uses it.
   const [stickyKind, setStickyKind] = useState<ChatPrefill['kind'] | null>(null);
+  // Outgoing message queue. The textarea stays editable while a turn is in
+  // flight; pressing Send mid-stream enqueues the text and it fires
+  // automatically once the current turn finishes. FIFO.
+  const [queue, setQueue] = useState<Array<{ text: string; kind?: ChatPrefill['kind'] | null }>>([]);
 
   // Auto-scroll to bottom as messages stream in.
   useEffect(() => {
@@ -839,24 +868,57 @@ function ActiveSession({
   }, [prefillTick, streaming]);
 
   const handleSend = async () => {
-    if (!draft.trim() || streaming) return;
-    const text = draft;
-    const kind = stickyKind ?? undefined;
-    // Send first; only clear the draft + sticky kind once the store has
-    // committed the user bubble. Otherwise a dropped send (e.g. session
-    // not active yet) leaves the user staring at an empty textarea with
-    // nothing in the thread — the "fadeout" bug.
-    const accepted = await sendMessage(text, {
+    const outgoing = draft;
+    if (!outgoing.trim()) return;
+    const kind = stickyKind ?? null;
+
+    // Clear the textarea immediately on send so it feels instant — don't wait
+    // on the async round-trip. We hold the text in `outgoing` and restore it
+    // only if the send is rejected.
+    setDraft('');
+    setStickyKind(null);
+
+    // If a turn is already in flight, queue this one. The drain effect fires
+    // it the moment the current turn finishes.
+    if (streaming) {
+      setQueue(q => [...q, { text: outgoing, kind }]);
+      return;
+    }
+
+    const accepted = await sendMessage(outgoing, {
       connectionId: focusedConnectionId,
       schema: focusedSchema,
       focus,
-      kind,
+      kind: kind ?? undefined,
     });
-    if (accepted) {
-      setDraft('');
-      setStickyKind(null);
+    if (!accepted) {
+      // Rejected (no active session) — restore the text + kind so the user
+      // doesn't lose it, and tell them why.
+      setDraft(outgoing);
+      setStickyKind(kind);
+      toast.error('No active AI session — pick a credential to start a chat.');
     }
   };
+
+  // Drain the queue: when a turn finishes (streaming → false) and there's a
+  // queued message, send the next one. One at a time, FIFO.
+  useEffect(() => {
+    if (streaming) return;
+    if (queue.length === 0) return;
+    const [next, ...rest] = queue;
+    setQueue(rest);
+    void sendMessage(next.text, {
+      connectionId: focusedConnectionId,
+      schema: focusedSchema,
+      focus,
+      kind: next.kind ?? undefined,
+    }).then(accepted => {
+      if (!accepted) {
+        toast.error('Queued message could not be sent — no active AI session.');
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streaming, queue]);
 
   return (
     <>
@@ -900,10 +962,17 @@ function ActiveSession({
                 void handleSend();
               }
             }}
-            placeholder={stickyKind === 'generate' ? 'Describe the query you want…' : 'Ask anything about your database…'}
+            placeholder={
+              streaming
+                ? 'Type to queue your next message…'
+                : stickyKind === 'generate'
+                  ? 'Describe the query you want…'
+                  : 'Ask anything about your database…'
+            }
             rows={2}
-            disabled={streaming}
-            className="w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm outline-none placeholder:text-muted-foreground disabled:opacity-60"
+            // Always editable — even mid-stream. Sending while a turn is in
+            // flight queues the message rather than blocking the input.
+            className="w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm outline-none placeholder:text-muted-foreground"
           />
           <div className="flex items-center gap-1 px-1.5 pb-1.5">
             {/* Focus chip — the context that goes out with the next turn.
@@ -923,34 +992,45 @@ function ActiveSession({
                 {stickyKind}
               </span>
             )}
-            {streaming ? (
+            {/* Queue count chip — shows how many messages are waiting to send. */}
+            {queue.length > 0 && (
+              <span
+                className="text-[10px] text-primary bg-primary/10 border border-primary/30 px-1.5 py-0.5 rounded-full"
+                title={`${queue.length} message${queue.length === 1 ? '' : 's'} queued`}
+              >
+                {queue.length} queued
+              </span>
+            )}
+            {/* Stop button — only while a turn is streaming. */}
+            {streaming && (
               <Button
                 variant="ghost"
                 size="icon"
                 className="h-7 w-7 rounded-full bg-destructive/10 text-destructive hover:bg-destructive/20"
                 onClick={() => void stopStreaming()}
-                title="Stop"
+                title="Stop current turn"
                 aria-label="Stop"
               >
                 <Square className="w-3.5 h-3.5 fill-current" />
               </Button>
-            ) : (
-              <Button
-                variant="default"
-                size="icon"
-                className="h-7 w-7 rounded-full shrink-0"
-                onClick={() => void handleSend()}
-                disabled={!draft.trim()}
-                title="Send (Enter)"
-                aria-label="Send"
-              >
-                <ArrowUp className="w-3.5 h-3.5" />
-              </Button>
             )}
+            {/* Send / queue button — always available when there's text. While
+                streaming it enqueues; otherwise it sends immediately. */}
+            <Button
+              variant="default"
+              size="icon"
+              className="h-7 w-7 rounded-full shrink-0"
+              onClick={() => void handleSend()}
+              disabled={!draft.trim()}
+              title={streaming ? 'Queue message' : 'Send (Enter)'}
+              aria-label={streaming ? 'Queue message' : 'Send'}
+            >
+              {streaming ? <Plus className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />}
+            </Button>
           </div>
         </div>
         <p className="text-[10px] text-muted-foreground mt-1.5 px-1 text-center opacity-70">
-          Enter to send · Shift+Enter for newline
+          {streaming ? 'Enter to queue · Shift+Enter for newline' : 'Enter to send · Shift+Enter for newline'}
         </p>
       </div>
     </>
@@ -1410,6 +1490,11 @@ function AssistantOrUserBubble({ message: m }: { message: StoreChatMessage }) {
         )}
         {m.finishReason === 'error' && (
           <span className="block text-[10px] text-destructive mt-1 italic">(error)</span>
+        )}
+        {m.createdAt && !m.streaming && (
+          <span className={`block text-[10px] mt-1 ${isUser ? 'text-primary-foreground/60' : 'text-muted-foreground/60'}`}>
+            {formatMessageTime(m.createdAt)}
+          </span>
         )}
       </div>
     </div>

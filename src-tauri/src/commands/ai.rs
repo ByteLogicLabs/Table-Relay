@@ -364,6 +364,11 @@ pub struct ChatSendInput {
     /// or out of the sane [1, 50] range.
     #[serde(default)]
     pub max_iterations: Option<u32>,
+    /// Optional cap on consecutive *identical* tool calls before the loop-guard
+    /// stops the turn (from the user's AI settings). Falls back to
+    /// `DEFAULT_MAX_REPEAT_CALLS` when absent or out of the sane [1, 50] range.
+    #[serde(default)]
+    pub max_repeat_calls: Option<u32>,
 }
 
 /// What the user is currently looking at. Informs the system-context blob —
@@ -602,11 +607,18 @@ async fn ai_chat_send_inner(
     };
 
     if tool_mode {
-        // Clamp the user-configured cap into a sane range; fall back to default.
+        // Clamp the user-configured caps into a sane range; fall back to
+        // defaults. The frontend uses `UNLIMITED` (1000) to mean "no practical
+        // limit"; we accept up to that ceiling so the loop still has a hard
+        // backstop against a genuinely runaway model.
         let max_iterations = input
             .max_iterations
-            .filter(|n| (1..=50).contains(n))
+            .filter(|n| (1..=1000).contains(n))
             .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS);
+        let max_repeat_calls = input
+            .max_repeat_calls
+            .filter(|n| (1..=1000).contains(n))
+            .unwrap_or(DEFAULT_MAX_REPEAT_CALLS);
         return run_tool_loop(
             app,
             slot,
@@ -618,6 +630,7 @@ async fn ai_chat_send_inner(
             input.connection_id.expect("checked above"),
             input.schema,
             max_iterations,
+            max_repeat_calls,
         )
         .await;
     }
@@ -697,7 +710,10 @@ async fn ai_chat_send_inner(
 /// Default tool-calling round cap when the user hasn't set one. Capable
 /// agentic models legitimately chain several reads → a query → a summary, so
 /// 12 leaves headroom; the repeat-guard below stops genuine loops far sooner.
-pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 12;
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 50;
+/// Default cap on consecutive identical tool calls before the loop-guard stops
+/// the turn. Overridable per-turn via the user's AI settings.
+pub const DEFAULT_MAX_REPEAT_CALLS: u32 = 50;
 
 #[allow(clippy::too_many_arguments)]
 async fn run_tool_loop(
@@ -711,9 +727,14 @@ async fn run_tool_loop(
     connection_id: String,
     schema: Option<String>,
     max_iterations: u32,
+    max_repeat_calls: u32,
 ) -> Result<(), AiError> {
     use crate::ai::tools;
-    let tools_catalog = tools::catalog();
+    // Filter the tool catalog by the current scope: when cross-database access
+    // is off, `list_schemas` is dropped so the model can't enumerate or loop on
+    // databases it isn't allowed to reach (it already knows the active one).
+    let cross_db = auto_approvals.get().await.cross_database;
+    let tools_catalog = tools::catalog_scoped(cross_db);
     let tool_ctx = tools::ToolContext {
         connection_id: connection_id.clone(),
         default_schema: schema.clone(),
@@ -728,7 +749,18 @@ async fn run_tool_loop(
     // genuinely different call.
     let mut last_call_sig: Option<String> = None;
     let mut repeat_calls: u32 = 0;
-    const MAX_REPEAT_CALLS: u32 = 3;
+    // Per-turn cache of read-only shape tools (`list_schemas`, `list_tables`,
+    // `describe_table`) that already returned successfully. Weak models love to
+    // re-call these with identical args dozens of times, ignoring the result,
+    // until the request times out. Since the shape can't change mid-turn,
+    // re-running is pure waste — we short-circuit a duplicate with a directive
+    // telling the model it already has the data and to proceed. This is scoped
+    // to read-only tools so legitimate repeats of `call_query` are unaffected.
+    use std::collections::HashSet;
+    let mut shape_calls_seen: HashSet<String> = HashSet::new();
+    fn is_shape_tool(name: &str) -> bool {
+        matches!(name, "list_schemas" | "list_tables" | "describe_table")
+    }
     for _iter in 0..max_iterations {
         // Snapshot history under a read lock. We re-snapshot every
         // iteration because tool results append new messages.
@@ -808,20 +840,40 @@ async fn run_tool_loop(
         // Execute each tool call sequentially. Keeps the code simple and
         // makes the approval UI for `call_query` easier to reason about.
         for tc in &turn.tool_calls {
-            let approvals_arc = approvals.inner().clone();
-            let auto_arc = auto_approvals.inner().clone();
-            let db_arc = db_registry.inner().clone();
-            let result = tools::dispatch(
-                &db_arc,
-                &approvals_arc,
-                &auto_arc,
-                &app,
-                &tool_ctx,
-                &tc.id,
-                &tc.name,
-                &tc.arguments,
-            )
-            .await;
+            let sig = format!("{}::{}", tc.name, tc.arguments);
+            // Short-circuit a repeated read-only shape call: the model already
+            // got this exact result this turn, so hand back a directive instead
+            // of re-querying. Saves the round-trip and nudges it to move on.
+            let result = if is_shape_tool(&tc.name) && shape_calls_seen.contains(&sig) {
+                tools::ToolResult::directive(format!(
+                    "You already called `{}` with these arguments this turn and have the \
+                     result above. Do NOT call it again — use that data now to answer or to \
+                     call `call_query`/`describe_table` for the next concrete step.",
+                    tc.name
+                ))
+            } else {
+                let approvals_arc = approvals.inner().clone();
+                let auto_arc = auto_approvals.inner().clone();
+                let db_arc = db_registry.inner().clone();
+                let r = tools::dispatch(
+                    &db_arc,
+                    &approvals_arc,
+                    &auto_arc,
+                    &app,
+                    &tool_ctx,
+                    &tc.id,
+                    &tc.name,
+                    &tc.arguments,
+                )
+                .await;
+                // Remember successful shape calls so the next identical one is
+                // short-circuited above. Errors aren't cached — a retry might
+                // legitimately succeed.
+                if is_shape_tool(&tc.name) && !r.content.contains("\"error\"") {
+                    shape_calls_seen.insert(sig.clone());
+                }
+                r
+            };
             crate::log_chat!(
                 "tool_result",
                 "{} => {}",
@@ -858,15 +910,25 @@ async fn run_tool_loop(
             // just as wedged as one retrying a failing `find()`. After
             // MAX_REPEAT_CALLS, stop and emit a readable message so the UI's
             // "Thinking…" bubble resolves instead of spinning to the cap.
+            // (`sig` was computed above for the shape-tool short-circuit.)
             let errored = result.content.contains("\"error\"");
-            let sig = format!("{}::{}", tc.name, tc.arguments);
             if last_call_sig.as_deref() == Some(sig.as_str()) {
                 repeat_calls += 1;
             } else {
-                last_call_sig = Some(sig);
+                last_call_sig = Some(sig.clone());
                 repeat_calls = 1;
             }
-            if repeat_calls >= MAX_REPEAT_CALLS {
+            // Read-only shape tools never need more than a couple identical
+            // calls — abort them well before the (possibly large) generic cap so
+            // a weak model can't burn the whole budget re-listing the same
+            // tables. `call_query` keeps the full `max_repeat_calls` budget.
+            const SHAPE_REPEAT_CAP: u32 = 3;
+            let effective_cap = if is_shape_tool(&tc.name) {
+                max_repeat_calls.min(SHAPE_REPEAT_CAP)
+            } else {
+                max_repeat_calls
+            };
+            if repeat_calls >= effective_cap {
                 crate::log_chat!(
                     "error",
                     "tool loop aborted: `{}` called {} times with identical args (errored={})",

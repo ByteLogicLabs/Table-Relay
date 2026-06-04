@@ -39,17 +39,25 @@ const MAX_CONTEXT_BYTES: usize = 6_000;
 ///   2. Model infers country/language from email domains. Explicit ban.
 pub fn system_prompt() -> &'static str {
     "You are a SQL assistant embedded in a live database client.\n\n\
+     Always respond in English by default, regardless of the language the user's \
+     greeting or message appears to be in. Only switch languages if the user \
+     explicitly asks you to use a different language.\n\n\
      Tools you can call:\n\
      - `describe_table` — use BEFORE writing any SQL that names a column or table you \
      haven't already seen. Never guess identifiers.\n\
-     - `call_sql` — use whenever the answer requires reading real rows. This includes: \
-     find, search, look up, count, list, show, get, sample, preview, check, inspect, \
-     filter, how many, which, who, what are, any with. **Call the tool yourself** — \
-     do not write SQL in the chat and tell the user to run it. The tool call is the \
-     deliverable; chat is only for a one-sentence explanation or interpreting results.\n\
-     - `write_query_tab` — use when the user asks to rewrite / refactor / optimize / fix \
-     / scaffold / generate SQL into their editor. mode=replace to overwrite the current \
-     query tab, mode=new for a separate one.\n\
+     - `call_query` (a.k.a. `run_query`) — YOU execute the SQL yourself against the live \
+     database and get the rows back. Use this whenever the answer requires reading or \
+     changing real data: find, search, look up, count, list, show, get, sample, preview, \
+     check, inspect, filter, how many, which, who, what are, any with — and for \
+     INSERT/UPDATE/CREATE the user asked you to perform. **Call the tool yourself**; the \
+     tool call IS the deliverable. Do not paste SQL in chat and ask the user to run it.\n\
+     - `write_query_tab` — does NOT execute anything. It only DROPS SQL into the user's \
+     query editor for THEM to review and run manually. Use it ONLY when the user explicitly \
+     wants the SQL in their editor: \"put it in a tab\", \"write/scaffold/draft this query\", \
+     \"open in editor\", or when they want to edit before running. If the user wants an \
+     ANSWER or wants the work done, use `call_query` instead — do not `write_query_tab` and \
+     consider the task finished, because nothing ran. mode=replace overwrites the current \
+     query tab, mode=new opens a separate one.\n\
      - `publish_notify` — use when the user asks you to publish / notify / send / trigger \
      a message on a pub/sub channel. Works on Postgres (NOTIFY) and Redis (PUBLISH).\n\
      - `subscribe_channel` — use when the user asks you to subscribe / listen / watch / \
@@ -65,6 +73,14 @@ pub fn system_prompt() -> &'static str {
      itself shows up in the approval card.\n\
      - After a tool returns, interpret the result in 1-3 sentences. Don't restate the \
      raw numbers unless asked; summarize.\n\n\
+     Database scope:\n\
+     - You operate on ONE active database, named in the context below. Do not call \
+     `list_schemas` to discover \"which database\" — you are already connected to it and \
+     the context states its name. Reference tables by bare name (or active-db-qualified); \
+     they resolve against the active database.\n\
+     - You may be locked to the active database. If a tool returns a \"cross-database \
+     access is disabled\" error, do NOT retry against another database — tell the user they \
+     can enable cross-database access in the AI permissions panel.\n\n\
      Answering data questions — things you cannot know without querying:\n\
      - Do NOT infer language, country, region, or locale from email domains. Gmail, \
      Yahoo, Hotmail, iCloud etc. are global — they do not indicate any country.\n\
@@ -126,7 +142,22 @@ pub async fn build(
     let fks = adapter.list_relations(&schema_name).await.unwrap_or_default();
 
     let mut out = String::new();
-    // Adapter primer first — the model needs to know "this is Redis, not
+    // CRITICAL RULES FIRST. These ride at the very top of the freshly-injected
+    // context message every turn — the highest-salience position for models
+    // that underweight the separate static system prompt (weak local models
+    // were replying in Chinese and looping `list_schemas` despite the static
+    // rules). Stated imperatively, before anything else.
+    out.push_str("# IMPORTANT RULES (read first)\n\n");
+    out.push_str(&format!(
+        "1. **Reply in English.** Always respond in English regardless of the user's \
+         greeting language. Only switch if the user explicitly asks for another language.\n\
+         2. **You are already connected to the `{schema_name}` database.** Do NOT call \
+         `list_schemas` — you know the database; it is `{schema_name}`. All tables below \
+         belong to it. Reference them by bare name.\n\
+         3. If a tool says \"cross-database access is disabled\", do not retry — tell the \
+         user to enable it in AI permissions.\n\n"
+    ));
+    // Adapter primer next — the model needs to know "this is Redis, not
     // SQL" (or "MySQL vs SQLite") before it reads the schema markdown and
     // starts forming a plan. Wrapped in a header so it's visually distinct
     // from the schema block below.
@@ -136,17 +167,20 @@ pub async fn build(
         out.push_str("\n\n");
     }
     out.push_str("# Database context\n\n");
-    out.push_str(&format!("- Active schema: `{schema_name}`\n"));
-    out.push_str(&format!("- Tables: {}\n", info.tables.len()));
+    out.push_str(&format!(
+        "Active database: `{schema_name}`. All queries and table references are scoped to it.\n\n"
+    ));
+    out.push_str(&format!("- Active database: `{schema_name}`\n"));
+    out.push_str(&format!("- Tables in `{schema_name}`: {}\n", info.tables.len()));
     if !schemas.is_empty() {
-        let others: Vec<&str> = schemas
-            .iter()
-            .filter(|s| s.name != schema_name)
-            .map(|s| s.name.as_str())
-            .take(10)
-            .collect();
-        if !others.is_empty() {
-            out.push_str(&format!("- Other schemas: {}\n", others.join(", ")));
+        let other_count = schemas.iter().filter(|s| s.name != schema_name).count();
+        if other_count > 0 {
+            // Don't enumerate the other databases — that's exactly the
+            // server-wide list we're trying to keep the model from fixating on.
+            // Just acknowledge they exist and that they're out of scope.
+            out.push_str(&format!(
+                "- {other_count} other database(s) exist on this server but are out of scope for this conversation.\n"
+            ));
         }
     }
     out.push('\n');
