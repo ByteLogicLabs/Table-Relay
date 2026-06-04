@@ -36,8 +36,16 @@ pub fn run() {
             // vault + oauth files forward so existing users keep their saved
             // connections, known SSH hosts, AI settings and chat history.
             migrate_legacy_app_data(&dir);
-            let store =
-                Arc::new(Store::open(dir.clone()).expect("failed to initialize connection store"));
+            let store = Arc::new(
+                Store::open(dir.clone()).unwrap_or_else(|e| {
+                    // Last-resort recovery: if the store can't open even after
+                    // internal fallback (e.g. filesystem permission issue), wipe
+                    // it and start clean rather than crashing the app.
+                    crate::log::write_line("store", &format!("open failed ({e}), resetting store"));
+                    let _ = std::fs::remove_file(dir.join("store.db.enc"));
+                    Store::open(dir.clone()).expect("store open failed even after reset")
+                }),
+            );
 
             // Factory registry + built-in adapters. Must run before any
             // `db_connect` command can dispatch by adapter id.

@@ -92,13 +92,31 @@ impl Store {
 
     fn auto_unlock(&self) -> Result<(), StoreError> {
         let conn = if self.encrypted_path.exists() {
-            // Decrypt existing store.
+            // Decrypt existing store. If decryption fails (e.g. the file was
+            // encrypted with the old password-based scheme from a prior version),
+            // move it aside and start fresh rather than crashing the app.
             let bytes = std::fs::read(&self.encrypted_path).map_err(StoreError::Io)?;
-            let plaintext = decrypt_store(&bytes)?;
-            let mut conn = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
-            deserialize_conn(&mut conn, plaintext)?;
-            schema::migrate(&mut conn)?;
-            conn
+            match decrypt_store(&bytes) {
+                Ok(plaintext) => {
+                    let mut conn = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
+                    deserialize_conn(&mut conn, plaintext)?;
+                    schema::migrate(&mut conn)?;
+                    conn
+                }
+                Err(_) => {
+                    // Back up the incompatible file before writing a fresh store.
+                    // Only proceed if the rename succeeds — if it fails we would
+                    // overwrite the only copy of the user's data, which is worse
+                    // than crashing, so surface the error instead.
+                    let bad = self.encrypted_path.with_extension("enc.incompatible");
+                    std::fs::rename(&self.encrypted_path, &bad).map_err(StoreError::Io)?;
+                    let mut conn = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
+                    schema::migrate(&mut conn)?;
+                    let snapshot = serialize_conn(&conn)?;
+                    write_encrypted(&self.encrypted_path, &snapshot)?;
+                    conn
+                }
+            }
         } else if self.plaintext_path.exists() {
             // One-time migration from legacy plaintext store.
             let mut conn = Connection::open(&self.plaintext_path).map_err(StoreError::Sqlite)?;

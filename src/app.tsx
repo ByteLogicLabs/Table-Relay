@@ -298,6 +298,9 @@ function UnlockedApp() {
       toast.success(`Connected to ${conn.name}`, { id: toastId });
     } catch (err) {
       toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
+      // Remove the optimistically-added id so handleEditConnection doesn't
+      // treat this as an active connection and attempt a spurious reconnect.
+      setActiveConnectionIds(prev => prev.filter(cId => cId !== savedId));
     }
   };
 

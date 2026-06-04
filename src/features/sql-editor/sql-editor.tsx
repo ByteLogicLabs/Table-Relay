@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X } from 'lucide-react';
+import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
 import { Button } from '../../components/ui/button';
@@ -52,6 +52,19 @@ interface SqlEditorProps {
 function pickMonacoTheme(): string {
   return getMonacoThemeId(document.documentElement.dataset.theme ?? 'monokai');
 }
+
+/** Format elapsed run time: ms under a second, then seconds with one decimal. */
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+// Platform-aware modifier glyph for shortcut badges. macOS shows ⌘; everything
+// else shows Ctrl. Computed once at module load.
+const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+const MOD_KEY = IS_MAC ? '⌘' : 'Ctrl';
+const RUN_SHORTCUT = `${MOD_KEY}↵`;
+const RUN_ALL_SHORTCUT = IS_MAC ? '⌘⇧↵' : 'Ctrl+Shift+↵';
 
 /** Split a multi-statement SQL string on `;` respecting quotes and comments. */
 function splitSqlStatements(sql: string): string[] {
@@ -370,8 +383,17 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   const [resultStatements, setResultStatements] = useState<StatementResult[]>(() => seededSnapshot?.statements ?? []);
   const [runError, setRunError] = useState<string | null>(() => seededSnapshot?.runError ?? null);
   const [activeResultIndex, setActiveResultIndex] = useState(() => seededSnapshot?.activeResultIndex ?? 0);
+  // While statements stream in we auto-advance to the newest result, but the
+  // moment the user clicks a specific Execution tab we stop following so their
+  // selection sticks. Reset on each new run.
+  const userPickedResultRef = useRef(false);
   const [resultViewMode, setResultViewMode] = useState<'table' | 'json'>(() => seededSnapshot?.resultViewMode ?? 'table');
   const [isExecuting, setIsExecuting] = useState(false);
+  // Live elapsed time (ms) while a query runs, so the results pane can show a
+  // ticking timer instead of going blank. Driven by a rAF loop in the effect
+  // below; reset to 0 between runs.
+  const [runElapsedMs, setRunElapsedMs] = useState(0);
+  const runStartRef = useRef(0);
   // Destructive warning dialog state
   const [destructiveWarning, setDestructiveWarning] = useState<DestructiveStatement[] | null>(null);
   const pendingRunRef = useRef<string | null>(null);
@@ -391,6 +413,21 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   const defaultSchemaRef = useRef<string | undefined>(effectiveSchema);
   defaultSchemaRef.current = effectiveSchema;
 
+  // Tick the live "Running…" timer while a query executes. We use rAF rather
+  // than setInterval so the displayed elapsed time stays smooth and stops
+  // immediately on completion; the final authoritative duration comes from the
+  // result's `durationMs` once the run resolves.
+  useEffect(() => {
+    if (!isExecuting) return;
+    let raf = 0;
+    const tick = () => {
+      setRunElapsedMs(performance.now() - runStartRef.current);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isExecuting]);
+
   // Track the app's dark-mode class so Monaco follows the theme switch.
   useEffect(() => {
     const root = document.documentElement;
@@ -404,6 +441,8 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   // first render's handleRun and runs against stale state (e.g. the original
   // empty buffer instead of what the user has typed since).
   const handleRunRef = useRef<() => void>(() => {});
+  // Same ref pattern for the run-all command (Cmd/Ctrl+Shift+Enter).
+  const handleRunAllRef = useRef<() => void>(() => {});
   // Direct handle to the Monaco editor instance. Needed so external writes
   // (`write_query_tab` from the AI) can update the buffer in place without
   // a full remount — remounting caused a visible flicker and dropped
@@ -416,12 +455,22 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.Enter, () => {
       void handleRunRef.current();
     });
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
+      void handleRunAllRef.current();
+    });
   };
 
   // Ensure schema metadata is present for autocomplete in query tabs too, not
-  // only in the sidebar path.
+  // only in the sidebar path. If the sidebar already loaded the tree, reuse it
+  // — refetching on every query-tab open made the visible table list flash a
+  // reload. Only fetch when nothing is cached yet.
   useEffect(() => {
+    const hasCache = (connState.schemasById.get(connection.id)?.length ?? 0) > 0;
+    if (hasCache) return;
     void refreshSchemas(connection.id);
+    // Intentionally keyed only on connection.id: we want this to run once per
+    // connection switch, not on every schema-store mutation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [connection.id]);
 
   // Register completion provider after Monaco mounts, and re-register whenever
@@ -842,10 +891,13 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   }, [resultViewMode, supportsJsonResultView, activeResultIndex, activeRowsAsJsonText, collapseJsonSubtrees]);
 
   const executePayload = async (payload: string) => {
+    runStartRef.current = performance.now();
+    setRunElapsedMs(0);
     setIsExecuting(true);
     setResultStatements([]);
     setRunError(null);
     setActiveResultIndex(0);
+    userPickedResultRef.current = false;
 
     const collected: StatementResult[] = [];
 
@@ -862,7 +914,11 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             message: s.error ?? undefined,
           });
           setResultStatements([...collected]);
-          setActiveResultIndex(collected.length - 1);
+          // Follow the newest result as it streams — unless the user has
+          // clicked a specific Execution tab, in which case respect their pick.
+          if (!userPickedResultRef.current) {
+            setActiveResultIndex(collected.length - 1);
+          }
         },
         undefined,
         effectiveSchema,
@@ -911,7 +967,6 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
 
     await executePayload(payload);
   };
-  handleRunRef.current = () => { void handleRun(); };
 
   const handleRunCurrent = () => {
     const editor = editorRef.current;
@@ -942,6 +997,10 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     }
     void handleRun(query);
   };
+  // Cmd/Ctrl+Enter runs the current statement (the primary action);
+  // Cmd/Ctrl+Shift+Enter runs everything.
+  handleRunRef.current = () => { handleRunCurrent(); };
+  handleRunAllRef.current = () => { void handleRun(); };
 
   const handleFormat = () => {
     if (isDocumentStore) {
@@ -976,21 +1035,22 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     <div className="flex flex-col h-full bg-background">
       {/* Toolbar */}
       <div className="h-12 border-b border-border flex items-center px-4 bg-muted/10 gap-2">
-        <Button size="sm" onClick={() => { void handleRun(); }} disabled={isExecuting} className="bg-green-600 hover:bg-green-700 text-white">
-          <Play className="w-4 h-4 mr-2" />
-          Run All
-        </Button>
-        <Button variant="outline" size="sm" onClick={handleRunCurrent} disabled={isExecuting}>
+        <Button size="sm" onClick={handleRunCurrent} disabled={isExecuting} className="bg-green-600 hover:bg-green-700 text-white" title="Run the statement under the cursor (or selection)">
+          {isExecuting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
           Run Current
+          <kbd className="inline-flex h-4 items-center rounded border border-white/30 bg-white/15 px-1 text-[10px] font-medium font-sans">{RUN_SHORTCUT}</kbd>
+        </Button>
+        <Button variant="outline" size="sm" onClick={() => { void handleRun(); }} disabled={isExecuting} title="Run all statements in the editor">
+          <FastForward className="w-3.5 h-3.5" />
+          Run All
+          <kbd className="inline-flex h-4 items-center rounded border border-border bg-muted px-1 text-[10px] font-medium font-sans">{RUN_ALL_SHORTCUT}</kbd>
         </Button>
         <div className="w-px h-4 bg-border mx-1" />
         <Button variant="ghost" size="sm" onClick={handleFormat}>
           <AlignLeft className="w-4 h-4 mr-2" />
           {isDocumentStore ? 'Format JSON' : 'Format SQL'}
         </Button>
-        <div className="ml-auto text-[11px] text-muted-foreground">
-          ⌘↵ / Ctrl+↵ to run
-        </div>
+        <div className="ml-auto" />
         <Button
           variant="ghost"
           size="sm"
@@ -1053,8 +1113,10 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
       </div>
 
       {/* Results pane — each executed statement gets its own tab so multi-
-          statement runs (`a; b; c`) can be inspected independently. */}
-      {(runError || resultStatements.length > 0) && (
+          statement runs (`a; b; c`) can be inspected independently. Stays
+          mounted while a query runs so we can show a "Running…" timer instead
+          of the pane vanishing. */}
+      {(isExecuting || runError || resultStatements.length > 0) && (
         <div
           className="border-t border-border flex flex-col shrink-0 relative"
           style={{ height: resultsHeight }}
@@ -1064,12 +1126,40 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             orientation="top"
           />
           <div className="h-8 border-b border-border bg-muted/30 flex items-center justify-between px-3 text-xs font-medium text-muted-foreground shrink-0 gap-2">
-            <div className="min-w-0 truncate">
-              {runError
-                ? (isDocumentStore ? 'MongoDB Error' : 'Query Error')
-                : `Results${activeResult ? ` · ${activeResult.durationMs.toFixed(1)}ms` : ''}`}
+            <div className="min-w-0 flex items-center gap-2">
+              <span className="shrink-0 flex items-center gap-1.5">
+                {isExecuting ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-primary" />
+                    <span>Running…</span>
+                    {resultStatements.length > 0 && (
+                      <span className="text-muted-foreground/70">
+                        {resultStatements.length} done
+                      </span>
+                    )}
+                    <span className="tabular-nums text-muted-foreground/70">{formatElapsed(runElapsedMs)}</span>
+                  </>
+                ) : runError
+                  ? (isDocumentStore ? 'MongoDB Error' : 'Query Error')
+                  : `Results${activeResult ? ` · ${activeResult.durationMs.toFixed(1)}ms` : ''}`}
+              </span>
+              {/* Read-only reason lives here (beside the duration) rather than
+                  in its own row above the grid — saves vertical space. The
+                  pending-edits bar still gets its own row since it carries the
+                  Discard/Save actions. */}
+              {!isExecuting && !runError && editableReason && pendingEditCount === 0 && (
+                <span
+                  className="min-w-0 inline-flex items-center gap-1 text-[11px] text-muted-foreground/80 font-normal"
+                  title={editableReason}
+                >
+                  <span className="text-muted-foreground/40">·</span>
+                  <Lock className="w-3 h-3 shrink-0" />
+                  <span className="shrink-0">Read-only</span>
+                  <span className="truncate">— {editableReason}</span>
+                </span>
+              )}
             </div>
-            {!runError && resultStatements.length > 0 && supportsJsonResultView && (
+            {!isExecuting && !runError && resultStatements.length > 0 && supportsJsonResultView && (
               <div className="inline-flex items-center gap-1 shrink-0">
                 <Button
                   variant={resultViewMode === 'table' ? 'secondary' : 'ghost'}
@@ -1094,14 +1184,21 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
               </div>
             )}
           </div>
+          {isExecuting && resultStatements.length === 0 && (
+            <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 text-muted-foreground">
+              <Loader2 className="w-6 h-6 animate-spin text-primary" />
+              <div className="text-sm font-medium">Running query…</div>
+              <div className="text-xs tabular-nums text-muted-foreground/70">{formatElapsed(runElapsedMs)}</div>
+            </div>
+          )}
           {runError && (
             <div className="px-4 py-2 text-xs bg-destructive/10 text-destructive font-mono flex items-start gap-2 border-b border-destructive/30 shrink-0">
               <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
               <div className="min-w-0 wrap-break-word">{runError}</div>
             </div>
           )}
-          {!runError && resultStatements.length > 0 && (
-            <div className="h-10 border-b border-border bg-muted/30 shrink-0 flex items-center gap-2 px-2">
+          {!runError && resultStatements.length > 1 && (
+            <div className="h-8 border-b border-border bg-muted/30 shrink-0 flex items-center gap-2 px-2">
               <div className="flex-1 min-w-0 overflow-x-auto no-scrollbar">
                 <div className="h-full inline-flex items-center gap-1 w-max pr-2">
                   {resultStatements.map((stmt, idx) => {
@@ -1109,8 +1206,13 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                       <button
                         key={idx}
                         type="button"
-                        onClick={() => setActiveResultIndex(idx)}
-                        className={`h-8 px-3 rounded-md border text-[11px] whitespace-nowrap transition-colors ${
+                        onClick={() => {
+                          // User explicitly picked a result — stop auto-following
+                          // the newest one for the rest of this run.
+                          userPickedResultRef.current = true;
+                          setActiveResultIndex(idx);
+                        }}
+                        className={`h-6 px-2.5 rounded-md border text-[11px] whitespace-nowrap transition-colors ${
                           activeResultIndex === idx
                             ? 'bg-background border-border/70 text-foreground shadow-sm'
                             : 'bg-transparent border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/60'
@@ -1290,55 +1392,41 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             }
             return (
               <div className="flex-1 min-h-0 flex flex-col">
-                {/* Editable-result status bar — silent when the query is
-                    editable and clean (cells stay quietly editable on
-                    double-click). Surfaces only when there's something the
-                    user needs to know: pending edits to flush, or a hard
-                    reason editing is blocked. */}
-                {(editableReason || pendingEditCount > 0) && (
+                {/* Pending-edits action bar — surfaces only when there are
+                    unsaved cell edits to flush. The read-only reason now lives
+                    inline in the results header to save this vertical space. */}
+                {pendingEditCount > 0 && (
                   <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-border bg-background/40 text-xs">
                     <div className="flex items-center gap-2 min-w-0 flex-1">
-                      {pendingEditCount > 0 ? (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border border-yellow-500/30 font-medium">
-                          <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
-                          {pendingEditCount} unsaved cell{pendingEditCount === 1 ? '' : 's'}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-muted text-muted-foreground border border-border" title={editableReason ?? ''}>
-                          <Lock className="w-3 h-3" />
-                          Read-only
-                          <span className="text-muted-foreground/70 truncate max-w-[420px]">— {editableReason}</span>
-                        </span>
-                      )}
+                      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border border-yellow-500/30 font-medium">
+                        <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
+                        {pendingEditCount} unsaved cell{pendingEditCount === 1 ? '' : 's'}
+                      </span>
                     </div>
-                    {pendingEditCount > 0 && (
-                      <>
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-7"
-                          disabled={isSavingResult}
-                          onClick={() => {
-                            setPendingResultEdits({});
-                            setActiveResultEdit(null);
-                          }}
-                          title="Discard all unsaved cell edits"
-                        >
-                          <Undo2 className="w-3.5 h-3.5 mr-1.5" /> Discard
-                        </Button>
-                        <Button
-                          variant="default"
-                          size="sm"
-                          className="h-7"
-                          onClick={() => { void handleSaveResultEdits(); }}
-                          disabled={isSavingResult}
-                          title="Save edited cells to the database and re-run the query"
-                        >
-                          {isSavingResult ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Check className="w-3.5 h-3.5 mr-1.5" />}
-                          {isSavingResult ? 'Saving…' : 'Save'}
-                        </Button>
-                      </>
-                    )}
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7"
+                      disabled={isSavingResult}
+                      onClick={() => {
+                        setPendingResultEdits({});
+                        setActiveResultEdit(null);
+                      }}
+                      title="Discard all unsaved cell edits"
+                    >
+                      <Undo2 className="w-3.5 h-3.5 mr-1.5" /> Discard
+                    </Button>
+                    <Button
+                      variant="default"
+                      size="sm"
+                      className="h-7"
+                      onClick={() => { void handleSaveResultEdits(); }}
+                      disabled={isSavingResult}
+                      title="Save edited cells to the database and re-run the query"
+                    >
+                      {isSavingResult ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Check className="w-3.5 h-3.5 mr-1.5" />}
+                      {isSavingResult ? 'Saving…' : 'Save'}
+                    </Button>
                   </div>
                 )}
                 <div className="flex-1 min-h-0 overflow-auto" style={{ maxWidth: 'var(--content-max-w, 100%)' }}>
@@ -1454,7 +1542,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                                     }}
                                   />
                                 ) : (
-                                  <div className="px-2 py-1.5 truncate">
+                                  <div className="px-2 py-1.5 truncate selectable cursor-text">
                                     {displayText}
                                   </div>
                                 )}
