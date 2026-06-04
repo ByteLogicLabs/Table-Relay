@@ -35,23 +35,30 @@ struct AdapterEntry {
 fn main() {
     tauri_build::build();
 
-    // Load APP_TOKEN from the workspace .env file and forward it as a
-    // compile-time env var so the store can use it without exposing it at
-    // runtime. We intentionally don't use the `dotenv` crate — a simple
-    // two-liner keeps the build script dependency-free.
+    // Load APP_TOKEN from CI env or the workspace .env file and forward it as
+    // a compile-time env var. GitHub Actions will not have a local .env file,
+    // so environment wins when present.
+    println!("cargo:rerun-if-env-changed=APP_TOKEN");
     println!("cargo:rerun-if-changed=../.env");
     let env_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
         .parent()
         .unwrap()
         .join(".env");
-    if env_path.exists() {
-        for line in fs::read_to_string(&env_path).unwrap_or_default().lines() {
-            let line = line.trim();
-            if let Some(val) = line.strip_prefix("APP_TOKEN=") {
-                println!("cargo:rustc-env=APP_TOKEN={val}");
-                break;
-            }
+    let mut app_token = std::env::var("APP_TOKEN").ok().filter(|v| !v.trim().is_empty());
+    if app_token.is_none() && env_path.exists() {
+        app_token = fs::read_to_string(&env_path)
+            .unwrap_or_default()
+            .lines()
+            .map(str::trim)
+            .find_map(|line| line.strip_prefix("APP_TOKEN=").map(str::to_string))
+            .filter(|v| !v.trim().is_empty());
+    }
+    if let Some(val) = app_token {
+        let val = val.trim();
+        if val.len() != 64 || !val.bytes().all(|b| b.is_ascii_hexdigit()) {
+            panic!("APP_TOKEN must be a 64-character hex string");
         }
+        println!("cargo:rustc-env=APP_TOKEN={val}");
     }
 
     // Re-run whenever the enrollment list changes. Cargo will also re-run

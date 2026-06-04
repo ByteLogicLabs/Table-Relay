@@ -22,17 +22,23 @@ use rusqlite::Connection;
 use rusqlite::DatabaseName;
 use serde::Serialize;
 
-// APP_TOKEN is a 64-char hex string set in `.env` and baked in at compile
-// time via build.rs. Decoded once to a 32-byte key at runtime.
-fn app_key() -> [u8; 32] {
-    let hex = env!("APP_TOKEN");
+// APP_TOKEN is a 64-char hex string supplied by CI env or `.env` and baked in
+// at compile time via build.rs. Do not provide a source-code fallback: release
+// builds must use a project-specific token so encrypted stores remain
+// consistent across app versions.
+fn app_key() -> Result<[u8; 32], StoreError> {
+    let hex = option_env!("APP_TOKEN")
+        .ok_or_else(|| StoreError::Crypto("APP_TOKEN is not configured for this build".into()))?;
+    if hex.len() != 64 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(StoreError::Crypto("APP_TOKEN must be a 64-character hex string".into()));
+    }
     let mut key = [0u8; 32];
     for (i, chunk) in hex.as_bytes().chunks(2).enumerate().take(32) {
         let hi = hex_nibble(chunk[0]);
         let lo = hex_nibble(chunk[1]);
         key[i] = (hi << 4) | lo;
     }
-    key
+    Ok(key)
 }
 
 fn hex_nibble(b: u8) -> u8 {
@@ -180,7 +186,7 @@ fn write_encrypted(path: &PathBuf, plaintext: &[u8]) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(StoreError::Io)?;
     }
-    let key = app_key();
+    let key = app_key()?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StoreError::Crypto(format!("cipher init: {e}")))?;
     let mut nonce = [0u8; NONCE_LEN];
@@ -201,7 +207,7 @@ fn decrypt_store(bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
     }
     let nonce = &bytes[MAGIC.len()..MAGIC.len() + NONCE_LEN];
     let ciphertext = &bytes[MAGIC.len() + NONCE_LEN..];
-    let key = app_key();
+    let key = app_key()?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| StoreError::Crypto(format!("cipher init: {e}")))?;
     cipher

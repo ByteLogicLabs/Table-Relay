@@ -114,6 +114,7 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_TOKEN: ${{ secrets.APP_TOKEN }}
         with:
           tagName: ${{ github.event.release.tag_name }}
           releaseId: ${{ github.event.release.id }}
