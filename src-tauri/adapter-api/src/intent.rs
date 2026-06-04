@@ -15,6 +15,9 @@ use serde_json::Value as JsonValue;
 pub struct BrowseRequest {
     pub schema: String,
     pub table: String,
+    /// Optional projection. Empty means "all columns".
+    #[serde(default)]
+    pub columns: Vec<String>,
     #[serde(default)]
     pub filters: Vec<Filter>,
     #[serde(default)]

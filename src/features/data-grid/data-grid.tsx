@@ -370,7 +370,9 @@ export default function DataGrid({
     cached?.totalRows ?? null,
   );
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [filters, setFilters] = useState<FilterCondition[]>([]);
+  const [draftFilters, setDraftFilters] = useState<FilterCondition[]>([]);
+  const [appliedFilters, setAppliedFilters] = useState<FilterCondition[]>([]);
+  const [hiddenColumns, setHiddenColumns] = useState<Set<string>>(new Set());
   const [sortBy, setSortBy] = useState<SortState>(null);
   const [executionMs, setExecutionMs] = useState<number | null>(
     cached?.executionMs ?? null,
@@ -412,6 +414,8 @@ export default function DataGrid({
   const [isCommitting, setIsCommitting] = useState(false);
   const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
   const [confirmRefreshOpen, setConfirmRefreshOpen] = useState(false);
+  const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
+  const [columnsPopoverOpen, setColumnsPopoverOpen] = useState(false);
   const [menuState, setMenuState] = useState<{
     x: number;
     y: number;
@@ -454,6 +458,24 @@ export default function DataGrid({
   const jsonSaveRef = useRef<() => void>(() => {});
   const schemaRef = useRef<SchemaViewHandle>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!filterPopoverOpen && !columnsPopoverOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      if (
+        target.closest('[data-grid-toolbar-popover="true"]') ||
+        target.closest('[data-slot="select-content"]')
+      ) {
+        return;
+      }
+      setFilterPopoverOpen(false);
+      setColumnsPopoverOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown, true);
+    return () => document.removeEventListener("pointerdown", onPointerDown, true);
+  }, [columnsPopoverOpen, filterPopoverOpen]);
 
   const setViewMode = onViewModeChange;
 
@@ -506,11 +528,25 @@ export default function DataGrid({
 
   const activeFilters = useMemo(
     () =>
-      filters.filter((f) => {
+      appliedFilters.filter((f) => {
         const op = OPERATORS.find((o) => o.value === f.op);
-        return op?.valueless || f.value.trim() !== "";
+        return f.column && (op?.valueless || f.value.trim() !== "");
       }),
-    [filters],
+    [appliedFilters],
+  );
+
+  const validDraftFilters = useMemo(
+    () =>
+      draftFilters.filter((f) => {
+        const op = OPERATORS.find((o) => o.value === f.op);
+        return f.column && (op?.valueless || f.value.trim() !== "");
+      }),
+    [draftFilters],
+  );
+
+  const filtersDirty = useMemo(
+    () => JSON.stringify(draftFilters) !== JSON.stringify(appliedFilters),
+    [draftFilters, appliedFilters],
   );
 
   const filteredRows = useMemo(() => {
@@ -617,11 +653,47 @@ export default function DataGrid({
   // render headers from the last query's cols if available, or fall back to
   // describeTable's structure so newly-created / always-empty tables still
   // show their column layout.
-  const displayCols = useMemo(() => {
-    if (data.cols.length > 0) return data.cols;
+  const allDisplayCols = useMemo(() => {
     if (structure?.columns.length) return structure.columns.map((c) => c.name);
+    if (data.cols.length > 0) return data.cols;
     return [];
   }, [data.cols, structure]);
+
+  const displayCols = useMemo(
+    () => allDisplayCols.filter((col) => !hiddenColumns.has(col)),
+    [allDisplayCols, hiddenColumns],
+  );
+
+  const queryProjectionCols = useMemo(() => {
+    if (hiddenColumns.size === 0 || displayCols.length === 0) return undefined;
+    const cols = new Set(displayCols);
+    structure?.primaryKey.forEach((pk) => cols.add(pk));
+    if (hideColumnInGrid) cols.add(hideColumnInGrid);
+    return Array.from(cols).filter((col) => allDisplayCols.includes(col));
+  }, [
+    allDisplayCols,
+    displayCols,
+    hiddenColumns.size,
+    hideColumnInGrid,
+    structure,
+  ]);
+
+  const queryProjectionKey = queryProjectionCols
+    ? JSON.stringify(queryProjectionCols)
+    : "";
+
+  useEffect(() => {
+    setHiddenColumns((prev) => {
+      const available = new Set(allDisplayCols);
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((col) => {
+        if (available.has(col)) next.add(col);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [allDisplayCols]);
 
   // Dialect + boolean format come from the active adapter manifest, not
   // the driver name. New adapter ships a manifest → these flags pick up
@@ -665,7 +737,8 @@ export default function DataGrid({
   }, [structure]);
 
   const addFilter = () => {
-    setFilters((prev) => [
+    if (data.cols.length === 0) return;
+    setDraftFilters((prev) => [
       ...prev,
       {
         id: crypto.randomUUID(),
@@ -677,16 +750,35 @@ export default function DataGrid({
   };
 
   const updateFilter = (id: string, patch: Partial<FilterCondition>) => {
-    setFilters((prev) =>
+    setDraftFilters((prev) =>
       prev.map((f) => (f.id === id ? { ...f, ...patch } : f)),
     );
   };
 
   const removeFilter = (id: string) => {
-    setFilters((prev) => prev.filter((f) => f.id !== id));
+    setDraftFilters((prev) => prev.filter((f) => f.id !== id));
   };
 
-  const clearFilters = () => setFilters([]);
+  const applyFilters = () => {
+    setAppliedFilters(validDraftFilters.map((f) => ({ ...f })));
+  };
+
+  const clearFilters = () => {
+    setDraftFilters([]);
+  };
+
+  const resetFilters = () => {
+    setDraftFilters(appliedFilters.map((f) => ({ ...f })));
+  };
+
+  const toggleColumn = (column: string, visible: boolean) => {
+    setHiddenColumns((prev) => {
+      const next = new Set(prev);
+      if (visible) next.delete(column);
+      else next.add(column);
+      return next;
+    });
+  };
 
   const cycleSort = useCallback((column: string) => {
     setSortBy((prev) => {
@@ -732,6 +824,7 @@ export default function DataGrid({
         db.browse(connectionId, {
           schema,
           table: tableName,
+          columns: queryProjectionCols,
           filters: toBrowseFilters(),
           sort: activeServerSort
             ? [
@@ -802,7 +895,7 @@ export default function DataGrid({
   // it survives StrictMode's simulated remount — we never double-fetch the
   // same target. `null` = nothing loaded yet for this grid.
   const loadTargetKey = () =>
-    `${connectionId}|${schema}|${tableName}|${page}|${limit}|${JSON.stringify(activeFilters)}|${JSON.stringify(activeServerSort)}`;
+    `${connectionId}|${schema}|${tableName}|${page}|${limit}|${JSON.stringify(activeFilters)}|${JSON.stringify(activeServerSort)}|${queryProjectionKey}`;
   const loadedTargetRef = useRef<string | null>(null);
   // Seed from cache on first render: if we hydrated from the tab cache, that
   // snapshot already IS the loaded state, so the loader must not refetch it.
@@ -826,7 +919,7 @@ export default function DataGrid({
     }
     setPage(1);
     // activeFilters is a derived memo; its identity is stable until the
-    // underlying `filters` change, which is what we actually want to watch.
+    // underlying applied filters change, which is what we actually want to watch.
   }, [limit, activeFilters, activeServerSort]);
 
   // Reset edit/selection state whenever the TARGET (connection/schema/table)
@@ -849,6 +942,9 @@ export default function DataGrid({
     setData(EMPTY_DATA);
     setEditedCells({});
     setActiveEdit(null);
+    setDraftFilters([]);
+    setAppliedFilters([]);
+    setHiddenColumns(new Set());
     setSortBy(null);
     setSelectedRows(new Set());
     setLastSelectedRowId(null);
@@ -877,7 +973,7 @@ export default function DataGrid({
   //                   stale. Idempotent under StrictMode's double-invoke and
   //                   re-activation with nothing changed (no redundant browse).
   //
-  // Deps include page/limit/filters/sort so a param change on the visible tab
+  // Deps include page/limit/applied filters/sort so a param change on the visible tab
   // still refetches (the key differs) — but a hidden tab's deps changing can't
   // fetch because of the `!isActive` guard.
   useEffect(() => {
@@ -925,6 +1021,7 @@ export default function DataGrid({
     limit,
     activeFilters,
     activeServerSort,
+    queryProjectionKey,
   ]);
 
   // Soft reload (⌘+R) — refetch rows without touching the filter / column
@@ -1318,6 +1415,10 @@ export default function DataGrid({
     }
 
     const qualified = schema ? `${qi(schema)}.${qi(tableName)}` : qi(tableName);
+    const projection =
+      queryProjectionCols && queryProjectionCols.length > 0
+        ? queryProjectionCols.map((col) => qi(col)).join(", ")
+        : "*";
     const where = activeFilters
       .map((f) => {
         const col = qi(f.column);
@@ -1349,7 +1450,7 @@ export default function DataGrid({
       : "";
     const offset = Math.max(0, (page - 1) * Number(limit));
     const offsetClause = offset > 0 ? ` OFFSET ${offset}` : "";
-    return `SELECT * FROM ${qualified}${where ? ` WHERE ${where}` : ""}${orderBy} LIMIT ${limit}${offsetClause};`;
+    return `SELECT ${projection} FROM ${qualified}${where ? ` WHERE ${where}` : ""}${orderBy} LIMIT ${limit}${offsetClause};`;
   };
 
   const runRefresh = () => {
@@ -2259,7 +2360,14 @@ export default function DataGrid({
                 Add row
               </Button>
 
-              <Popover>
+              <div data-grid-toolbar-popover="true">
+                <Popover
+                  open={filterPopoverOpen}
+                  onOpenChange={(open) => {
+                    setFilterPopoverOpen(open);
+                    if (open) setColumnsPopoverOpen(false);
+                  }}
+                >
                 <PopoverTrigger
                   render={(props) => (
                     <Button
@@ -2277,7 +2385,11 @@ export default function DataGrid({
                     </Button>
                   )}
                 />
-                <PopoverContent className="w-105 p-0" align="start">
+                <PopoverContent
+                  data-grid-toolbar-popover="true"
+                  className="w-105 p-0"
+                  align="start"
+                >
                   <div className="flex items-center justify-between px-3 py-2.5 border-b border-border/60">
                     <div className="flex items-center gap-2">
                       <h4 className="font-medium text-sm">Filter Builder</h4>
@@ -2287,7 +2399,7 @@ export default function DataGrid({
                           : `${filteredRows.length} of ${data.rows.length} rows match`}
                       </span>
                     </div>
-                    {filters.length > 0 && (
+                    {draftFilters.length > 0 && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -2300,13 +2412,13 @@ export default function DataGrid({
                   </div>
 
                   <div className="max-h-80 overflow-auto">
-                    {filters.length === 0 ? (
+                    {draftFilters.length === 0 ? (
                       <div className="px-3 py-6 text-center text-xs text-muted-foreground">
                         No conditions yet. Add one below.
                       </div>
                     ) : (
                       <div className="p-2 space-y-1.5">
-                        {filters.map((f, idx) => {
+                        {draftFilters.map((f, idx) => {
                           const op = OPERATORS.find((o) => o.value === f.op);
                           return (
                             <div
@@ -2385,20 +2497,49 @@ export default function DataGrid({
                     )}
                   </div>
 
-                  <div className="px-2 py-2 border-t border-border/60">
+                  <div className="px-2 py-2 border-t border-border/60 flex items-center gap-2">
                     <Button
                       size="sm"
                       variant="outline"
-                      className="w-full h-8"
+                      className="h-8 flex-1"
                       onClick={addFilter}
+                      disabled={data.cols.length === 0}
                     >
                       <PlusIcon className="w-3.5 h-3.5 mr-1.5" /> Add condition
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8"
+                      disabled={!filtersDirty}
+                      onClick={resetFilters}
+                    >
+                      Reset
+                    </Button>
+                    <Button
+                      size="sm"
+                      className="h-8"
+                      disabled={
+                        !filtersDirty &&
+                        validDraftFilters.length === activeFilters.length
+                      }
+                      onClick={applyFilters}
+                    >
+                      Apply
                     </Button>
                   </div>
                 </PopoverContent>
               </Popover>
+              </div>
 
-              <Popover>
+              <div data-grid-toolbar-popover="true">
+                <Popover
+                  open={columnsPopoverOpen}
+                  onOpenChange={(open) => {
+                    setColumnsPopoverOpen(open);
+                    if (open) setFilterPopoverOpen(false);
+                  }}
+                >
                 <PopoverTrigger
                   render={(props) => (
                     <Button {...props} variant="ghost" size="sm">
@@ -2407,20 +2548,36 @@ export default function DataGrid({
                     </Button>
                   )}
                 />
-                <PopoverContent className="w-48 p-2" align="start">
+                <PopoverContent
+                  data-grid-toolbar-popover="true"
+                  className="w-48 p-2"
+                  align="start"
+                >
                   <div className="space-y-1">
-                    {data.cols.map((col) => (
-                      <label
-                        key={col}
-                        className="flex items-center gap-2 px-2 py-1.5 hover:bg-muted rounded-md cursor-pointer"
-                      >
-                        <Checkbox defaultChecked />
-                        <span className="text-sm">{col}</span>
-                      </label>
-                    ))}
+                    {allDisplayCols.map((col) => {
+                      const visible = !hiddenColumns.has(col);
+                      const visibleCount =
+                        allDisplayCols.length - hiddenColumns.size;
+                      return (
+                        <label
+                          key={col}
+                          className="flex items-center gap-2 px-2 py-1.5 hover:bg-muted rounded-md cursor-pointer"
+                        >
+                          <Checkbox
+                            checked={visible}
+                            disabled={visible && visibleCount <= 1}
+                            onCheckedChange={(checked) =>
+                              toggleColumn(col, checked === true)
+                            }
+                          />
+                          <span className="text-sm">{col}</span>
+                        </label>
+                      );
+                    })}
                   </div>
                 </PopoverContent>
               </Popover>
+              </div>
             </>
           )}
         </div>
@@ -2660,7 +2817,7 @@ export default function DataGrid({
                   key={row.__rowId}
                   row={row}
                   rowIndex={rowIndex}
-                  cols={data.cols}
+                  cols={displayCols}
                   columnKinds={columnKinds}
                   columnDataTypes={columnDataTypes}
                   requiredColumnNames={requiredColumnNames}
