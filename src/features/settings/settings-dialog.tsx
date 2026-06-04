@@ -26,6 +26,7 @@ import {
   applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
 } from '../../lib/settings-store';
 import { connectionsStore, type ConnectionProfileRecord } from '../../lib/connections-store';
+import TablePlusImportDialog from './tableplus-import-dialog';
 import { toast } from 'sonner';
 
 // ── Small reusable controls ─────────────────────────────────────────────────────
@@ -205,6 +206,7 @@ interface SettingsDialogProps {
 
 export default function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [section, setSection] = useState<Section>('appearance');
+  const [tablePlusOpen, setTablePlusOpen] = useState(false);
 
   // ── Appearance
   const [theme, setTheme] = useState<AppTheme>(() => loadSettings().theme);
@@ -648,6 +650,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
   const meta = PROVIDERS.find(p => p.kind === form.kind)!;
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent showCloseButton className="sm:max-w-225 p-0 gap-0 overflow-hidden">
         <div className="flex h-150">
@@ -769,6 +772,17 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                   <div className="rounded-md border border-border divide-y divide-border">
                     <DataRow label="Settings" desc="Appearance, editor and behaviour preferences" onExport={handleExportSettings} onImport={handleImportSettings} />
                     <DataRow label="Connections" desc="Saved databases — includes passwords &amp; SSH secrets" onExport={handleExportConnections} onImport={handleImportConnections} />
+                    <div className="flex items-center justify-between gap-4 px-4 py-3">
+                      <div className="min-w-0">
+                        <div className="text-sm">TablePlus</div>
+                        <div className="text-[11px] text-muted-foreground mt-0.5 truncate">Import connections from a .tableplusconnection export</div>
+                      </div>
+                      <div className="shrink-0">
+                        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setTablePlusOpen(true)}>
+                          <Upload className="w-3.5 h-3.5" /> Import
+                        </Button>
+                      </div>
+                    </div>
                     <DataRow label="AI credentials" desc="Provider profiles — includes API keys" onExport={handleExportCredentials} onImport={handleImportCredentials} />
                     <DataRow label="Conversations" desc="Full AI chat history" onExport={handleExportConversations} onImport={handleImportConversations} />
                   </div>
@@ -1149,5 +1163,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
         </div>
       </DialogContent>
     </Dialog>
+    <TablePlusImportDialog open={tablePlusOpen} onOpenChange={setTablePlusOpen} />
+    </>
   );
 }

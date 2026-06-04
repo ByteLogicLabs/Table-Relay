@@ -66,12 +66,12 @@ impl Factory for RedisFactory {
             (profile.host.clone(), profile.port, None)
         };
 
-        // The frontend stores `database` as a string ("0" / "3"); accept
-        // integer-parseable values and default to 0 otherwise.
+        // The frontend may store Redis DBs as either "8" (connection form) or
+        // "db8" (sidebar/rail naming). Accept both; default to DB 0 otherwise.
         let database = profile
             .database
             .as_deref()
-            .and_then(|s| s.trim().parse::<u32>().ok());
+            .and_then(parse_database);
 
         let driver = RedisDriver::connect(RedisConfig {
             host: db_host,
@@ -85,4 +85,13 @@ impl Factory for RedisFactory {
         let adapter = RedisAdapter::new_with_tunnel(driver, tunnel);
         Ok(Arc::new(adapter))
     }
+}
+
+fn parse_database(raw: &str) -> Option<u32> {
+    let s = raw.trim();
+    let n = s
+        .strip_prefix("db")
+        .or_else(|| s.strip_prefix("DB"))
+        .unwrap_or(s);
+    n.parse::<u32>().ok()
 }

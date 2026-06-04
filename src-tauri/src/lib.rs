@@ -101,6 +101,17 @@ pub fn run() {
                 .item(&PredefinedMenuItem::close_window(handle, None)?)
                 .build()?;
 
+            let connection_picker = MenuItemBuilder::with_id("connection_picker", "List Connections…")
+                .accelerator("CmdOrCtrl+Shift+C")
+                .build(handle)?;
+            let connection_new = MenuItemBuilder::with_id("connection_new", "New Connection")
+                .accelerator("CmdOrCtrl+N")
+                .build(handle)?;
+            let connection_menu = SubmenuBuilder::new(handle, "Connection")
+                .item(&connection_picker)
+                .item(&connection_new)
+                .build()?;
+
             let mut menu_builder = MenuBuilder::new(handle);
             // macOS-only "app menu" (first menu, named after the bundle)
             // carries About / Quit. Without it the app has no Quit entry.
@@ -127,6 +138,7 @@ pub fn run() {
             let menu = menu_builder
                 .item(&file_menu)
                 .item(&edit_menu)
+                .item(&connection_menu)
                 .item(&view_menu)
                 .item(&window_menu)
                 .build()?;
@@ -144,6 +156,8 @@ pub fn run() {
                     Some(format!("menu-file-{action}"))
                 } else if let Some(action) = id.strip_prefix("app_") {
                     Some(format!("menu-app-{action}"))
+                } else if let Some(action) = id.strip_prefix("connection_") {
+                    Some(format!("menu-connection-{action}"))
                 } else {
                     None
                 };
@@ -177,6 +191,8 @@ pub fn run() {
             commands::store::ai_settings_get,
             commands::store::ai_settings_save,
             commands::store::ai_settings_forget,
+            // TablePlus import (decrypt + map a .tableplusconnection export)
+            commands::tableplus::tableplus_import,
             // DB
             commands::db::db_connect,
             commands::db::db_test_connection,

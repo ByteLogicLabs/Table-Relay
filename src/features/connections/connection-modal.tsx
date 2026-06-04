@@ -45,7 +45,7 @@ interface TestReport {
 interface ConnectionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSave: (conn: ConnectionProfile) => void;
+  onSave: (conn: ConnectionProfile, previousId?: string) => void | Promise<void>;
   initialData?: ConnectionProfile;
 }
 
@@ -179,7 +179,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
     const driver = formData.driver as Driver;
     const fallbackPort = driver === 'PostgreSQL' ? '5432' : driver === 'MongoDB' ? '27017' : '3306';
     return {
-      id: initialData?.id,
+      id: String(formData.id || initialData?.id || '').trim() || undefined,
       name: formData.name || 'untitled',
       driver,
       host: formData.host || 'localhost',
@@ -241,7 +241,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
     }
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
     if (!formData.name) {
       toast.error('Name is required');
       return;
@@ -263,31 +263,32 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
       return;
     }
 
-    // onSave is fire-and-forget (void) and the modal unmounts right after,
-    // so flip the busy flag just before handing off — this disables the
-    // button against double-clicks until the dialog closes.
     setIsSaving(true);
-    onSave({
-      id: initialData?.id || Date.now().toString(),
-      name: formData.name,
-      driver: formData.driver as Driver,
-      host: formData.host,
-      port: formData.port || (formData.driver === 'PostgreSQL' ? '5432' : formData.driver === 'MongoDB' ? '27017' : '3306'),
-      user: formData.user,
-      password: formData.password,
-      database: formData.database,
-      sslMode: formData.sslMode as ConnectionProfile['sslMode'],
-      sshEnabled: !!formData.sshEnabled,
-      sshHost: formData.sshHost,
-      sshPort: formData.sshPort,
-      sshUser: formData.sshUser,
-      sshAuthKind: formData.sshAuthKind,
-      sshKeyPath: formData.sshKeyPath,
-      sshPassword: formData.sshPassword,
-      sshKeyPassphrase: formData.sshKeyPassphrase,
-      color: formData.color,
-      isFavorite: formData.isFavorite,
-    });
+    try {
+      await onSave({
+        id: String(formData.id || '').trim() || initialData?.id || Date.now().toString(),
+        name: formData.name,
+        driver: formData.driver as Driver,
+        host: formData.host,
+        port: formData.port || (formData.driver === 'PostgreSQL' ? '5432' : formData.driver === 'MongoDB' ? '27017' : '3306'),
+        user: formData.user,
+        password: formData.password,
+        database: formData.database,
+        sslMode: formData.sslMode as ConnectionProfile['sslMode'],
+        sshEnabled: !!formData.sshEnabled,
+        sshHost: formData.sshHost,
+        sshPort: formData.sshPort,
+        sshUser: formData.sshUser,
+        sshAuthKind: formData.sshAuthKind,
+        sshKeyPath: formData.sshKeyPath,
+        sshPassword: formData.sshPassword,
+        sshKeyPassphrase: formData.sshKeyPassphrase,
+        color: formData.color,
+        isFavorite: formData.isFavorite,
+      }, initialData?.id);
+    } catch {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -356,6 +357,19 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
               onChange={(e) => handleChange('name', e.target.value)}
               autoFocus
             />
+          </div>
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Connection ID</label>
+            <Input
+              className="w-full font-mono text-xs"
+              placeholder="Auto-generated if blank"
+              value={formData.id || ''}
+              onChange={(e) => handleChange('id', e.target.value)}
+            />
+            <div className="text-xs text-muted-foreground">
+              Used internally for saved tabs, pinned databases, and reconnect state.
+            </div>
           </div>
 
           {/* Connection fields rendered from the adapter manifest. The
@@ -512,12 +526,12 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
                       <label className="text-sm font-medium">Private Key Path</label>
                       <Input
                         className="w-full"
-                        placeholder="~/.ssh/id_ed25519 (leave blank for default)"
+                        placeholder="~/.ssh/id_rsa (leave blank for default)"
                         value={formData.sshKeyPath || ''}
                         onChange={(e) => handleChange('sshKeyPath', e.target.value)}
                       />
                       <div className="text-xs text-muted-foreground">
-                        If blank, falls back to ~/.ssh/id_ed25519, ~/.ssh/id_rsa, ~/.ssh/id_ecdsa (in that order).
+                        If blank, falls back to ~/.ssh/id_rsa, ~/.ssh/id_ed25519, ~/.ssh/id_ecdsa (in that order).
                       </div>
                     </div>
                     <div className="grid gap-2">

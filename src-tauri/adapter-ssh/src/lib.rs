@@ -9,10 +9,12 @@
 //! crate-private because the host wires `KnownHostsStore` through
 //! `adapter-api` already.
 
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::Duration;
+use std::time::Instant;
 
 use adapter_api::log_line;
 use adapter_api::ssh_hosts::KnownHostsStore;
@@ -26,6 +28,8 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{oneshot, Mutex};
 
 mod known_hosts;
+
+static SUCCESSFUL_KEYS: OnceLock<StdMutex<HashMap<String, PathBuf>>> = OnceLock::new();
 
 /// Inputs for opening a tunnel. Everything the command layer can
 /// extract from a `ConnectionProfile` once plaintext secrets have been
@@ -70,6 +74,7 @@ impl Tunnel {
         cfg: SshConfig,
         known_hosts_store: &dyn KnownHostsStore,
     ) -> Result<Self, AdapterError> {
+        let t_total = Instant::now();
         log_line!(
             "ssh_tunnel",
             "→ opening tunnel ssh={}:{} user={} remote={}:{} auth={:?}",
@@ -97,27 +102,50 @@ impl Tunnel {
             ..Default::default()
         });
 
+        let key_cache_id = key_cache_key(&cfg);
         let (fp_tx, fp_rx) = oneshot::channel::<String>();
         let handler = TunnelHandler {
             fingerprint_tx: Mutex::new(Some(fp_tx)),
         };
 
+        let t_resolve = Instant::now();
         let addr: SocketAddr = (cfg.ssh_host.as_str(), cfg.ssh_port)
             .to_socket_addrs_first()
             .map_err(|e| AdapterError::SshTunnel(format!("resolve {}: {}", cfg.ssh_host, e)))?;
+        log_line!(
+            "ssh_tunnel",
+            "  resolved {}:{} → {} ({:.1}ms)",
+            cfg.ssh_host,
+            cfg.ssh_port,
+            addr,
+            t_resolve.elapsed().as_secs_f64() * 1000.0
+        );
 
+        let t_connect = Instant::now();
         let mut session = client::connect(ssh_config, addr, handler)
             .await
             .map_err(|e| {
                 AdapterError::SshTunnel(format!("connect {}:{}: {}", cfg.ssh_host, cfg.ssh_port, e))
             })?;
+        log_line!(
+            "ssh_tunnel",
+            "  tcp+ssh handshake completed ({:.1}ms)",
+            t_connect.elapsed().as_secs_f64() * 1000.0
+        );
 
+        let t_known_hosts = Instant::now();
         let fingerprint = fp_rx
             .await
             .map_err(|_| AdapterError::SshTunnel("server did not present a host key".into()))?;
         known_hosts::verify_or_trust(known_hosts_store, &cfg.ssh_host, cfg.ssh_port, &fingerprint)?;
+        log_line!(
+            "ssh_tunnel",
+            "  host key verified ({:.1}ms)",
+            t_known_hosts.elapsed().as_secs_f64() * 1000.0
+        );
 
         let auth_kind = cfg.auth_kind.as_deref().unwrap_or("key");
+        let t_auth = Instant::now();
         let auth_ok = match auth_kind {
             "password" => {
                 let pw = cfg.password.clone().ok_or_else(|| {
@@ -132,7 +160,7 @@ impl Tunnel {
                     .success()
             }
             _ => {
-                let candidates = resolve_key_candidates(cfg.key_path.as_deref())?;
+                let candidates = resolve_key_candidates(cfg.key_path.as_deref(), &key_cache_id)?;
                 let hash_alg = session
                     .best_supported_rsa_hash()
                     .await
@@ -166,7 +194,13 @@ impl Tunnel {
                             AdapterError::SshTunnel(format!("key auth ({:?}): {e}", key_path))
                         })?;
                     if auth.success() {
-                        log_line!("ssh_tunnel", "  authenticated with {:?}", key_path);
+                        remember_successful_key(&key_cache_id, key_path.clone());
+                        log_line!(
+                            "ssh_tunnel",
+                            "  authenticated with {:?} ({:.1}ms)",
+                            key_path,
+                            t_auth.elapsed().as_secs_f64() * 1000.0
+                        );
                         success = true;
                         break;
                     }
@@ -187,6 +221,13 @@ impl Tunnel {
                 success
             }
         };
+        if auth_kind == "password" && auth_ok {
+            log_line!(
+                "ssh_tunnel",
+                "  password authenticated ({:.1}ms)",
+                t_auth.elapsed().as_secs_f64() * 1000.0
+            );
+        }
         if !auth_ok {
             return Err(AdapterError::Authentication(format!(
                 "SSH authentication failed for {}@{}",
@@ -203,9 +244,10 @@ impl Tunnel {
             .port();
         log_line!(
             "ssh_tunnel",
-            "  listener on 127.0.0.1:{local_port} → {}:{}",
+            "  listener on 127.0.0.1:{local_port} → {}:{} ({:.1}ms total)",
             cfg.remote_host,
-            cfg.remote_port
+            cfg.remote_port,
+            t_total.elapsed().as_secs_f64() * 1000.0
         );
 
         let session = Arc::new(Mutex::new(Some(session)));
@@ -353,17 +395,39 @@ impl Handler for TunnelHandler {
     }
 }
 
-fn resolve_key_candidates(explicit: Option<&str>) -> Result<Vec<PathBuf>, AdapterError> {
+fn key_cache_key(cfg: &SshConfig) -> String {
+    format!("{}:{}:{}", cfg.ssh_host, cfg.ssh_port, cfg.ssh_user)
+}
+
+fn remember_successful_key(cache_id: &str, path: PathBuf) {
+    let map = SUCCESSFUL_KEYS.get_or_init(|| StdMutex::new(HashMap::new()));
+    if let Ok(mut guard) = map.lock() {
+        guard.insert(cache_id.to_string(), path);
+    }
+}
+
+fn cached_successful_key(cache_id: &str) -> Option<PathBuf> {
+    let map = SUCCESSFUL_KEYS.get_or_init(|| StdMutex::new(HashMap::new()));
+    map.lock().ok().and_then(|guard| guard.get(cache_id).cloned())
+}
+
+fn resolve_key_candidates(explicit: Option<&str>, cache_id: &str) -> Result<Vec<PathBuf>, AdapterError> {
     if let Some(p) = explicit.filter(|s| !s.trim().is_empty()) {
         return Ok(vec![PathBuf::from(p)]);
     }
     let home = dirs::home_dir()
         .ok_or_else(|| AdapterError::SshTunnel("cannot determine home directory".into()))?;
     let mut out = Vec::new();
-    for name in ["id_ed25519", "id_ecdsa", "id_rsa"] {
+    for name in ["id_rsa", "id_ed25519", "id_ecdsa"] {
         let path = home.join(".ssh").join(name);
         if path.exists() {
             out.push(path);
+        }
+    }
+    if let Some(cached) = cached_successful_key(cache_id) {
+        if let Some(pos) = out.iter().position(|p| p == &cached) {
+            out.remove(pos);
+            out.insert(0, cached);
         }
     }
     Ok(out)

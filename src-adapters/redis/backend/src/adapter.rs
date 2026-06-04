@@ -52,6 +52,10 @@ impl Adapter for RedisAdapter {
         self.driver.list_schemas().await
     }
 
+    async fn list_databases(&self) -> Result<Vec<String>, AdapterError> {
+        self.driver.list_databases().await
+    }
+
     async fn describe_table(
         &self,
         schema: &str,

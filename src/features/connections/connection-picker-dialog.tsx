@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, Plus } from 'lucide-react';
+import { MoreVertical, Pencil, Plug, Plus, Search, Trash2 } from 'lucide-react';
 import { Dialog, DialogContent } from '../../components/ui/dialog';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { ConnectionProfile } from '../../types';
 import DbIcon from '../../components/db-icon';
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '../../components/ui/dropdown-menu';
 
 export interface ConnectionPickerDialogProps {
   open: boolean;
@@ -12,6 +13,10 @@ export interface ConnectionPickerDialogProps {
   connections: ConnectionProfile[];
   /** Called with the chosen connection id. Caller handles connect + focus. */
   onPick: (connectionId: string) => void;
+  /** Three-dot menu → edit the saved profile. */
+  onEditConnection?: (connection: ConnectionProfile) => void;
+  /** Three-dot menu → delete the saved profile. */
+  onDeleteConnection?: (connection: ConnectionProfile) => void;
   /** "Create new…" footer action. */
   onCreateNew: () => void;
 }
@@ -25,6 +30,8 @@ export default function ConnectionPickerDialog({
   onOpenChange,
   connections,
   onPick,
+  onEditConnection,
+  onDeleteConnection,
   onCreateNew,
 }: ConnectionPickerDialogProps) {
   const [query, setQuery] = useState('');
@@ -58,6 +65,18 @@ export default function ConnectionPickerDialog({
     if (!id) return;
     onPick(id);
     onOpenChange(false);
+  };
+
+  const editConnection = (connection: ConnectionProfile) => {
+    onOpenChange(false);
+    onEditConnection?.(connection);
+  };
+
+  const deleteConnection = (connection: ConnectionProfile) => {
+    if (!onDeleteConnection) return;
+    if (!window.confirm(`Are you sure you want to delete '${connection.name}'?`)) return;
+    onOpenChange(false);
+    onDeleteConnection(connection);
   };
 
   const handleKey = (e: React.KeyboardEvent) => {
@@ -116,40 +135,69 @@ export default function ConnectionPickerDialog({
           {filtered.map(c => {
             const isActive = c.id === highlight;
             return (
-              <button
+              <div
                 key={c.id}
                 data-id={c.id}
-                className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 transition-colors ${
+                className={`group/row w-full px-2 py-1.5 text-sm flex items-center gap-1 transition-colors ${
                   isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted/40'
                 }`}
                 onMouseEnter={() => setHighlight(c.id)}
-                onClick={() => confirm(c.id)}
-                onDoubleClick={() => confirm(c.id)}
               >
-                <span
-                  className="w-6 h-6 rounded-md bg-background/60 flex items-center justify-center shrink-0"
-                  style={c.color ? { color: c.color } : undefined}
+                <button
+                  type="button"
+                  className="min-w-0 flex-1 text-left flex items-center gap-2.5 rounded px-1 py-0.5"
+                  onClick={() => confirm(c.id)}
+                  onDoubleClick={() => confirm(c.id)}
                 >
-                  {driverIcon(c.driver)}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate leading-tight">{c.name}</span>
-                  <span className="block text-[10.5px] text-muted-foreground truncate leading-tight">
-                    {c.driver} · {c.host}
-                  </span>
-                </span>
-                {/* SSH-tunnel marker — signals this profile connects through a
-                    jump host, which is why it may take longer to open. Colored
-                    badge to match the rail's SSH marker. */}
-                {c.sshEnabled && (
                   <span
-                    className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-primary text-primary-foreground"
-                    title={c.sshHost ? `SSH tunnel via ${c.sshHost}` : 'SSH tunnel'}
+                    className="w-6 h-6 rounded-md bg-background/60 flex items-center justify-center shrink-0"
+                    style={c.color ? { color: c.color } : undefined}
                   >
-                    SSH
+                    {driverIcon(c.driver)}
                   </span>
-                )}
-              </button>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate leading-tight">{c.name}</span>
+                    <span className="block text-[10.5px] text-muted-foreground truncate leading-tight">
+                      {c.driver} · {c.host}
+                    </span>
+                  </span>
+                  {/* SSH-tunnel marker — signals this profile connects through a
+                      jump host, which is why it may take longer to open. Colored
+                      badge to match the rail's SSH marker. */}
+                  {c.sshEnabled && (
+                    <span
+                      className="shrink-0 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-semibold tracking-wide bg-primary text-primary-foreground"
+                      title={c.sshHost ? `SSH tunnel via ${c.sshHost}` : 'SSH tunnel'}
+                    >
+                      SSH
+                    </span>
+                  )}
+                </button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    className="h-7 w-7 shrink-0 opacity-0 group-hover/row:opacity-100 data-[state=open]:opacity-100 inline-flex items-center justify-center rounded-md hover:bg-muted"
+                    onClick={(e) => e.stopPropagation()}
+                    aria-label={`Connection actions for ${c.name}`}
+                  >
+                    <MoreVertical className="w-3.5 h-3.5" />
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="min-w-52">
+                    <DropdownMenuItem className="whitespace-nowrap" onClick={() => editConnection(c)} disabled={!onEditConnection}>
+                      <Pencil className="w-3.5 h-3.5 mr-2" /> Edit connection
+                    </DropdownMenuItem>
+                    <DropdownMenuItem className="whitespace-nowrap" onClick={() => confirm(c.id)}>
+                      <Plug className="w-3.5 h-3.5 mr-2" /> Connect now
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="text-destructive focus:text-destructive whitespace-nowrap"
+                      onClick={() => deleteConnection(c)}
+                      disabled={!onDeleteConnection}
+                    >
+                      <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             );
           })}
         </div>
