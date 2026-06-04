@@ -10,7 +10,7 @@ import { hydrateCredentials } from './lib/ai-credentials';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
 import { isDbError } from './lib/db';
 import { connectAndLoad, disconnect as disconnectDb, markConnectionLost, useConnections } from './state/connections';
-import { getRailSnapshot, refreshRail, useRail } from './state/rail';
+import { getRailSnapshot, refreshRail, unpinManyTiles, useRail } from './state/rail';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
 import SecurityGate from './features/security/security-gate';
@@ -341,6 +341,9 @@ function UnlockedApp() {
     try {
       await connectionsStore.remove(id);
       setActiveConnectionIds(prev => prev.filter(cId => cId !== id));
+      // Remove any rail tiles that were pinned for this connection.
+      const staleTiles = getRailSnapshot().filter(t => t.serverId === id).map(t => t.id);
+      if (staleTiles.length > 0) await unpinManyTiles(staleTiles);
       await reload();
     } catch (e) {
       toast.error(`Failed to delete connection: ${String(e)}`);
@@ -348,9 +351,9 @@ function UnlockedApp() {
   };
 
   const activeConnections = connections.filter(c => activeConnectionIds.includes(c.id) || connState.activeById.has(c.id));
-  // Home rule: when there are no active connections and no pinned tiles,
-  // return to the welcome screen even if saved profiles still exist.
-  const showWorkspace = activeConnectionIds.length > 0 || connState.activeById.size > 0 || rail.tiles.length > 0;
+  // Home rule: no saved connections → always welcome screen.
+  // Otherwise show workspace if there are active connections or pinned tiles.
+  const showWorkspace = connections.length > 0 && (activeConnectionIds.length > 0 || connState.activeById.size > 0 || rail.tiles.length > 0);
 
   // Push to the debug store as a side effect — calling setState during render
   // schedules a re-render of DevDebug mid-commit, which React warns about.

@@ -284,6 +284,26 @@ export default function WorkspaceView({
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
   const [editingConnection, setEditingConnection] =
     useState<ConnectionProfile | null>(null);
+  const returnToConnectionManagerAfterEdit = useRef(false);
+  const connectionsRef = useRef<ConnectionProfile[]>(connections);
+  useEffect(() => {
+    connectionsRef.current = connections;
+  }, [connections]);
+  const openEditConnection = (
+    connection: ConnectionProfile,
+    returnToManager = false,
+  ) => {
+    returnToConnectionManagerAfterEdit.current = returnToManager;
+    setEditingConnection(connection);
+  };
+  const closeEditConnection = () => {
+    setEditingConnection(null);
+    if (!returnToConnectionManagerAfterEdit.current) return;
+    returnToConnectionManagerAfterEdit.current = false;
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("tablerelay:menu-connection-picker"));
+    }, 0);
+  };
   // Connection id the Import SQL dialog is bound to. `null` = dialog closed.
   const [importSqlForId, setImportSqlForId] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -389,10 +409,6 @@ export default function WorkspaceView({
     const unlistenConnectionPicker = listen<void>(
       "menu-connection-picker",
       () => {
-        // Trigger the sidebar's connection picker logic which lives in WorkspaceView
-        // but wait, is it in Sidebar or WorkspaceView? The connection picker is managed
-        // via `connPickerOpen` in Sidebar, but we need it here, or we can just trigger an event!
-        // Wait, there's no setConnPickerOpen here in WorkspaceView.
         window.dispatchEvent(
           new CustomEvent("tablerelay:menu-connection-picker"),
         );
@@ -401,12 +417,40 @@ export default function WorkspaceView({
     const unlistenConnectionNew = listen<void>("menu-connection-new", () => {
       setNewConnectionOpen(true);
     });
+    const unlistenConnectionEditCurrent = listen<void>(
+      "menu-connection-edit_current",
+      () => {
+        const id = menuCtxRef.current.focusedConnectionId;
+        if (!id) {
+          toast.error("Open a connection before editing it");
+          return;
+        }
+        const conn = connectionsRef.current.find((c) => c.id === id);
+        if (!conn) {
+          toast.error("Current connection is not in the saved list");
+          return;
+        }
+        openEditConnection(conn);
+      },
+    );
+    const unlistenConnectionOpenDatabase = listen<void>(
+      "menu-connection-open_database",
+      () => {
+        if (!menuCtxRef.current.focusedConnectionId) {
+          toast.error("Open a connection before choosing a database");
+          return;
+        }
+        window.dispatchEvent(new CustomEvent("tablerelay:menu-open-database"));
+      },
+    );
 
     return () => {
       void unlistenImport.then((fn) => fn());
       void unlistenExport.then((fn) => fn());
       void unlistenConnectionPicker.then((fn) => fn());
       void unlistenConnectionNew.then((fn) => fn());
+      void unlistenConnectionEditCurrent.then((fn) => fn());
+      void unlistenConnectionOpenDatabase.then((fn) => fn());
     };
   }, []);
   const railWidth = railExpanded ? RAIL_EXPANDED_WIDTH : RAIL_COLLAPSED_WIDTH;
@@ -648,18 +692,25 @@ export default function WorkspaceView({
   };
 
   const handlePickConnection = (connectionId: string) => {
-    // Focus the connection FIRST, synchronously, so the workspace switches to
-    // it the instant the user picks — no waiting on the (possibly slow, SSH)
-    // connect. The sidebar reads `connectingIds` and renders its "Connecting…"
-    // skeleton while the background connect runs, so the UI is responsive
-    // immediately instead of feeling laggy. Leave the tile slot empty so the
-    // sidebar prompts for a database once schemas land.
-    setFocusedTileId(null);
-    setFocusedConnectionId(connectionId);
+    // Pin a placeholder tile immediately so the connection appears in the rail
+    // the instant the user clicks — no waiting on the (possibly slow, SSH)
+    // connect. databaseName "" marks it as pending; handlePinDatabase replaces
+    // it once the user picks a real database.
+    void (async () => {
+      try {
+        const placeholder = await pinTile({ serverId: connectionId, databaseName: '' });
+        setFocusedTileId(placeholder.id);
+        setFocusedConnectionId(connectionId);
+      } catch {
+        // Pin failed — fall back to connectionId-only focus so the sidebar
+        // still shows the "Connecting…" skeleton.
+        setFocusedTileId(null);
+        setFocusedConnectionId(connectionId);
+      }
+    })();
 
     // Connect in the background. `connectAndLoad` flips `connectingIds` (drives
-    // the skeleton) and marks the connection active when ready; we only need to
-    // surface failures and run the post-connect `onConnect` side effects.
+    // the skeleton) and marks the connection active when ready.
     if (!connState.activeById.has(connectionId)) {
       void (async () => {
         try {
@@ -670,18 +721,19 @@ export default function WorkspaceView({
         }
       })();
     } else {
-      // Already active — revalidate in case the socket died while idle, so an
-      // idle-then-reopened connection reloads automatically instead of hanging
-      // until ⌘+R. `refreshSchemas` → `db_list_schemas` → `with_retry`, which
-      // rebuilds a dead socket transparently. Silent: keep the cached tree on
-      // screen and revalidate in the background (stale-while-revalidate), so
-      // switching back never blanks to a skeleton. See `handleFocusTile`.
       void refreshSchemas(connectionId, { silent: true });
     }
   };
 
   const handlePinDatabase = async (serverId: string, databaseName: string) => {
     try {
+      // Remove any placeholder tile (databaseName === '') for this server
+      // before pinning the real one so we don't leave a ghost in the rail.
+      const placeholders = railState.tiles
+        .filter((t) => t.serverId === serverId && t.databaseName === '')
+        .map((t) => t.id);
+      if (placeholders.length > 0) await unpinManyTiles(placeholders);
+
       const tile = await pinTile({ serverId, databaseName });
       setFocusedTileId(tile.id);
     } catch (err) {
@@ -1340,7 +1392,7 @@ export default function WorkspaceView({
       if (replacementFocusedTileId) setFocusedTileId(replacementFocusedTileId);
       await refreshRail();
     }
-    setEditingConnection(null);
+    closeEditConnection();
   };
 
   const _activeTab = visibleTabs.find((t) => t.id === activeTabId);
@@ -1384,7 +1436,7 @@ export default function WorkspaceView({
         }}
         onEditServer={(id) => {
           const conn = connections.find((c) => c.id === id);
-          if (conn) setEditingConnection(conn);
+          if (conn) openEditConnection(conn);
         }}
         onImportSql={(id) => setImportSqlForId(id)}
         connectedServerIds={new Set(connState.activeById.keys())}
@@ -1401,7 +1453,7 @@ export default function WorkspaceView({
         onNewQuery={handleNewQuery}
         onOpenErd={handleOpenErd}
         onPickConnection={handlePickConnection}
-        onEditConnection={(conn) => setEditingConnection(conn)}
+        onEditConnection={(conn) => openEditConnection(conn, true)}
         onDeleteConnection={onDeleteConnection}
         onOpenNewServer={() => setNewConnectionOpen(true)}
         onPinDatabase={handlePinDatabase}
@@ -1534,7 +1586,7 @@ export default function WorkspaceView({
 
       <ConnectionModal
         isOpen={editingConnection !== null}
-        onClose={() => setEditingConnection(null)}
+        onClose={closeEditConnection}
         onSave={handleSaveEditedConnection}
         initialData={editingConnection ?? undefined}
       />

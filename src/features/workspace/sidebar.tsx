@@ -35,7 +35,8 @@ import {
   DropdownMenuTrigger,
 } from "../../components/ui/dropdown-menu";
 import DatabasePickerDialog from "../connections/database-picker-dialog";
-import ConnectionPickerDialog from "../connections/connection-picker-dialog";
+import ConnectionManagerDialog from "../connections/connection-manager-dialog";
+import ConnectPickerDialog from "../connections/connect-picker-dialog";
 import { ProcessListPanel } from "../process-list/process-list-panel";
 import { ConnectionProfile } from "../../types";
 import {
@@ -181,7 +182,8 @@ export default function Sidebar({
 }: SidebarProps) {
   const [filter, setFilter] = useState("");
   const [dbPickerOpen, setDbPickerOpen] = useState(false);
-  const [connPickerOpen, setConnPickerOpen] = useState(false);
+  const [connManagerOpen, setConnManagerOpen] = useState(false);
+  const [connectPickerOpen, setConnectPickerOpen] = useState(false);
 
   // Per-database asynchronous extras (views + routines). Tables come from
   // listSchemas; views/routines are lazily fetched on database switch.
@@ -383,18 +385,23 @@ export default function Sidebar({
         .catch((err) => console.warn("reload views/routines failed", err))
         .finally(() => setLoadingExtras(false));
     };
-    const onOpenConnectionPicker = () => setConnPickerOpen(true);
+    const onOpenConnectionPicker = () => setConnManagerOpen(true);
+    const onOpenDatabase = () => {
+      if (conn) setDbPickerOpen(true);
+    };
     window.addEventListener("tablerelay:reload", onReload);
     window.addEventListener(
       "tablerelay:menu-connection-picker",
       onOpenConnectionPicker,
     );
+    window.addEventListener("tablerelay:menu-open-database", onOpenDatabase);
     return () => {
       window.removeEventListener("tablerelay:reload", onReload);
       window.removeEventListener(
         "tablerelay:menu-connection-picker",
         onOpenConnectionPicker,
       );
+      window.removeEventListener("tablerelay:menu-open-database", onOpenDatabase);
     };
   }, [conn, selectedDb]);
 
@@ -837,7 +844,7 @@ export default function Sidebar({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setConnPickerOpen(true)}
+            onClick={() => setConnectPickerOpen(true)}
           >
             <Plus className="w-3.5 h-3.5 mr-1.5" /> Open connection
           </Button>
@@ -846,14 +853,13 @@ export default function Sidebar({
             <Plus className="w-3.5 h-3.5 mr-1.5" /> New server
           </Button>
         )}
-        <ConnectionPickerDialog
-          open={connPickerOpen}
-          onOpenChange={setConnPickerOpen}
+        <ConnectPickerDialog
+          open={connectPickerOpen}
+          onOpenChange={setConnectPickerOpen}
           connections={connections}
-          onPick={onPickConnection}
+          onConnect={onPickConnection}
           onEditConnection={onEditConnection}
-          onDeleteConnection={(connection) => onDeleteConnection(connection.id)}
-          onCreateNew={onOpenNewServer}
+          onDeleteConnection={onDeleteConnection}
         />
       </div>
     );
@@ -874,7 +880,7 @@ export default function Sidebar({
           className="h-7 w-7"
           title="Open connection"
           aria-label="Open connection"
-          onClick={() => setConnPickerOpen(true)}
+          onClick={() => setConnectPickerOpen(true)}
         >
           <Server className="w-4 h-4" />
         </Button>
@@ -978,13 +984,22 @@ export default function Sidebar({
         }}
       />
 
-      <ConnectionPickerDialog
-        open={connPickerOpen}
-        onOpenChange={setConnPickerOpen}
+      <ConnectPickerDialog
+        open={connectPickerOpen}
+        onOpenChange={setConnectPickerOpen}
         connections={connections}
-        onPick={onPickConnection}
+        onConnect={onPickConnection}
         onEditConnection={onEditConnection}
-        onDeleteConnection={(connection) => onDeleteConnection(connection.id)}
+        onDeleteConnection={onDeleteConnection}
+      />
+
+      <ConnectionManagerDialog
+        open={connManagerOpen}
+        onOpenChange={setConnManagerOpen}
+        connections={connections}
+        onConnect={onPickConnection}
+        onEditConnection={onEditConnection}
+        onDeleteConnection={onDeleteConnection}
         onCreateNew={onOpenNewServer}
       />
 

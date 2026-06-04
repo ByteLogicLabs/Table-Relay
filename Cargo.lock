@@ -6202,7 +6202,6 @@ dependencies = [
  "adapter-sqlite",
  "aes 0.8.4",
  "aes-gcm 0.10.3",
- "argon2",
  "async-stream",
  "async-trait",
  "bytes",

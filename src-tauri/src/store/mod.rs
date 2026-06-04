@@ -1,9 +1,8 @@
-//! Encrypted SQLite-backed app store.
+//! AES-GCM encrypted SQLite-backed app store.
 //!
-//! The database runs in memory while the app is unlocked. At rest we persist
-//! an AES-GCM encrypted serialized SQLite snapshot at `store.db.enc`.
-//! Existing plaintext `store.db` files are migrated after the user creates an
-//! app password.
+//! The database runs in memory while open. At rest we persist an AES-GCM
+//! encrypted serialized SQLite snapshot at `store.db.enc`. The key is
+//! compiled into the binary — no password prompt, works on any OS.
 
 pub mod repo;
 pub mod repo_app_state;
@@ -17,165 +16,118 @@ use std::sync::Mutex;
 
 use aes_gcm::aead::{Aead, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
-use argon2::Argon2;
 use rand::RngCore;
 use rusqlite::serialize::OwnedData;
 use rusqlite::Connection;
 use rusqlite::DatabaseName;
 use serde::Serialize;
-use zeroize::Zeroizing;
+
+// APP_TOKEN is a 64-char hex string set in `.env` and baked in at compile
+// time via build.rs. Decoded once to a 32-byte key at runtime.
+fn app_key() -> [u8; 32] {
+    let hex = env!("APP_TOKEN");
+    let mut key = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate().take(32) {
+        let hi = hex_nibble(chunk[0]);
+        let lo = hex_nibble(chunk[1]);
+        key[i] = (hi << 4) | lo;
+    }
+    key
+}
+
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        b'A'..=b'F' => b - b'A' + 10,
+        _ => 0,
+    }
+}
+
+const MAGIC: &[u8; 8] = b"TRDBE02\n";
+const NONCE_LEN: usize = 12;
 
 pub struct Store {
-    inner: Mutex<StoreInner>,
+    inner: Mutex<Option<Connection>>,
     encrypted_path: PathBuf,
     plaintext_path: PathBuf,
     plaintext_backup_path: PathBuf,
-}
-
-struct StoreInner {
-    db: Option<Connection>,
-    key: Option<Zeroizing<[u8; 32]>>,
-    salt: Option<[u8; SALT_LEN]>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SecurityStatus {
     pub state: SecurityState,
-    pub encrypted_store_exists: bool,
-    pub plaintext_store_exists: bool,
-    pub plaintext_backup_exists: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub enum SecurityState {
-    Uninitialized,
-    NeedsMigration,
-    Locked,
     Unlocked,
 }
 
-const MAGIC: &[u8; 8] = b"TRDBE01\n";
-const SALT_LEN: usize = 16;
-const NONCE_LEN: usize = 12;
-const KEY_LEN: usize = 32;
-
 impl Store {
+    /// Open (or create) the store. Automatically unlocks using the app key.
     pub fn open(app_data_dir: PathBuf) -> Result<Self, StoreError> {
         std::fs::create_dir_all(&app_data_dir).map_err(StoreError::Io)?;
         let encrypted_path = app_data_dir.join("store.db.enc");
         let plaintext_path = app_data_dir.join("store.db");
         let plaintext_backup_path = app_data_dir.join("store.db.plain.backup");
-        Ok(Self {
-            inner: Mutex::new(StoreInner {
-                db: None,
-                key: None,
-                salt: None,
-            }),
+
+        let store = Self {
+            inner: Mutex::new(None),
             encrypted_path,
             plaintext_path,
             plaintext_backup_path,
-        })
+        };
+        store.auto_unlock()?;
+        Ok(store)
+    }
+
+    fn auto_unlock(&self) -> Result<(), StoreError> {
+        let conn = if self.encrypted_path.exists() {
+            // Decrypt existing store.
+            let bytes = std::fs::read(&self.encrypted_path).map_err(StoreError::Io)?;
+            let plaintext = decrypt_store(&bytes)?;
+            let mut conn = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
+            deserialize_conn(&mut conn, plaintext)?;
+            schema::migrate(&mut conn)?;
+            conn
+        } else if self.plaintext_path.exists() {
+            // One-time migration from legacy plaintext store.
+            let mut conn = Connection::open(&self.plaintext_path).map_err(StoreError::Sqlite)?;
+            schema::migrate(&mut conn)?;
+            let bytes = serialize_conn(&conn)?;
+            let mut mem = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
+            deserialize_conn(&mut mem, bytes)?;
+            schema::migrate(&mut mem)?;
+            // Persist encrypted immediately.
+            let snapshot = serialize_conn(&mem)?;
+            write_encrypted(&self.encrypted_path, &snapshot)?;
+            // Move plaintext aside as backup.
+            if !self.plaintext_backup_path.exists() {
+                let _ = std::fs::rename(&self.plaintext_path, &self.plaintext_backup_path);
+            } else {
+                let _ = std::fs::remove_file(&self.plaintext_path);
+            }
+            mem
+        } else {
+            // Fresh install — create empty schema.
+            let mut conn = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
+            schema::migrate(&mut conn)?;
+            let snapshot = serialize_conn(&conn)?;
+            write_encrypted(&self.encrypted_path, &snapshot)?;
+            conn
+        };
+
+        *self.inner.lock().map_err(|_| StoreError::Locked)? = Some(conn);
+        Ok(())
     }
 
     pub fn status(&self) -> SecurityStatus {
-        let unlocked = self.inner.lock().map(|g| g.db.is_some()).unwrap_or(false);
-        let encrypted_store_exists = self.encrypted_path.exists();
-        let plaintext_store_exists = self.plaintext_path.exists();
-        let plaintext_backup_exists = self.plaintext_backup_path.exists();
-        let state = if unlocked {
-            SecurityState::Unlocked
-        } else if encrypted_store_exists {
-            SecurityState::Locked
-        } else if plaintext_store_exists {
-            SecurityState::NeedsMigration
-        } else {
-            SecurityState::Uninitialized
-        };
-        SecurityStatus {
-            state,
-            encrypted_store_exists,
-            plaintext_store_exists,
-            plaintext_backup_exists,
-        }
+        SecurityStatus { state: SecurityState::Unlocked }
     }
 
-    pub fn initialize(&self, password: &str) -> Result<SecurityStatus, StoreError> {
-        if password.is_empty() {
-            return Err(StoreError::Crypto("password cannot be empty".into()));
-        }
-        if self.encrypted_path.exists() {
-            return Err(StoreError::Crypto("encrypted store already exists".into()));
-        }
-
-        let mut salt = [0u8; SALT_LEN];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        let key = derive_key(password, &salt)?;
-
-        let mut conn = if self.plaintext_path.exists() {
-            let mut plain = Connection::open(&self.plaintext_path).map_err(StoreError::Sqlite)?;
-            schema::migrate(&mut plain)?;
-            let bytes = serialize_conn(&plain)?;
-            let mut mem = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
-            deserialize_conn(&mut mem, bytes)?;
-            mem
-        } else {
-            let mut mem = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
-            schema::migrate(&mut mem)?;
-            mem
-        };
-        schema::migrate(&mut conn)?;
-
-        let snapshot = serialize_conn(&conn)?;
-        write_encrypted(&self.encrypted_path, &snapshot, &key, salt)?;
-        if self.plaintext_path.exists() {
-            if self.plaintext_backup_path.exists() {
-                std::fs::remove_file(&self.plaintext_backup_path).map_err(StoreError::Io)?;
-            }
-            std::fs::rename(&self.plaintext_path, &self.plaintext_backup_path)
-                .map_err(StoreError::Io)?;
-        }
-
-        let mut inner = self.inner.lock().map_err(|_| StoreError::Locked)?;
-        inner.db = Some(conn);
-        inner.key = Some(Zeroizing::new(key));
-        inner.salt = Some(salt);
-        drop(inner);
-        Ok(self.status())
-    }
-
-    pub fn unlock(&self, password: &str) -> Result<SecurityStatus, StoreError> {
-        if password.is_empty() {
-            return Err(StoreError::Crypto("password cannot be empty".into()));
-        }
-        let encrypted = std::fs::read(&self.encrypted_path).map_err(StoreError::Io)?;
-        let (salt, plaintext) = decrypt_store(&encrypted, password)?;
-        let mut conn = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
-        deserialize_conn(&mut conn, plaintext)?;
-        schema::migrate(&mut conn)?;
-
-        let key = derive_key(password, &salt)?;
-        let mut inner = self.inner.lock().map_err(|_| StoreError::Locked)?;
-        inner.db = Some(conn);
-        inner.key = Some(Zeroizing::new(key));
-        inner.salt = Some(salt);
-        drop(inner);
-        Ok(self.status())
-    }
-
-    pub fn lock(&self) -> Result<SecurityStatus, StoreError> {
-        let mut inner = self.inner.lock().map_err(|_| StoreError::Locked)?;
-        inner.db = None;
-        inner.key = None;
-        inner.salt = None;
-        drop(inner);
-        Ok(self.status())
-    }
-
-    /// Delete the plaintext migration backup (`store.db.plain.backup`) once the
-    /// user has confirmed the encrypted store opens correctly. No-op if it's
-    /// already gone. Returns the refreshed status.
     pub fn remove_plaintext_backup(&self) -> Result<SecurityStatus, StoreError> {
         if self.plaintext_backup_path.exists() {
             std::fs::remove_file(&self.plaintext_backup_path).map_err(StoreError::Io)?;
@@ -188,23 +140,17 @@ impl Store {
         persist_after: bool,
         f: impl FnOnce(&mut Connection) -> Result<R, StoreError>,
     ) -> Result<R, StoreError> {
-        let mut inner = self.inner.lock().map_err(|_| StoreError::Locked)?;
+        let mut guard = self.inner.lock().map_err(|_| StoreError::Locked)?;
         let result = {
-            let conn = inner.db.as_mut().ok_or(StoreError::Locked)?;
+            let conn = guard.as_mut().ok_or(StoreError::Locked)?;
             f(conn)?
         };
         if persist_after {
-            self.persist_locked(&inner)?;
+            let conn = guard.as_ref().ok_or(StoreError::Locked)?;
+            let snapshot = serialize_conn(conn)?;
+            write_encrypted(&self.encrypted_path, &snapshot)?;
         }
         Ok(result)
-    }
-
-    fn persist_locked(&self, inner: &StoreInner) -> Result<(), StoreError> {
-        let conn = inner.db.as_ref().ok_or(StoreError::Locked)?;
-        let key = inner.key.as_ref().ok_or(StoreError::Locked)?;
-        let salt = inner.salt.ok_or(StoreError::Locked)?;
-        let snapshot = serialize_conn(conn)?;
-        write_encrypted(&self.encrypted_path, &snapshot, key, salt)
     }
 }
 
@@ -230,55 +176,37 @@ fn deserialize_conn(conn: &mut Connection, bytes: Vec<u8>) -> Result<(), StoreEr
     Ok(())
 }
 
-fn derive_key(password: &str, salt: &[u8; SALT_LEN]) -> Result<[u8; KEY_LEN], StoreError> {
-    let mut key = [0u8; KEY_LEN];
-    Argon2::default()
-        .hash_password_into(password.as_bytes(), salt, &mut key)
-        .map_err(|e| StoreError::Crypto(format!("key derivation failed: {e}")))?;
-    Ok(key)
-}
-
-fn write_encrypted(
-    path: &PathBuf,
-    plaintext: &[u8],
-    key: &[u8; KEY_LEN],
-    salt: [u8; SALT_LEN],
-) -> Result<(), StoreError> {
+fn write_encrypted(path: &PathBuf, plaintext: &[u8]) -> Result<(), StoreError> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(StoreError::Io)?;
     }
-    let cipher = Aes256Gcm::new_from_slice(key)
-        .map_err(|e| StoreError::Crypto(format!("cipher init failed: {e}")))?;
+    let key = app_key();
+    let cipher = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| StoreError::Crypto(format!("cipher init: {e}")))?;
     let mut nonce = [0u8; NONCE_LEN];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let ciphertext = cipher
         .encrypt(Nonce::from_slice(&nonce), plaintext)
-        .map_err(|e| StoreError::Crypto(format!("encrypt failed: {e}")))?;
-    let mut out = Vec::with_capacity(MAGIC.len() + SALT_LEN + NONCE_LEN + ciphertext.len());
+        .map_err(|e| StoreError::Crypto(format!("encrypt: {e}")))?;
+    let mut out = Vec::with_capacity(MAGIC.len() + NONCE_LEN + ciphertext.len());
     out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&salt);
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);
     std::fs::write(path, out).map_err(StoreError::Io)
 }
 
-fn decrypt_store(bytes: &[u8], password: &str) -> Result<([u8; SALT_LEN], Vec<u8>), StoreError> {
-    if bytes.len() < MAGIC.len() + SALT_LEN + NONCE_LEN || &bytes[..MAGIC.len()] != MAGIC {
-        return Err(StoreError::Crypto("invalid encrypted store format".into()));
+fn decrypt_store(bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
+    if bytes.len() < MAGIC.len() + NONCE_LEN || &bytes[..MAGIC.len()] != MAGIC {
+        return Err(StoreError::Crypto("invalid or legacy store format — store will be reset".into()));
     }
-    let mut salt = [0u8; SALT_LEN];
-    salt.copy_from_slice(&bytes[MAGIC.len()..MAGIC.len() + SALT_LEN]);
-    let nonce_start = MAGIC.len() + SALT_LEN;
-    let nonce_end = nonce_start + NONCE_LEN;
-    let nonce = &bytes[nonce_start..nonce_end];
-    let ciphertext = &bytes[nonce_end..];
-    let key = derive_key(password, &salt)?;
+    let nonce = &bytes[MAGIC.len()..MAGIC.len() + NONCE_LEN];
+    let ciphertext = &bytes[MAGIC.len() + NONCE_LEN..];
+    let key = app_key();
     let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| StoreError::Crypto(format!("cipher init failed: {e}")))?;
-    let plaintext = cipher
+        .map_err(|e| StoreError::Crypto(format!("cipher init: {e}")))?;
+    cipher
         .decrypt(Nonce::from_slice(nonce), ciphertext)
-        .map_err(|_| StoreError::Crypto("incorrect password or corrupted store".into()))?;
-    Ok((salt, plaintext))
+        .map_err(|_| StoreError::Crypto("decryption failed — store may be corrupted".into()))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -312,10 +240,6 @@ impl serde::Serialize for StoreError {
             StoreError::Locked => "Locked",
             StoreError::Crypto(_) => "Crypto",
         };
-        W {
-            kind,
-            message: self.to_string(),
-        }
-        .serialize(s)
+        W { kind, message: self.to_string() }.serialize(s)
     }
 }
