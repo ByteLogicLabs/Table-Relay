@@ -1,38 +1,56 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { toast } from 'sonner';
-import { ConnectionProfile, AppTab, DataViewMode, QueryLogEntry } from '../../types';
-import Sidebar from './sidebar';
-import TabsShell from './tabs-shell';
-import ConnectionRail, { RAIL_COLLAPSED_WIDTH, RAIL_EXPANDED_WIDTH } from '../connections/connection-rail';
-import ConnectionModal from '../connections/connection-modal';
-import ImportSqlDialog from '../connections/import-sql-dialog';
-import ChatPanel from '../ai-chat/chat-panel';
-import { listen } from '@tauri-apps/api/event';
-import { connectAndLoad, refreshSchemas, useConnections } from '../../state/connections';
-import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
-import { useRail, pinTile, refreshRail } from '../../state/rail';
-import type { RailTile } from '../../lib/rail';
-import { isDbError } from '../../lib/db';
-import { ai, type ChatFocus } from '../../lib/ai';
-import { clearCachedGrid, clearCachedGridsWhere } from '../../state/tab-data-cache';
-import { clearQueryResultSnapshot } from '../../state/query-result-cache';
-import { setDebugPage } from '../../state/debug';
-import { getAppState, setAppState } from '../../lib/app-state-store';
+import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { toast } from "sonner";
+import {
+  ConnectionProfile,
+  AppTab,
+  DataViewMode,
+  QueryLogEntry,
+} from "../../types";
+import Sidebar from "./sidebar";
+import TabsShell from "./tabs-shell";
+import ConnectionRail, {
+  RAIL_COLLAPSED_WIDTH,
+  RAIL_EXPANDED_WIDTH,
+} from "../connections/connection-rail";
+import ConnectionModal from "../connections/connection-modal";
+import ImportSqlDialog from "../connections/import-sql-dialog";
+import ChatPanel from "../ai-chat/chat-panel";
+import { listen } from "@tauri-apps/api/event";
+import {
+  connectAndLoad,
+  refreshSchemas,
+  useConnections,
+} from "../../state/connections";
+import {
+  useAdapterManifests,
+  resolveManifest,
+} from "../../state/adapter-manifests";
+import { useRail, pinTile, refreshRail, unpinManyTiles } from "../../state/rail";
+import type { RailTile } from "../../lib/rail";
+import { isDbError } from "../../lib/db";
+import { ai, type ChatFocus } from "../../lib/ai";
+import {
+  clearCachedGrid,
+  clearCachedGridsWhere,
+} from "../../state/tab-data-cache";
+import { clearQueryResultSnapshot } from "../../state/query-result-cache";
+import { setDebugPage } from "../../state/debug";
+import { getAppState, setAppState } from "../../lib/app-state-store";
 
 const SIDEBAR_WIDTH = 256;
-const CHAT_WIDTH_KEY = 'tablerelay:chatWidth:v1';
+const CHAT_WIDTH_KEY = "tablerelay:chatWidth:v1";
 const CHAT_MIN_WIDTH = 320;
 const CHAT_MAX_WIDTH = 800;
 const CHAT_DEFAULT_WIDTH = 384;
-const TABS_STORAGE_KEY = 'tablerelay:tabs:v1';
-const ACTIVE_TAB_KEY = 'tablerelay:activeTab:v1';
-const ACTIVE_TAB_BY_CONN_KEY = 'tablerelay:activeTabByConn:v1';
-const FOCUSED_TILE_KEY = 'tablerelay:focusedTile:v1';
-const OLD_TABS_STORAGE_KEY = 'dbtable:tabs:v1';
-const OLD_ACTIVE_TAB_KEY = 'dbtable:activeTab:v1';
-const OLD_ACTIVE_TAB_BY_CONN_KEY = 'dbtable:activeTabByConn:v1';
-const OLD_FOCUSED_TILE_KEY = 'dbtable:focusedTile:v1';
-const OLD_CHAT_WIDTH_KEY = 'dbtable:chatWidth:v1';
+const TABS_STORAGE_KEY = "tablerelay:tabs:v1";
+const ACTIVE_TAB_KEY = "tablerelay:activeTab:v1";
+const ACTIVE_TAB_BY_CONN_KEY = "tablerelay:activeTabByConn:v1";
+const FOCUSED_TILE_KEY = "tablerelay:focusedTile:v1";
+const OLD_TABS_STORAGE_KEY = "dbtable:tabs:v1";
+const OLD_ACTIVE_TAB_KEY = "dbtable:activeTab:v1";
+const OLD_ACTIVE_TAB_BY_CONN_KEY = "dbtable:activeTabByConn:v1";
+const OLD_FOCUSED_TILE_KEY = "dbtable:focusedTile:v1";
+const OLD_CHAT_WIDTH_KEY = "dbtable:chatWidth:v1";
 
 /**
  * Translate the active AppTab into a focus hint the AI context builder can
@@ -43,28 +61,28 @@ const OLD_CHAT_WIDTH_KEY = 'dbtable:chatWidth:v1';
 function computeFocusHint(tab: AppTab | undefined): ChatFocus | undefined {
   if (!tab) return undefined;
   switch (tab.type) {
-    case 'query':
+    case "query":
       return tab.query && tab.query.trim().length > 0
-        ? { type: 'query', sql: tab.query }
+        ? { type: "query", sql: tab.query }
         : undefined;
-    case 'routine':
+    case "routine":
       if (!tab.routine) return undefined;
       return {
-        type: 'routine',
+        type: "routine",
         schema: tab.routine.schema,
         name: tab.routine.name,
         kind: tab.routine.kind,
       };
-    case 'data':
-    case 'structure':
+    case "data":
+    case "structure":
       if (tab.schema && tab.table) {
-        return { type: 'table', schema: tab.schema, name: tab.table };
+        return { type: "table", schema: tab.schema, name: tab.table };
       }
       return undefined;
-    case 'realtime':
+    case "realtime":
       return {
-        type: 'realtime',
-        pattern: tab.realtimePattern ?? '',
+        type: "realtime",
+        pattern: tab.realtimePattern ?? "",
         // Live subscription state isn't persisted on the tab; the
         // adapter-primer in the system prompt carries the syntactical
         // rules the model needs regardless. Keep the slot here for
@@ -78,15 +96,21 @@ function computeFocusHint(tab: AppTab | undefined): ChatFocus | undefined {
 }
 
 function loadLegacyTabs(): AppTab[] {
-  if (typeof window === 'undefined') return [];
+  if (typeof window === "undefined") return [];
   try {
-    const raw = window.localStorage.getItem(TABS_STORAGE_KEY) ?? window.localStorage.getItem(OLD_TABS_STORAGE_KEY);
+    const raw =
+      window.localStorage.getItem(TABS_STORAGE_KEY) ??
+      window.localStorage.getItem(OLD_TABS_STORAGE_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(
       (t): t is AppTab =>
-        t && typeof t.id === 'string' && typeof t.title === 'string' && typeof t.type === 'string' && typeof t.connectionId === 'string',
+        t &&
+        typeof t.id === "string" &&
+        typeof t.title === "string" &&
+        typeof t.type === "string" &&
+        typeof t.connectionId === "string",
     );
   } catch {
     return [];
@@ -99,8 +123,9 @@ interface WorkspaceViewProps {
   onDisconnect: (id: string) => void;
   connections: ConnectionProfile[];
   onConnect: (id: string) => void;
-  onAddConnection: (conn: ConnectionProfile) => void;
-  onEditConnection?: (conn: ConnectionProfile) => void;
+  onAddConnection: (conn: ConnectionProfile) => void | Promise<void>;
+  onEditConnection?: (conn: ConnectionProfile, previousId?: string) => void | Promise<void>;
+  onDeleteConnection: (id: string) => void | Promise<void>;
 }
 
 export default function WorkspaceView({
@@ -109,70 +134,113 @@ export default function WorkspaceView({
   connections,
   onConnect,
   onAddConnection,
+  onEditConnection,
+  onDeleteConnection,
 }: WorkspaceViewProps) {
   const workspaceStateHydrated = useRef(false);
   const [tabs, setTabs] = useState<AppTab[]>([]);
   // Per-connection active-tab map: each connection remembers its own last
   // active tab, so switching between connections never steals tab focus from
   // the other. Legacy single-id value is read once and folded into the map.
-  const [activeTabByConn, setActiveTabByConn] = useState<Record<string, string>>({});
+  const [activeTabByConn, setActiveTabByConn] = useState<
+    Record<string, string>
+  >({});
 
   useEffect(() => {
     let cancelled = false;
     void (async () => {
-      const [storedTabs, storedActiveByConn, storedFocusedTile, storedChatWidth] = await Promise.all([
+      const [
+        storedTabs,
+        storedActiveByConn,
+        storedFocusedTile,
+        storedChatWidth,
+      ] = await Promise.all([
         getAppState<AppTab[]>(TABS_STORAGE_KEY).catch(() => null),
-        getAppState<Record<string, string>>(ACTIVE_TAB_BY_CONN_KEY).catch(() => null),
+        getAppState<Record<string, string>>(ACTIVE_TAB_BY_CONN_KEY).catch(
+          () => null,
+        ),
         getAppState<string>(FOCUSED_TILE_KEY).catch(() => null),
         getAppState<number>(CHAT_WIDTH_KEY).catch(() => null),
       ]);
       if (cancelled) return;
 
-      const nextTabs = Array.isArray(storedTabs) ? storedTabs.filter(
-        (t): t is AppTab =>
-          t && typeof t.id === 'string' && typeof t.title === 'string' && typeof t.type === 'string' && typeof t.connectionId === 'string',
-      ) : loadLegacyTabs();
+      const nextTabs = Array.isArray(storedTabs)
+        ? storedTabs.filter(
+            (t): t is AppTab =>
+              t &&
+              typeof t.id === "string" &&
+              typeof t.title === "string" &&
+              typeof t.type === "string" &&
+              typeof t.connectionId === "string",
+          )
+        : loadLegacyTabs();
       setTabs(nextTabs);
 
-      if (storedActiveByConn && typeof storedActiveByConn === 'object' && !Array.isArray(storedActiveByConn)) {
+      if (
+        storedActiveByConn &&
+        typeof storedActiveByConn === "object" &&
+        !Array.isArray(storedActiveByConn)
+      ) {
         setActiveTabByConn(storedActiveByConn);
       } else {
         try {
-          const raw = window.localStorage.getItem(ACTIVE_TAB_BY_CONN_KEY)
-            ?? window.localStorage.getItem(OLD_ACTIVE_TAB_BY_CONN_KEY);
+          const raw =
+            window.localStorage.getItem(ACTIVE_TAB_BY_CONN_KEY) ??
+            window.localStorage.getItem(OLD_ACTIVE_TAB_BY_CONN_KEY);
           if (raw) {
             const parsed = JSON.parse(raw);
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            if (
+              parsed &&
+              typeof parsed === "object" &&
+              !Array.isArray(parsed)
+            ) {
               setActiveTabByConn(parsed as Record<string, string>);
             }
           } else {
-            const legacy = window.localStorage.getItem(ACTIVE_TAB_KEY)
-              ?? window.localStorage.getItem(OLD_ACTIVE_TAB_KEY);
-            const owner = legacy ? nextTabs.find(t => t.id === legacy) : undefined;
+            const legacy =
+              window.localStorage.getItem(ACTIVE_TAB_KEY) ??
+              window.localStorage.getItem(OLD_ACTIVE_TAB_KEY);
+            const owner = legacy
+              ? nextTabs.find((t) => t.id === legacy)
+              : undefined;
             if (owner) setActiveTabByConn({ [owner.connectionId]: legacy! });
           }
-        } catch { /* noop */ }
+        } catch {
+          /* noop */
+        }
       }
 
       if (storedFocusedTile) {
         setFocusedTileId(storedFocusedTile);
       } else {
         try {
-          const legacyFocusedTile = window.localStorage.getItem(FOCUSED_TILE_KEY)
-            ?? window.localStorage.getItem(OLD_FOCUSED_TILE_KEY);
+          const legacyFocusedTile =
+            window.localStorage.getItem(FOCUSED_TILE_KEY) ??
+            window.localStorage.getItem(OLD_FOCUSED_TILE_KEY);
           if (legacyFocusedTile) setFocusedTileId(legacyFocusedTile);
-        } catch { /* noop */ }
+        } catch {
+          /* noop */
+        }
       }
 
-      if (typeof storedChatWidth === 'number' && Number.isFinite(storedChatWidth)
-          && storedChatWidth >= CHAT_MIN_WIDTH && storedChatWidth <= CHAT_MAX_WIDTH) {
+      if (
+        typeof storedChatWidth === "number" &&
+        Number.isFinite(storedChatWidth) &&
+        storedChatWidth >= CHAT_MIN_WIDTH &&
+        storedChatWidth <= CHAT_MAX_WIDTH
+      ) {
         setChatWidth(storedChatWidth);
       } else {
         try {
-          const raw = window.localStorage.getItem(CHAT_WIDTH_KEY) ?? window.localStorage.getItem(OLD_CHAT_WIDTH_KEY);
+          const raw =
+            window.localStorage.getItem(CHAT_WIDTH_KEY) ??
+            window.localStorage.getItem(OLD_CHAT_WIDTH_KEY);
           const n = raw ? Number(raw) : NaN;
-          if (Number.isFinite(n) && n >= CHAT_MIN_WIDTH && n <= CHAT_MAX_WIDTH) setChatWidth(n);
-        } catch { /* noop */ }
+          if (Number.isFinite(n) && n >= CHAT_MIN_WIDTH && n <= CHAT_MAX_WIDTH)
+            setChatWidth(n);
+        } catch {
+          /* noop */
+        }
       }
 
       try {
@@ -186,11 +254,15 @@ export default function WorkspaceView({
         window.localStorage.removeItem(OLD_ACTIVE_TAB_KEY);
         window.localStorage.removeItem(OLD_FOCUSED_TILE_KEY);
         window.localStorage.removeItem(OLD_CHAT_WIDTH_KEY);
-      } catch { /* noop */ }
+      } catch {
+        /* noop */
+      }
 
       workspaceStateHydrated.current = true;
     })();
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Persist tabs + per-connection active tab so reopening the app lands you
@@ -206,8 +278,12 @@ export default function WorkspaceView({
   const [focusedTileId, setFocusedTileId] = useState<string | null>(null);
   // When the user picks a connection (not a tile), we track it explicitly so
   // the sidebar knows which server to show even before a database is chosen.
-  const [focusedConnectionId, setFocusedConnectionId] = useState<string | null>(null);
+  const [focusedConnectionId, setFocusedConnectionId] = useState<string | null>(
+    null,
+  );
   const [newConnectionOpen, setNewConnectionOpen] = useState(false);
+  const [editingConnection, setEditingConnection] =
+    useState<ConnectionProfile | null>(null);
   // Connection id the Import SQL dialog is bound to. `null` = dialog closed.
   const [importSqlForId, setImportSqlForId] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
@@ -222,37 +298,45 @@ export default function WorkspaceView({
   // the chat panel by dispatching `tablerelay:toggle-chat`. Keeps each view
   // free of chat-panel wiring — they just fire the event.
   useEffect(() => {
-    const onToggle = () => setChatOpen(o => !o);
+    const onToggle = () => setChatOpen((o) => !o);
     // Fix / Explain / Generate shortcuts force the panel open — the panel
     // itself listens to the same event for the prefill payload.
     const onPrefill = () => setChatOpen(true);
-    window.addEventListener('tablerelay:toggle-chat', onToggle);
-    window.addEventListener('tablerelay:ai-prefill', onPrefill);
+    window.addEventListener("tablerelay:toggle-chat", onToggle);
+    window.addEventListener("tablerelay:ai-prefill", onPrefill);
     return () => {
-      window.removeEventListener('tablerelay:toggle-chat', onToggle);
-      window.removeEventListener('tablerelay:ai-prefill', onPrefill);
+      window.removeEventListener("tablerelay:toggle-chat", onToggle);
+      window.removeEventListener("tablerelay:ai-prefill", onPrefill);
     };
   }, []);
 
   // Listen for AI tool query executions and log them.
   useEffect(() => {
     let unlisten: (() => void) | undefined;
-    import('@tauri-apps/api/event').then(({ listen: tauriListen }) => {
+    import("@tauri-apps/api/event").then(({ listen: tauriListen }) => {
       tauriListen<{
-        connection_id: string; statement: string; source: string;
-        duration_ms: number; status: string; message: string | null;
-      }>('ai://query_log', (ev) => {
+        connection_id: string;
+        statement: string;
+        source: string;
+        duration_ms: number;
+        status: string;
+        message: string | null;
+      }>("ai://query_log", (ev) => {
         appendQueryLog({
           connectionId: ev.payload.connection_id,
           statement: ev.payload.statement,
-          source: 'ai' as any,
+          source: "ai" as any,
           durationMs: ev.payload.duration_ms,
           status: ev.payload.status as any,
           message: ev.payload.message ?? undefined,
         });
-      }).then(fn => { unlisten = fn; });
+      }).then((fn) => {
+        unlisten = fn;
+      });
     });
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
   // Native menu → webview bridge. The Rust side emits `menu:file.*` Tauri
@@ -275,10 +359,10 @@ export default function WorkspaceView({
     // Tauri event names are plain `menu-file-<action>` — kebab-case,
     // no `:` / `.` which can trigger silent routing failures on some
     // Tauri versions. Backend emits under the same shape.
-    const unlistenImport = listen<void>('menu-file-import', () => {
+    const unlistenImport = listen<void>("menu-file-import", () => {
       const id = menuCtxRef.current.focusedConnectionId;
       if (!id) {
-        toast.error('Open a connection before importing');
+        toast.error("Open a connection before importing");
         return;
       }
       if (!menuCtxRef.current.focusedSupportsImport) {
@@ -287,10 +371,10 @@ export default function WorkspaceView({
       }
       setImportSqlForId(id);
     });
-    const unlistenExport = listen<void>('menu-file-export', () => {
+    const unlistenExport = listen<void>("menu-file-export", () => {
       const tid = menuCtxRef.current.activeTabId;
       if (!tid) {
-        toast.error('Open a table before exporting');
+        toast.error("Open a table before exporting");
         return;
       }
       if (!menuCtxRef.current.activeTabSupportsExport) {
@@ -299,32 +383,59 @@ export default function WorkspaceView({
       }
       // Data-grid listens for this on its own tab id.
       window.dispatchEvent(
-        new CustomEvent('tablerelay:menu-export', { detail: { tabId: tid } }),
+        new CustomEvent("tablerelay:menu-export", { detail: { tabId: tid } }),
       );
     });
+    const unlistenConnectionPicker = listen<void>(
+      "menu-connection-picker",
+      () => {
+        // Trigger the sidebar's connection picker logic which lives in WorkspaceView
+        // but wait, is it in Sidebar or WorkspaceView? The connection picker is managed
+        // via `connPickerOpen` in Sidebar, but we need it here, or we can just trigger an event!
+        // Wait, there's no setConnPickerOpen here in WorkspaceView.
+        window.dispatchEvent(
+          new CustomEvent("tablerelay:menu-connection-picker"),
+        );
+      },
+    );
+    const unlistenConnectionNew = listen<void>("menu-connection-new", () => {
+      setNewConnectionOpen(true);
+    });
+
     return () => {
-      void unlistenImport.then(fn => fn());
-      void unlistenExport.then(fn => fn());
+      void unlistenImport.then((fn) => fn());
+      void unlistenExport.then((fn) => fn());
+      void unlistenConnectionPicker.then((fn) => fn());
+      void unlistenConnectionNew.then((fn) => fn());
     };
   }, []);
   const railWidth = railExpanded ? RAIL_EXPANDED_WIDTH : RAIL_COLLAPSED_WIDTH;
   const chatColumnPx = chatOpen ? chatWidth : 0;
   const contentMaxWidthStyle: CSSProperties = {
-    ['--content-max-w' as string]: `calc(100vw - ${railWidth + SIDEBAR_WIDTH + chatColumnPx}px)`,
+    ["--content-max-w" as string]: `calc(100vw - ${railWidth + SIDEBAR_WIDTH + chatColumnPx}px)`,
   };
-  const [queryLogs, setQueryLogs] = useState<Record<string, QueryLogEntry[]>>({});
+  const [queryLogs, setQueryLogs] = useState<Record<string, QueryLogEntry[]>>(
+    {},
+  );
 
   const connState = useConnections();
   const railState = useRail();
-  useEffect(() => { void refreshRail(); }, []);
+  useEffect(() => {
+    void refreshRail();
+  }, []);
 
-  const appendQueryLog = (entry: Omit<QueryLogEntry, 'id' | 'timestamp'> & { id?: string; timestamp?: number }) => {
+  const appendQueryLog = (
+    entry: Omit<QueryLogEntry, "id" | "timestamp"> & {
+      id?: string;
+      timestamp?: number;
+    },
+  ) => {
     const full: QueryLogEntry = {
       id: entry.id ?? crypto.randomUUID(),
       timestamp: entry.timestamp ?? Date.now(),
       ...entry,
     };
-    setQueryLogs(prev => {
+    setQueryLogs((prev) => {
       const existing = prev[full.connectionId] ?? [];
       const next = [...existing, full];
       // Keep only the most recent 50 entries per connection. The bottom
@@ -337,7 +448,7 @@ export default function WorkspaceView({
   };
 
   const clearQueryLog = (connectionId: string) => {
-    setQueryLogs(prev => ({ ...prev, [connectionId]: [] }));
+    setQueryLogs((prev) => ({ ...prev, [connectionId]: [] }));
   };
 
   // Persist the focused tile so reopening the app restores the last-opened
@@ -364,7 +475,7 @@ export default function WorkspaceView({
       }
       return;
     }
-    if (!railState.tiles.some(t => t.id === focusedTileId)) {
+    if (!railState.tiles.some((t) => t.id === focusedTileId)) {
       setFocusedTileId(railState.tiles[0]?.id ?? null);
     }
   }, [railState.tiles, focusedTileId, focusedConnectionId]);
@@ -374,20 +485,23 @@ export default function WorkspaceView({
   // onto orphaned windows. Tabs without a schema (query tabs tied only to a
   // connection) stay put unless the whole server is gone from the rail too.
   useEffect(() => {
-    const pinnedPairs = new Set(railState.tiles.map(t => `${t.serverId}::${t.databaseName}`));
-    const pinnedServers = new Set(railState.tiles.map(t => t.serverId));
-    setTabs(prev => {
-      const kept = prev.filter(tab => {
+    const pinnedPairs = new Set(
+      railState.tiles.map((t) => `${t.serverId}::${t.databaseName}`),
+    );
+    const pinnedServers = new Set(railState.tiles.map((t) => t.serverId));
+    setTabs((prev) => {
+      const kept = prev.filter((tab) => {
         // Schema-bound tabs require their (conn, db) pair to still be pinned.
-        if (tab.schema) return pinnedPairs.has(`${tab.connectionId}::${tab.schema}`);
+        if (tab.schema)
+          return pinnedPairs.has(`${tab.connectionId}::${tab.schema}`);
         // Query tabs (no schema) only require the server to still have any pin.
         return pinnedServers.has(tab.connectionId);
       });
       if (kept.length === prev.length) return prev;
       // Drop any per-connection active-tab entries whose referenced tab was
       // just removed — otherwise the empty state won't render for that conn.
-      const keptIds = new Set(kept.map(t => t.id));
-      setActiveTabByConn(map => {
+      const keptIds = new Set(kept.map((t) => t.id));
+      setActiveTabByConn((map) => {
         const next: Record<string, string> = {};
         for (const [cid, id] of Object.entries(map)) {
           if (keptIds.has(id)) next[cid] = id;
@@ -401,7 +515,7 @@ export default function WorkspaceView({
   }, [railState.tiles]);
 
   const focusedTile: RailTile | null =
-    railState.tiles.find(t => t.id === focusedTileId) ?? null;
+    railState.tiles.find((t) => t.id === focusedTileId) ?? null;
   // Priority chain so the sidebar never sits on the "no connection" empty
   // state while a connection is actually live:
   //   1. The server behind the focused rail tile.
@@ -409,21 +523,50 @@ export default function WorkspaceView({
   //      reason not in the top-level `connections` list).
   //   3. Any active connection (user just connected, hasn't pinned a DB yet).
   const focusedConnection: ConnectionProfile | null =
-    (focusedTile && connections.find(c => c.id === focusedTile.serverId))
-    ?? (focusedTile && activeConnections.find(c => c.id === focusedTile.serverId))
-    ?? (focusedConnectionId && activeConnections.find(c => c.id === focusedConnectionId))
-    ?? (focusedConnectionId && connections.find(c => c.id === focusedConnectionId))
-    ?? activeConnections[0]
-    ?? null;
+    (focusedTile && connections.find((c) => c.id === focusedTile.serverId)) ??
+    (focusedTile &&
+      activeConnections.find((c) => c.id === focusedTile.serverId)) ??
+    (focusedConnectionId &&
+      activeConnections.find((c) => c.id === focusedConnectionId)) ??
+    (focusedConnectionId &&
+      connections.find((c) => c.id === focusedConnectionId)) ??
+    activeConnections[0] ??
+    null;
+  const focusedTileServerId = focusedTile?.serverId ?? null;
+  const focusedConnectionIdForAutoConnect = focusedConnection?.id ?? null;
+
+  useEffect(() => {
+    const id = focusedTileServerId;
+    if (!id || !focusedConnectionIdForAutoConnect) return;
+    if (connState.activeById.has(id)) return;
+    if (connState.connectingIds.has(id)) return;
+    if (connState.lastErrorById.has(id)) return;
+
+    void (async () => {
+      try {
+        await connectAndLoad(id);
+      } catch (err) {
+        toast.error(isDbError(err) ? err.message : String(err));
+      }
+    })();
+  }, [
+    focusedTileServerId,
+    focusedConnectionIdForAutoConnect,
+    connState.activeById,
+    connState.connectingIds,
+    connState.lastErrorById,
+  ]);
 
   // Tabs are scoped by BOTH connection + database (i.e. the focused rail
   // tile). Two pins on the same server but different databases are different
   // workspaces, so their tab strips must stay independent. The exception is
   // query tabs without a schema — those are tied to the connection only, so
   // we show them regardless of which tile is focused on that server.
-  const scopeKey = focusedTile ? `${focusedTile.serverId}::${focusedTile.databaseName}` : null;
+  const scopeKey = focusedTile
+    ? `${focusedTile.serverId}::${focusedTile.databaseName}`
+    : null;
   const visibleTabs = focusedConnection
-    ? tabs.filter(t => {
+    ? tabs.filter((t) => {
         if (t.connectionId !== focusedConnection.id) return false;
         if (!t.schema) return true; // connection-scoped query tab
         return scopeKey === `${t.connectionId}::${t.schema}`;
@@ -434,13 +577,13 @@ export default function WorkspaceView({
   // tile was focused) fall back to the first visible tab so the user sees
   // content instead of an empty pane.
   const activeTabId = focusedConnection
-    ? (storedActive && visibleTabs.some(t => t.id === storedActive)
-        ? storedActive
-        : (visibleTabs[0]?.id ?? null))
+    ? storedActive && visibleTabs.some((t) => t.id === storedActive)
+      ? storedActive
+      : (visibleTabs[0]?.id ?? null)
     : null;
   const setActiveTabId = (id: string | null) => {
     if (!scopeKey) return;
-    setActiveTabByConn(prev => {
+    setActiveTabByConn((prev) => {
       const next = { ...prev };
       if (id) next[scopeKey] = id;
       else delete next[scopeKey];
@@ -454,20 +597,28 @@ export default function WorkspaceView({
   // `listen()` handler on every tile / tab switch.
   useEffect(() => {
     menuCtxRef.current.focusedConnectionId = focusedConnection?.id ?? null;
-    const focusedManifest = resolveManifest(adapterManifests, focusedConnection?.driver);
-    menuCtxRef.current.focusedSupportsImport =
-      focusedManifest ? focusedManifest.capabilities.import.length > 0 : true;
+    const focusedManifest = resolveManifest(
+      adapterManifests,
+      focusedConnection?.driver,
+    );
+    menuCtxRef.current.focusedSupportsImport = focusedManifest
+      ? focusedManifest.capabilities.import.length > 0
+      : true;
     // Only surface data tabs to the export handler — exporting makes no
     // sense on query / routine / schema tabs.
-    const activeTab = visibleTabs.find(t => t.id === activeTabId);
+    const activeTab = visibleTabs.find((t) => t.id === activeTabId);
     menuCtxRef.current.activeTabId =
-      activeTab?.type === 'data' ? activeTab.id : null;
+      activeTab?.type === "data" ? activeTab.id : null;
     const activeTabConn = activeTab
-      ? connections.find(c => c.id === activeTab.connectionId)
+      ? connections.find((c) => c.id === activeTab.connectionId)
       : null;
-    const activeTabManifest = resolveManifest(adapterManifests, activeTabConn?.driver);
-    menuCtxRef.current.activeTabSupportsExport =
-      activeTabManifest ? activeTabManifest.capabilities.export.length > 0 : true;
+    const activeTabManifest = resolveManifest(
+      adapterManifests,
+      activeTabConn?.driver,
+    );
+    menuCtxRef.current.activeTabSupportsExport = activeTabManifest
+      ? activeTabManifest.capabilities.export.length > 0
+      : true;
   });
 
   const handleFocusTile = (tile: RailTile) => {
@@ -538,9 +689,17 @@ export default function WorkspaceView({
     }
   };
 
-  const handleOpenTable = (connectionId: string, schema: string, tableName: string) => {
+  const handleOpenTable = (
+    connectionId: string,
+    schema: string,
+    tableName: string,
+  ) => {
     const existingTab = tabs.find(
-      t => t.type === 'data' && t.table === tableName && t.schema === schema && t.connectionId === connectionId,
+      (t) =>
+        t.type === "data" &&
+        t.table === tableName &&
+        t.schema === schema &&
+        t.connectionId === connectionId,
     );
     if (existingTab) {
       setActiveTabId(existingTab.id);
@@ -548,38 +707,50 @@ export default function WorkspaceView({
       const newTab: AppTab = {
         id: `data-${connectionId}-${schema}.${tableName}-${Date.now()}`,
         title: tableName,
-        type: 'data',
+        type: "data",
         connectionId,
         schema,
         table: tableName,
       };
-      setTabs(prev => [...prev, newTab]);
+      setTabs((prev) => [...prev, newTab]);
       setActiveTabId(newTab.id);
     }
   };
 
-  const handleOpenStructure = (connectionId: string, schema: string, tableName: string) => {
+  const handleOpenStructure = (
+    connectionId: string,
+    schema: string,
+    tableName: string,
+  ) => {
     // "Open Schema" from the sidebar reuses the table's data tab and flips
     // its internal view mode to 'schema'. That way the user gets one tab per
     // table with Data / Schema / Diagram toggles in the toolbar instead of
     // a separate structure tab duplicating the same SchemaView.
     const existingTab = tabs.find(
-      t => t.type === 'data' && t.table === tableName && t.schema === schema && t.connectionId === connectionId,
+      (t) =>
+        t.type === "data" &&
+        t.table === tableName &&
+        t.schema === schema &&
+        t.connectionId === connectionId,
     );
     if (existingTab) {
-      setTabs(prev => prev.map(t => (t.id === existingTab.id ? { ...t, dataViewMode: 'schema' } : t)));
+      setTabs((prev) =>
+        prev.map((t) =>
+          t.id === existingTab.id ? { ...t, dataViewMode: "schema" } : t,
+        ),
+      );
       setActiveTabId(existingTab.id);
     } else {
       const newTab: AppTab = {
         id: `data-${connectionId}-${schema}.${tableName}-${Date.now()}`,
         title: tableName,
-        type: 'data',
+        type: "data",
         connectionId,
         schema,
         table: tableName,
-        dataViewMode: 'schema',
+        dataViewMode: "schema",
       };
-      setTabs(prev => [...prev, newTab]);
+      setTabs((prev) => [...prev, newTab]);
       setActiveTabId(newTab.id);
     }
   };
@@ -588,33 +759,38 @@ export default function WorkspaceView({
   // dialog's "Open in editor" option — the user gets a Monaco editor
   // prefilled with the file contents so they can review/edit before
   // running.
-  const handleImportToEditor = (connectionId: string, fileName: string, sql: string) => {
-    const tileDb = focusedTile && focusedTile.serverId === connectionId
-      ? focusedTile.databaseName
-      : undefined;
+  const handleImportToEditor = (
+    connectionId: string,
+    fileName: string,
+    sql: string,
+  ) => {
+    const tileDb =
+      focusedTile && focusedTile.serverId === connectionId
+        ? focusedTile.databaseName
+        : undefined;
     const newTab: AppTab = {
       id: `query-import-${connectionId}-${Date.now()}`,
-      title: fileName || 'Imported SQL',
-      type: 'query',
+      title: fileName || "Imported SQL",
+      type: "query",
       connectionId,
       schema: tileDb,
       query: sql,
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
   const handleNewQuery = (connectionId: string, tableName?: string) => {
-    let initialQuery = '';
-    const connection = activeConnections.find(c => c.id === connectionId);
+    let initialQuery = "";
+    const connection = activeConnections.find((c) => c.id === connectionId);
 
     if (tableName && connection) {
       // Branch on the manifest's query-editor language, not the driver
       // name — keeps the comment/template right when adapters of new
       // languages get added.
       const manifest = resolveManifest(adapterManifests, connection.driver);
-      const lang = manifest?.queryEditor?.language?.trim() ?? 'sql';
-      if (lang === 'mongo') {
+      const lang = manifest?.queryEditor?.language?.trim() ?? "sql";
+      if (lang === "mongo") {
         initialQuery = `// Query example for ${tableName}\ndb.getCollection('${tableName}').find({\n  // Add filter conditions here\n}).limit(100);`;
       } else {
         initialQuery = `-- Query example for ${tableName}\nSELECT * FROM ${tableName}\nLIMIT 100;`;
@@ -624,19 +800,20 @@ export default function WorkspaceView({
     // Capture the currently-focused database (from the rail) so the editor
     // can prepend `USE` and scope autocomplete even though the connection
     // profile's default database is often blank.
-    const tileDb = focusedTile && focusedTile.serverId === connectionId
-      ? focusedTile.databaseName
-      : undefined;
+    const tileDb =
+      focusedTile && focusedTile.serverId === connectionId
+        ? focusedTile.databaseName
+        : undefined;
 
     const newTab: AppTab = {
       id: `query-${connectionId}-${Date.now()}`,
-      title: tableName ? `Query: ${tableName}` : 'Query',
-      type: 'query',
+      title: tableName ? `Query: ${tableName}` : "Query",
+      type: "query",
       connectionId,
       schema: tileDb,
       query: initialQuery,
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
@@ -644,52 +821,58 @@ export default function WorkspaceView({
     // Reuse an existing realtime tab on the same connection instead of
     // stacking new ones — the typical use case is "watch and come back",
     // and a fresh tab would discard the event buffer the user accumulated.
-    const existing = tabs.find(t => t.type === 'realtime' && t.connectionId === connectionId);
+    const existing = tabs.find(
+      (t) => t.type === "realtime" && t.connectionId === connectionId,
+    );
     if (existing) {
       setActiveTabId(existing.id);
       return;
     }
     const newTab: AppTab = {
       id: `realtime-${connectionId}-${Date.now()}`,
-      title: 'Realtime',
-      type: 'realtime',
+      title: "Realtime",
+      type: "realtime",
       connectionId,
-      realtimePattern: '*',
+      realtimePattern: "*",
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
   const handleTabRealtimePatternChange = (tabId: string, pattern: string) => {
-    setTabs(prev => prev.map(t => (t.id === tabId ? { ...t, realtimePattern: pattern } : t)));
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId ? { ...t, realtimePattern: pattern } : t,
+      ),
+    );
   };
 
   // ⌘+T / Ctrl+T opens a new query tab for the currently-focused connection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 't') {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "t") {
         const target = focusedConnection?.id ?? activeConnections[0]?.id;
         if (!target) return;
         e.preventDefault();
         handleNewQuery(target);
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
   }, [focusedConnection, activeConnections, focusedTile]);
 
   // ⌘+W / Ctrl+W closes the active tab. preventDefault so the browser's own
   // close-window shortcut doesn't fire on the Tauri webview.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'w') {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "w") {
         if (!activeTabId) return;
         e.preventDefault();
         handleCloseTab(activeTabId);
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabId]);
 
@@ -709,7 +892,7 @@ export default function WorkspaceView({
   // be the character at that physical position instead of 'r'.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      const isR = e.code === 'KeyR' || e.key.toLowerCase() === 'r';
+      const isR = e.code === "KeyR" || e.key.toLowerCase() === "r";
       if (!(e.metaKey || e.ctrlKey) || !isR) return;
       e.preventDefault();
       e.stopPropagation();
@@ -724,21 +907,28 @@ export default function WorkspaceView({
       if (target) {
         void refreshSchemas(target);
       }
-      window.dispatchEvent(new CustomEvent('tablerelay:reload', {
-        detail: { connectionId: target ?? null },
-      }));
+      window.dispatchEvent(
+        new CustomEvent("tablerelay:reload", {
+          detail: { connectionId: target ?? null },
+        }),
+      );
     };
-    window.addEventListener('keydown', onKey, { capture: true });
+    window.addEventListener("keydown", onKey, { capture: true });
     return () =>
-      window.removeEventListener('keydown', onKey, { capture: true });
+      window.removeEventListener("keydown", onKey, { capture: true });
   }, [focusedConnection]);
 
-  const handleOpenDefinition = (connectionId: string, key: string, title: string, sql: string) => {
+  const handleOpenDefinition = (
+    connectionId: string,
+    key: string,
+    title: string,
+    sql: string,
+  ) => {
     // Stable id derived from the (connection, object) pair so re-opening the
     // same view / routine focuses the existing tab instead of creating a new
     // one. Dropping Date.now() here is the whole point of taking `key`.
     const id = `def-${connectionId}-${key}`;
-    const existing = tabs.find(t => t.id === id);
+    const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTabId(existing.id);
       return;
@@ -746,11 +936,11 @@ export default function WorkspaceView({
     const newTab: AppTab = {
       id,
       title: `Edit: ${title}`,
-      type: 'query',
+      type: "query",
       connectionId,
       query: sql,
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
@@ -758,10 +948,10 @@ export default function WorkspaceView({
     connectionId: string,
     schema: string,
     name: string,
-    kind: 'function' | 'procedure',
+    kind: "function" | "procedure",
   ) => {
     const id = `routine-${connectionId}-${schema}.${name}`;
-    const existing = tabs.find(t => t.id === id);
+    const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTabId(existing.id);
       return;
@@ -769,12 +959,12 @@ export default function WorkspaceView({
     const newTab: AppTab = {
       id,
       title: name,
-      type: 'routine',
+      type: "routine",
       connectionId,
       schema,
       routine: { schema, name, kind },
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
@@ -782,29 +972,33 @@ export default function WorkspaceView({
     const id = `new-table-${connectionId}-${schema}-${Date.now()}`;
     const newTab: AppTab = {
       id,
-      title: 'New table',
-      type: 'structure',
+      title: "New table",
+      type: "structure",
       connectionId,
       schema,
-      table: '(new)',
+      table: "(new)",
       isNew: true,
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
-  const handleNewRoutine = (connectionId: string, schema: string, kind: 'function' | 'procedure') => {
+  const handleNewRoutine = (
+    connectionId: string,
+    schema: string,
+    kind: "function" | "procedure",
+  ) => {
     const id = `new-routine-${connectionId}-${schema}-${kind}-${Date.now()}`;
     const newTab: AppTab = {
       id,
       title: `New ${kind}`,
-      type: 'routine',
+      type: "routine",
       connectionId,
       schema,
-      routine: { schema, name: '(new)', kind },
+      routine: { schema, name: "(new)", kind },
       isNew: true,
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
@@ -812,39 +1006,51 @@ export default function WorkspaceView({
     const id = `new-view-${connectionId}-${schema}-${Date.now()}`;
     const newTab: AppTab = {
       id,
-      title: 'New view',
-      type: 'routine',
+      title: "New view",
+      type: "routine",
       connectionId,
       schema,
-      routine: { schema, name: '(new)', kind: 'view' },
+      routine: { schema, name: "(new)", kind: "view" },
       isNew: true,
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
   };
 
-  const handleOpenErd = (connectionId: string, schemaName: string, tableName?: string) => {
+  const handleOpenErd = (
+    connectionId: string,
+    schemaName: string,
+    tableName?: string,
+  ) => {
     if (tableName) {
       // Table-scoped ERD: reuse the table's data tab and flip its internal
       // view mode to 'diagram'. Mirrors how "Open Schema" reuses the data
       // tab — one tab per table with Data / Schema / Diagram toggles.
       const existingTab = tabs.find(
-        t => t.type === 'data' && t.table === tableName && t.schema === schemaName && t.connectionId === connectionId,
+        (t) =>
+          t.type === "data" &&
+          t.table === tableName &&
+          t.schema === schemaName &&
+          t.connectionId === connectionId,
       );
       if (existingTab) {
-        setTabs(prev => prev.map(t => (t.id === existingTab.id ? { ...t, dataViewMode: 'diagram' } : t)));
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === existingTab.id ? { ...t, dataViewMode: "diagram" } : t,
+          ),
+        );
         setActiveTabId(existingTab.id);
       } else {
         const newTab: AppTab = {
           id: `data-${connectionId}-${schemaName}.${tableName}-${Date.now()}`,
           title: tableName,
-          type: 'data',
+          type: "data",
           connectionId,
           schema: schemaName,
           table: tableName,
-          dataViewMode: 'diagram',
+          dataViewMode: "diagram",
         };
-        setTabs(prev => [...prev, newTab]);
+        setTabs((prev) => [...prev, newTab]);
         setActiveTabId(newTab.id);
       }
       return;
@@ -856,13 +1062,13 @@ export default function WorkspaceView({
     const newTab: AppTab = {
       id,
       title,
-      type: 'erd',
+      type: "erd",
       connectionId,
       schema: schemaName,
       schemaName,
     };
-    if (!tabs.find(t => t.id === newTab.id)) {
-      setTabs(prev => [...prev, newTab]);
+    if (!tabs.find((t) => t.id === newTab.id)) {
+      setTabs((prev) => [...prev, newTab]);
     }
     setActiveTabId(newTab.id);
   };
@@ -879,16 +1085,16 @@ export default function WorkspaceView({
     // long sessions.
     clearCachedGrid(id);
     clearQueryResultSnapshot(id);
-    setTabs(prev => {
-      const closing = prev.find(t => t.id === id);
-      const newTabs = prev.filter(t => t.id !== id);
+    setTabs((prev) => {
+      const closing = prev.find((t) => t.id === id);
+      const newTabs = prev.filter((t) => t.id !== id);
       if (closing) {
         const scope = tabScopeKey(closing);
         if (activeTabByConn[scope] === id) {
-          const siblings = newTabs.filter(t => tabScopeKey(t) === scope);
-          const prevSiblings = prev.filter(t => tabScopeKey(t) === scope);
-          const index = prevSiblings.findIndex(t => t.id === id);
-          setActiveTabByConn(map => {
+          const siblings = newTabs.filter((t) => tabScopeKey(t) === scope);
+          const prevSiblings = prev.filter((t) => tabScopeKey(t) === scope);
+          const index = prevSiblings.findIndex((t) => t.id === id);
+          setActiveTabByConn((map) => {
             const next = { ...map };
             if (siblings.length > 0) {
               const nextIndex = Math.min(index, siblings.length - 1);
@@ -904,25 +1110,38 @@ export default function WorkspaceView({
     });
   };
 
-  const handleCloseTabs = (mode: 'all' | 'others' | 'left' | 'right', anchorId: string) => {
-    setTabs(prev => {
-      const anchor = prev.find(t => t.id === anchorId);
+  const handleCloseTabs = (
+    mode: "all" | "others" | "left" | "right",
+    anchorId: string,
+  ) => {
+    setTabs((prev) => {
+      const anchor = prev.find((t) => t.id === anchorId);
       if (!anchor) return prev;
       const scope = tabScopeKey(anchor);
       // Apply close semantics within the anchor's own scope — other scopes
       // aren't visible to the user right now, so touching them would be
       // surprising.
-      const siblings = prev.filter(t => tabScopeKey(t) === scope);
-      const idxInSiblings = siblings.findIndex(t => t.id === anchorId);
+      const siblings = prev.filter((t) => tabScopeKey(t) === scope);
+      const idxInSiblings = siblings.findIndex((t) => t.id === anchorId);
       let keptSiblings: AppTab[];
       switch (mode) {
-        case 'all': keptSiblings = []; break;
-        case 'others': keptSiblings = [siblings[idxInSiblings]]; break;
-        case 'left': keptSiblings = siblings.slice(idxInSiblings); break;
-        case 'right': keptSiblings = siblings.slice(0, idxInSiblings + 1); break;
+        case "all":
+          keptSiblings = [];
+          break;
+        case "others":
+          keptSiblings = [siblings[idxInSiblings]];
+          break;
+        case "left":
+          keptSiblings = siblings.slice(idxInSiblings);
+          break;
+        case "right":
+          keptSiblings = siblings.slice(0, idxInSiblings + 1);
+          break;
       }
-      const keptIds = new Set(keptSiblings.map(t => t.id));
-      const kept = prev.filter(t => tabScopeKey(t) !== scope || keptIds.has(t.id));
+      const keptIds = new Set(keptSiblings.map((t) => t.id));
+      const kept = prev.filter(
+        (t) => tabScopeKey(t) !== scope || keptIds.has(t.id),
+      );
       // Evict cache entries for every tab we're removing.
       for (const t of prev) {
         if (tabScopeKey(t) === scope && !keptIds.has(t.id)) {
@@ -933,7 +1152,7 @@ export default function WorkspaceView({
       const currentActive = activeTabByConn[scope];
       const activeStillOpen = currentActive && keptIds.has(currentActive);
       if (!activeStillOpen) {
-        setActiveTabByConn(map => {
+        setActiveTabByConn((map) => {
           const next = { ...map };
           if (keptSiblings.length > 0) next[scope] = anchorId;
           else delete next[scope];
@@ -945,13 +1164,19 @@ export default function WorkspaceView({
   };
 
   const handleTabViewModeChange = (tabId: string, mode: DataViewMode) => {
-    setTabs(prev => prev.map(t => (t.id === tabId ? { ...t, dataViewMode: mode } : t)));
+    setTabs((prev) =>
+      prev.map((t) => (t.id === tabId ? { ...t, dataViewMode: mode } : t)),
+    );
   };
 
   // Persist the editor buffer back onto the query tab so it survives tab
   // switches and app reloads. Closing the tab drops the entry entirely.
   const handleTabQueryChange = (tabId: string, query: string) => {
-    setTabs(prev => prev.map(t => (t.id === tabId && t.query !== query ? { ...t, query } : t)));
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId && t.query !== query ? { ...t, query } : t,
+      ),
+    );
   };
 
   // A "new table" structure tab successfully created its table on the
@@ -961,9 +1186,9 @@ export default function WorkspaceView({
   // (the dirty calc keeps reading "● unsaved changes" forever even
   // though everything is on disk).
   const handleTabTableCreated = (tabId: string, savedName: string) => {
-    setTabs(prev =>
-      prev.map(t =>
-        t.id === tabId && t.type === 'structure'
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId && t.type === "structure"
           ? { ...t, table: savedName, title: savedName, isNew: false }
           : t,
       ),
@@ -976,9 +1201,16 @@ export default function WorkspaceView({
   // query tab is currently active — the fallback is what the tool docstring
   // tells the model to expect.
   const handledToolCallsRef = useRef<Set<string>>(new Set());
-  const writeQueryTabRef = useRef<(e: { toolCallId?: string; connectionId?: string; schema?: string; sql: string; mode: 'new' | 'replace'; title?: string }) => void>(
-    () => {},
-  );
+  const writeQueryTabRef = useRef<
+    (e: {
+      toolCallId?: string;
+      connectionId?: string;
+      schema?: string;
+      sql: string;
+      mode: "new" | "replace";
+      title?: string;
+    }) => void
+  >(() => {});
   writeQueryTabRef.current = (ev) => {
     if (ev.toolCallId) {
       if (handledToolCallsRef.current.has(ev.toolCallId)) return;
@@ -990,16 +1222,16 @@ export default function WorkspaceView({
     }
     const targetConn = ev.connectionId ?? focusedConnection?.id;
     if (!targetConn) {
-      toast.error('No active connection — cannot write query tab');
+      toast.error("No active connection — cannot write query tab");
       return;
     }
     const fallbackTitle = (() => {
-      const snippet = ev.sql.replace(/\s+/g, ' ').trim();
-      return snippet.length > 36 ? snippet.slice(0, 36) + '…' : snippet;
+      const snippet = ev.sql.replace(/\s+/g, " ").trim();
+      return snippet.length > 36 ? snippet.slice(0, 36) + "…" : snippet;
     })();
-    const title = ev.title?.trim() || fallbackTitle || 'AI Query';
+    const title = ev.title?.trim() || fallbackTitle || "AI Query";
 
-    if (ev.mode === 'replace') {
+    if (ev.mode === "replace") {
       // Replacement priority:
       //   1. The currently-focused query tab. First choice — matches user intent.
       //   2. Otherwise (user is on a routine/view/data tab), the most recent
@@ -1009,17 +1241,28 @@ export default function WorkspaceView({
       //   3. Neither → fall through to 'new'.
       // The SqlEditor syncs the new value in place via an effect on its
       // `initialQuery` prop — no remount, no flicker.
-      const activeQuery = visibleTabs.find(t => t.id === activeTabId && t.type === 'query');
+      const activeQuery = visibleTabs.find(
+        (t) => t.id === activeTabId && t.type === "query",
+      );
       const aiOwned = tabs
-        .filter(t => t.type === 'query' && t.connectionId === targetConn && t.aiOwned)
+        .filter(
+          (t) =>
+            t.type === "query" && t.connectionId === targetConn && t.aiOwned,
+        )
         .slice(-1)[0];
       const target = activeQuery ?? aiOwned;
       if (target) {
-        setTabs(prev => prev.map(t => (
-          t.id === target.id ? { ...t, query: ev.sql, title, aiOwned: true } : t
-        )));
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === target.id
+              ? { ...t, query: ev.sql, title, aiOwned: true }
+              : t,
+          ),
+        );
         setActiveTabId(target.id);
-        toast.success(activeQuery ? 'Replaced current query tab' : 'Updated AI query tab');
+        toast.success(
+          activeQuery ? "Replaced current query tab" : "Updated AI query tab",
+        );
         return;
       }
       // No tab to replace — fall through to new.
@@ -1027,47 +1270,104 @@ export default function WorkspaceView({
     const newTab: AppTab = {
       id: `query-${targetConn}-${Date.now()}`,
       title,
-      type: 'query',
+      type: "query",
       connectionId: targetConn,
-      schema: ev.schema ?? (focusedTile?.serverId === targetConn ? focusedTile.databaseName : undefined),
+      schema:
+        ev.schema ??
+        (focusedTile?.serverId === targetConn
+          ? focusedTile.databaseName
+          : undefined),
       query: ev.sql,
       aiOwned: true,
     };
-    setTabs(prev => [...prev, newTab]);
+    setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
-    toast.success(ev.mode === 'replace' ? 'Opened new query tab (no active tab to replace)' : 'Opened new query tab');
+    toast.success(
+      ev.mode === "replace"
+        ? "Opened new query tab (no active tab to replace)"
+        : "Opened new query tab",
+    );
   };
 
   useEffect(() => {
     let unlisten: (() => void) | null = null;
-    void ai.onTabWrite((ev) => writeQueryTabRef.current(ev)).then((fn) => {
-      unlisten = fn;
-    });
-    return () => { unlisten?.(); };
+    void ai
+      .onTabWrite((ev) => writeQueryTabRef.current(ev))
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      unlisten?.();
+    };
   }, []);
 
-  const handleSaveNewConnection = (conn: ConnectionProfile) => {
-    onAddConnection(conn);
+  const handleSaveNewConnection = async (conn: ConnectionProfile) => {
+    await onAddConnection(conn);
     setNewConnectionOpen(false);
-    onConnect(conn.id);
+  };
+  const handleSaveEditedConnection = async (conn: ConnectionProfile, previousId?: string) => {
+    await onEditConnection?.(conn, previousId);
+    if (previousId && previousId !== conn.id) {
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.connectionId === previousId
+            ? { ...tab, connectionId: conn.id }
+            : tab,
+        ),
+      );
+      setActiveTabByConn((prev) => {
+        const next: Record<string, string> = {};
+        for (const [key, value] of Object.entries(prev)) {
+          next[key.startsWith(`${previousId}::`) ? key.replace(previousId, conn.id) : key] = value;
+        }
+        return next;
+      });
+      const oldTiles = railState.tiles.filter((tile) => tile.serverId === previousId);
+      const newFocusedTileId = focusedTileId;
+      let replacementFocusedTileId: string | null = null;
+      for (const tile of oldTiles) {
+        const replacement = await pinTile({
+          serverId: conn.id,
+          databaseName: tile.databaseName,
+          label: tile.label ?? undefined,
+        });
+        if (tile.id === newFocusedTileId) replacementFocusedTileId = replacement.id;
+      }
+      if (oldTiles.length > 0) {
+        await unpinManyTiles(oldTiles.map((tile) => tile.id));
+      }
+      if (focusedConnectionId === previousId) setFocusedConnectionId(conn.id);
+      if (replacementFocusedTileId) setFocusedTileId(replacementFocusedTileId);
+      await refreshRail();
+    }
+    setEditingConnection(null);
   };
 
-  const _activeTab = visibleTabs.find(t => t.id === activeTabId);
+  const _activeTab = visibleTabs.find((t) => t.id === activeTabId);
   // Side effect — must not run during render or it triggers DevDebug
   // to re-render mid-commit and React logs a warning.
   useEffect(() => {
     setDebugPage({
-      view: 'workspace',
+      view: "workspace",
       activeTabId: activeTabId,
       activeTabType: _activeTab?.type ?? null,
       activeTabTitle: _activeTab?.title ?? null,
       focusedConnection: focusedConnection?.name ?? null,
       focusedDatabase: focusedTile?.databaseName ?? null,
     });
-  }, [activeTabId, _activeTab?.type, _activeTab?.title, focusedConnection?.name, focusedTile?.databaseName]);
+  }, [
+    activeTabId,
+    _activeTab?.type,
+    _activeTab?.title,
+    focusedConnection?.name,
+    focusedTile?.databaseName,
+  ]);
 
   return (
-    <div className="flex-1 flex bg-background relative mac-vibrancy min-w-0" style={contentMaxWidthStyle}>
+    <div
+      className="flex-1 flex bg-background relative mac-vibrancy min-w-0"
+      style={contentMaxWidthStyle}
+    >
       <ConnectionRail
         servers={connections}
         focusedTileId={focusedTileId}
@@ -1076,11 +1376,16 @@ export default function WorkspaceView({
           // Evict every cached grid belonging to tabs on this connection
           // before the connection closes — otherwise stale rows would linger
           // in memory (and reappear if the user reconnects).
-          const idsToClear = tabs.filter(t => t.connectionId === id).map(t => t.id);
-          clearCachedGridsWhere(tid => idsToClear.includes(tid));
+          const idsToClear = tabs
+            .filter((t) => t.connectionId === id)
+            .map((t) => t.id);
+          clearCachedGridsWhere((tid) => idsToClear.includes(tid));
           onDisconnect(id);
         }}
-        onEditServer={() => { /* TODO M-W-4 edit-server flow */ }}
+        onEditServer={(id) => {
+          const conn = connections.find((c) => c.id === id);
+          if (conn) setEditingConnection(conn);
+        }}
         onImportSql={(id) => setImportSqlForId(id)}
         connectedServerIds={new Set(connState.activeById.keys())}
         expanded={railExpanded}
@@ -1096,6 +1401,8 @@ export default function WorkspaceView({
         onNewQuery={handleNewQuery}
         onOpenErd={handleOpenErd}
         onPickConnection={handlePickConnection}
+        onEditConnection={(conn) => setEditingConnection(conn)}
+        onDeleteConnection={onDeleteConnection}
         onOpenNewServer={() => setNewConnectionOpen(true)}
         onPinDatabase={handlePinDatabase}
         onOpenDefinition={handleOpenDefinition}
@@ -1105,28 +1412,37 @@ export default function WorkspaceView({
         onNewRoutine={handleNewRoutine}
         onOpenRealtime={handleNewRealtime}
         activeItem={(() => {
-          const tab = visibleTabs.find(t => t.id === activeTabId);
+          const tab = visibleTabs.find((t) => t.id === activeTabId);
           if (!tab || !tab.schema) return null;
           // Data + structure tabs represent a table or view — we distinguish
           // by whether that name appears in the view list for the schema.
-          if ((tab.type === 'data' || tab.type === 'structure') && tab.table && tab.table !== '(new)') {
+          if (
+            (tab.type === "data" || tab.type === "structure") &&
+            tab.table &&
+            tab.table !== "(new)"
+          ) {
             const schemas = connState.schemasById.get(tab.connectionId) ?? [];
-            const schema = schemas.find(s => s.name === tab.schema);
-            const kind = schema?.tables.find(t => t.name === tab.table)?.kind;
+            const schema = schemas.find((s) => s.name === tab.schema);
+            const kind = schema?.tables.find((t) => t.name === tab.table)?.kind;
             return {
-              type: kind === 'view' ? 'view' : 'table',
+              type: kind === "view" ? "view" : "table",
               connectionId: tab.connectionId,
               schema: tab.schema,
               name: tab.table,
             };
           }
-          if (tab.type === 'routine' && tab.routine && tab.routine.name !== '(new)') {
+          if (
+            tab.type === "routine" &&
+            tab.routine &&
+            tab.routine.name !== "(new)"
+          ) {
             return {
-              type: tab.routine.kind === 'view' ? 'view' : 'routine',
+              type: tab.routine.kind === "view" ? "view" : "routine",
               connectionId: tab.connectionId,
               schema: tab.schema,
               name: tab.routine.name,
-              routineKind: tab.routine.kind === 'view' ? undefined : tab.routine.kind,
+              routineKind:
+                tab.routine.kind === "view" ? undefined : tab.routine.kind,
             };
           }
           return null;
@@ -1173,19 +1489,22 @@ export default function WorkspaceView({
                 // Dragging left grows the panel (we're anchored right), so
                 // width = startW + (startX - currentX).
                 const dx = startX - ev.clientX;
-                const next = Math.max(CHAT_MIN_WIDTH, Math.min(CHAT_MAX_WIDTH, startW + dx));
+                const next = Math.max(
+                  CHAT_MIN_WIDTH,
+                  Math.min(CHAT_MAX_WIDTH, startW + dx),
+                );
                 setChatWidth(next);
               };
               const onUp = () => {
-                window.removeEventListener('mousemove', onMove);
-                window.removeEventListener('mouseup', onUp);
-                document.body.style.cursor = '';
-                document.body.style.userSelect = '';
+                window.removeEventListener("mousemove", onMove);
+                window.removeEventListener("mouseup", onUp);
+                document.body.style.cursor = "";
+                document.body.style.userSelect = "";
               };
-              window.addEventListener('mousemove', onMove);
-              window.addEventListener('mouseup', onUp);
-              document.body.style.cursor = 'ew-resize';
-              document.body.style.userSelect = 'none';
+              window.addEventListener("mousemove", onMove);
+              window.addEventListener("mouseup", onUp);
+              document.body.style.cursor = "ew-resize";
+              document.body.style.userSelect = "none";
             }}
             role="separator"
             aria-orientation="vertical"
@@ -1200,7 +1519,9 @@ export default function WorkspaceView({
                 ? `${focusedConnection.name} / ${focusedTile.databaseName}`
                 : focusedConnection?.name
             }
-            focus={computeFocusHint(visibleTabs.find(t => t.id === activeTabId))}
+            focus={computeFocusHint(
+              visibleTabs.find((t) => t.id === activeTabId),
+            )}
           />
         </div>
       )}
@@ -1211,14 +1532,22 @@ export default function WorkspaceView({
         onSave={handleSaveNewConnection}
       />
 
+      <ConnectionModal
+        isOpen={editingConnection !== null}
+        onClose={() => setEditingConnection(null)}
+        onSave={handleSaveEditedConnection}
+        initialData={editingConnection ?? undefined}
+      />
+
       <ImportSqlDialog
         isOpen={importSqlForId !== null}
         onClose={() => setImportSqlForId(null)}
         connectionId={importSqlForId}
         connectionName={
           importSqlForId
-            ? (connections.find(c => c.id === importSqlForId)?.name ?? 'connection')
-            : ''
+            ? (connections.find((c) => c.id === importSqlForId)?.name ??
+              "connection")
+            : ""
         }
         targetDatabase={
           // Use the rail-focused tile's database when it matches the
@@ -1234,9 +1563,9 @@ export default function WorkspaceView({
           // ever emitting a stray USE for the PG path.
           (() => {
             if (!importSqlForId) return null;
-            const profile = connections.find(c => c.id === importSqlForId);
-            if (profile?.driver === 'SQLite') return null;
-            if (profile?.driver === 'PostgreSQL') return null;
+            const profile = connections.find((c) => c.id === importSqlForId);
+            if (profile?.driver === "SQLite") return null;
+            if (profile?.driver === "PostgreSQL") return null;
             return focusedTile?.serverId === importSqlForId
               ? focusedTile.databaseName
               : (profile?.database ?? null);
@@ -1248,10 +1577,10 @@ export default function WorkspaceView({
           // run the dump as-is.
           (() => {
             if (!importSqlForId) return null;
-            const profile = connections.find(c => c.id === importSqlForId);
-            if (profile?.driver === 'MySQL') return 'mysql';
-            if (profile?.driver === 'SQLite') return 'sqlite';
-            if (profile?.driver === 'PostgreSQL') return 'postgres';
+            const profile = connections.find((c) => c.id === importSqlForId);
+            if (profile?.driver === "MySQL") return "mysql";
+            if (profile?.driver === "SQLite") return "sqlite";
+            if (profile?.driver === "PostgreSQL") return "postgres";
             return null;
           })()
         }

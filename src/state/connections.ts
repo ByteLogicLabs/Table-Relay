@@ -5,6 +5,7 @@ interface State {
   activeById: Map<string, ConnectionMeta>;
   schemasById: Map<string, SchemaInfo[]>;
   loadingSchemasById: Set<string>;
+  loadedSchemasById: Set<string>;
   connectingIds: Set<string>;
   lastErrorById: Map<string, string>;
   /** Per-connection table-structure cache keyed by `schema.table` (lowercased). */
@@ -14,6 +15,7 @@ interface State {
 // In-flight describe_table promises so concurrent completion triggers don't
 // pile up redundant Rust calls.
 const inflightStructures = new Map<string, Promise<TableStructure>>();
+const inflightConnects = new Map<string, Promise<ConnectionMeta | null>>();
 
 // Same idea for list_schemas: StrictMode double-mount + the workspace, rail,
 // and sidebar each calling refreshSchemas on connect all piled up 4–6 concurrent
@@ -26,6 +28,7 @@ let state: State = {
   activeById: new Map(),
   schemasById: new Map(),
   loadingSchemasById: new Set(),
+  loadedSchemasById: new Set(),
   connectingIds: new Set(),
   lastErrorById: new Map(),
   tableStructuresById: new Map(),
@@ -46,44 +49,65 @@ export function useConnections() {
 }
 
 export async function connectAndLoad(connectionId: string, force?: boolean): Promise<ConnectionMeta | null> {
-  if (!force && state.activeById.has(connectionId)) return state.activeById.get(connectionId)!;
-  // Clear stale state when force-reconnecting
-  if (force) {
-    mutate(s => {
-      const activeById = new Map(s.activeById);
-      activeById.delete(connectionId);
-      return { ...s, activeById };
-    });
+  if (!force) {
+    const existing = inflightConnects.get(connectionId);
+    if (existing) return existing;
   }
-  mutate(s => {
-    const next = { ...s, connectingIds: new Set(s.connectingIds) };
-    next.connectingIds.add(connectionId);
-    return next;
-  });
-  try {
-    const meta = await db.connect(connectionId);
+  if (!force && state.activeById.has(connectionId)) {
+    const meta = state.activeById.get(connectionId)!;
     mutate(s => {
-      const activeById = new Map(s.activeById);
-      activeById.set(connectionId, meta);
       const connectingIds = new Set(s.connectingIds);
       connectingIds.delete(connectionId);
       const lastErrorById = new Map(s.lastErrorById);
       lastErrorById.delete(connectionId);
-      return { ...s, activeById, connectingIds, lastErrorById };
-    });
-    void refreshSchemas(connectionId);
-    return meta;
-  } catch (err) {
-    const msg = isDbError(err) ? err.message : String(err);
-    mutate(s => {
-      const connectingIds = new Set(s.connectingIds);
-      connectingIds.delete(connectionId);
-      const lastErrorById = new Map(s.lastErrorById);
-      lastErrorById.set(connectionId, msg);
       return { ...s, connectingIds, lastErrorById };
     });
-    throw err;
+    return meta;
   }
+
+  const p = (async () => {
+    // Clear stale state when force-reconnecting
+    if (force) {
+      mutate(s => {
+        const activeById = new Map(s.activeById);
+        activeById.delete(connectionId);
+        return { ...s, activeById };
+      });
+    }
+    mutate(s => {
+      const next = { ...s, connectingIds: new Set(s.connectingIds) };
+      next.connectingIds.add(connectionId);
+      return next;
+    });
+    try {
+      const meta = await db.connect(connectionId);
+      mutate(s => {
+        const activeById = new Map(s.activeById);
+        activeById.set(connectionId, meta);
+        const connectingIds = new Set(s.connectingIds);
+        connectingIds.delete(connectionId);
+        const lastErrorById = new Map(s.lastErrorById);
+        lastErrorById.delete(connectionId);
+        return { ...s, activeById, connectingIds, lastErrorById };
+      });
+      void refreshSchemas(connectionId);
+      return meta;
+    } catch (err) {
+      const msg = isDbError(err) ? err.message : String(err);
+      mutate(s => {
+        const connectingIds = new Set(s.connectingIds);
+        connectingIds.delete(connectionId);
+        const lastErrorById = new Map(s.lastErrorById);
+        lastErrorById.set(connectionId, msg);
+        return { ...s, connectingIds, lastErrorById };
+      });
+      throw err;
+    }
+  })().finally(() => {
+    inflightConnects.delete(connectionId);
+  });
+  inflightConnects.set(connectionId, p);
+  return p;
 }
 
 export async function disconnect(connectionId: string): Promise<void> {
@@ -100,11 +124,13 @@ export async function disconnect(connectionId: string): Promise<void> {
     schemasById.delete(connectionId);
     const loadingSchemasById = new Set(s.loadingSchemasById);
     loadingSchemasById.delete(connectionId);
+    const loadedSchemasById = new Set(s.loadedSchemasById);
+    loadedSchemasById.delete(connectionId);
     const lastErrorById = new Map(s.lastErrorById);
     lastErrorById.delete(connectionId);
     const tableStructuresById = new Map(s.tableStructuresById);
     tableStructuresById.delete(connectionId);
-    return { ...s, activeById, schemasById, loadingSchemasById, lastErrorById, tableStructuresById };
+    return { ...s, activeById, schemasById, loadingSchemasById, loadedSchemasById, lastErrorById, tableStructuresById };
   });
 }
 
@@ -306,13 +332,16 @@ export async function refreshSchemas(
         schemasById.set(connectionId, schemas);
         const loadingSchemasById = new Set(s.loadingSchemasById);
         loadingSchemasById.delete(connectionId);
-        return { ...s, schemasById, loadingSchemasById };
+        const loadedSchemasById = new Set(s.loadedSchemasById);
+        loadedSchemasById.add(connectionId);
+        return { ...s, schemasById, loadingSchemasById, loadedSchemasById };
       });
     } catch (err) {
       const msg = isDbError(err) ? err.message : String(err);
       mutate(s => {
         const loadingSchemasById = new Set(s.loadingSchemasById);
         loadingSchemasById.delete(connectionId);
+        const loadedSchemasById = new Set(s.loadedSchemasById);
         // A silent background revalidation that fails leaves the cached tree
         // in place and stays quiet — don't surface a transient blip as a
         // connection error. A visible refresh records the error as before.
@@ -321,7 +350,8 @@ export async function refreshSchemas(
         }
         const lastErrorById = new Map(s.lastErrorById);
         lastErrorById.set(connectionId, msg);
-        return { ...s, loadingSchemasById, lastErrorById };
+        loadedSchemasById.delete(connectionId);
+        return { ...s, loadingSchemasById, loadedSchemasById, lastErrorById };
       });
     }
   })().finally(() => {

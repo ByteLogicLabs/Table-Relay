@@ -70,6 +70,14 @@ sha2 = "0.10"
 argon2 = "0.5.3"
 aes-gcm = "0.10.3"
 rand = "0.8.6"
+# TablePlus connection import: their `.tableplusconnection` export is encrypted
+# with RNCryptor v3 (AES-256-CBC + PBKDF2-HMAC-SHA1 + HMAC-SHA256). These all
+# already resolve transitively, so pinning them as direct deps is free.
+aes = "0.8"
+cbc = "0.1"
+pbkdf2 = { version = "0.11", default-features = false }
+hmac = "0.12"
+sha1 = "0.10"
 # Locate the `llama-server` binary on PATH / known install dirs (M8.1 local).
 which = "6"
 

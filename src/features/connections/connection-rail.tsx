@@ -221,7 +221,7 @@ export default function ConnectionRail({
                 <ContextMenuItem onClick={() => onFocusTile(tile)}>Focus</ContextMenuItem>
                 {server && (
                   <ContextMenuItem onClick={() => onEditServer(server.id)}>
-                    <Pencil className="w-3.5 h-3.5 mr-2" /> Edit server
+                    <Pencil className="w-3.5 h-3.5 mr-2" /> Edit connection
                   </ContextMenuItem>
                 )}
                 {server && connected && supportsImport(server.id) && (
@@ -245,7 +245,7 @@ export default function ConnectionRail({
                   user intent, so we collapsed the two into one item.
                 */}
                 <ContextMenuItem
-                  className="text-destructive focus:text-destructive"
+                  className="text-destructive focus:text-destructive whitespace-nowrap"
                   onClick={() => {
                     if (server && connected) onDisconnectServer(server.id);
                     void unpinTile(tile.id);
@@ -256,7 +256,7 @@ export default function ConnectionRail({
                 {rail.tiles.length > 1 && (
                   <>
                     <ContextMenuItem
-                      className="text-destructive focus:text-destructive"
+                      className="text-destructive focus:text-destructive whitespace-nowrap"
                       onClick={() => {
                         const others = rail.tiles.filter(t => t.id !== tile.id);
                         const otherServerIds = new Set(others.map(t => t.serverId));
@@ -267,7 +267,7 @@ export default function ConnectionRail({
                       Disconnect others
                     </ContextMenuItem>
                     <ContextMenuItem
-                      className="text-destructive focus:text-destructive"
+                      className="text-destructive focus:text-destructive whitespace-nowrap"
                       onClick={() => {
                         const serverIds = new Set(rail.tiles.map(t => t.serverId));
                         serverIds.forEach(id => onDisconnectServer(id));

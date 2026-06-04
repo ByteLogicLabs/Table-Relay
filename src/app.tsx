@@ -9,7 +9,7 @@ import { loadSettings, hydrateSettings, applyTheme } from './lib/settings-store'
 import { hydrateCredentials } from './lib/ai-credentials';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
 import { isDbError } from './lib/db';
-import { connectAndLoad, disconnect as disconnectDb, markConnectionLost } from './state/connections';
+import { connectAndLoad, disconnect as disconnectDb, markConnectionLost, useConnections } from './state/connections';
 import { getRailSnapshot, refreshRail, useRail } from './state/rail';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
@@ -52,6 +52,7 @@ export default function App() {
 function UnlockedApp() {
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
   const [activeConnectionIds, setActiveConnectionIds] = useState<string[]>([]);
+  const connState = useConnections();
   const rail = useRail();
   // Stable reference to the current list so the reconnect listener (attached
   // once at mount) can still resolve a connection name without re-subscribing.
@@ -240,38 +241,42 @@ function UnlockedApp() {
     setActiveConnectionIds(prev => prev.filter(cId => cId !== id));
   };
 
+  const saveConnectionRecord = async (conn: ConnectionProfile) => {
+    const saved = await connectionsStore.save({
+      id: conn.id,
+      name: conn.name,
+      driver: conn.driver,
+      host: conn.host,
+      port: Number(conn.port),
+      user: conn.user,
+      password: conn.password,
+      database: conn.database,
+      sslMode: conn.sslMode,
+      sshEnabled: !!conn.sshEnabled,
+      sshHost: conn.sshHost || undefined,
+      sshPort: conn.sshPort !== undefined && conn.sshPort !== '' ? Number(conn.sshPort) : undefined,
+      sshUser: conn.sshUser || undefined,
+      sshAuthKind: conn.sshAuthKind,
+      sshKeyPath: conn.sshKeyPath || undefined,
+      sshPassword: conn.sshPassword || undefined,
+      sshKeyPassphrase: conn.sshKeyPassphrase || undefined,
+      color: conn.color,
+      isFavorite: !!conn.isFavorite,
+    });
+    await reload();
+    return saved.id;
+  };
+
   const handleAddConnection = async (conn: ConnectionProfile) => {
     // Save first — if that fails we never reach the connect step. The
     // saved record carries the canonical id (persisted + validated by
     // the store), which is what `connectAndLoad` needs.
     let savedId: string;
     try {
-      const saved = await connectionsStore.save({
-        id: conn.id,
-        name: conn.name,
-        driver: conn.driver,
-        host: conn.host,
-        port: Number(conn.port),
-        user: conn.user,
-        password: conn.password,
-        database: conn.database,
-        sslMode: conn.sslMode,
-        sshEnabled: !!conn.sshEnabled,
-        sshHost: conn.sshHost || undefined,
-        sshPort: conn.sshPort !== undefined && conn.sshPort !== '' ? Number(conn.sshPort) : undefined,
-        sshUser: conn.sshUser || undefined,
-        sshAuthKind: conn.sshAuthKind,
-        sshKeyPath: conn.sshKeyPath || undefined,
-        sshPassword: conn.sshPassword || undefined,
-        sshKeyPassphrase: conn.sshKeyPassphrase || undefined,
-        color: conn.color,
-        isFavorite: !!conn.isFavorite,
-      });
-      savedId = saved.id;
-      await reload();
+      savedId = await saveConnectionRecord(conn);
     } catch (e) {
       toast.error(`Failed to save connection: ${String(e)}`);
-      return;
+      throw e;
     }
 
     // Auto-connect the freshly-saved profile — that's what "Save & Connect"
@@ -296,8 +301,40 @@ function UnlockedApp() {
     }
   };
 
-  const handleEditConnection = async (conn: ConnectionProfile) => {
-    await handleAddConnection(conn);
+  const handleEditConnection = async (conn: ConnectionProfile, previousId = conn.id) => {
+    const idChanged = previousId !== conn.id;
+    const wasActive = connState.activeById.has(previousId) || activeConnectionIds.includes(previousId);
+    try {
+      if (idChanged) {
+        await disconnectDb(previousId);
+      }
+      await saveConnectionRecord(conn);
+      if (idChanged) {
+        await connectionsStore.remove(previousId);
+        setActiveConnectionIds(prev => prev.filter(cId => cId !== previousId));
+        await reload();
+      }
+    } catch (e) {
+      toast.error(`Failed to save connection: ${String(e)}`);
+      throw e;
+    }
+
+    toast.success(`Saved ${conn.name}`);
+    if (!wasActive) return;
+
+    const toastId = toast.loading(`Reconnecting to ${conn.name}…`);
+    try {
+      if (!idChanged) {
+        await disconnectDb(conn.id);
+      }
+      setActiveConnectionIds(prev => (prev.includes(conn.id) ? prev : [...prev, conn.id]));
+      await connectAndLoad(conn.id, true);
+      toast.success(`Reconnected to ${conn.name}`, { id: toastId });
+    } catch (err) {
+      setActiveConnectionIds(prev => prev.filter(cId => cId !== conn.id));
+      toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
+      throw err;
+    }
   };
 
   const handleDeleteConnection = async (id: string) => {
@@ -310,10 +347,10 @@ function UnlockedApp() {
     }
   };
 
-  const activeConnections = connections.filter(c => activeConnectionIds.includes(c.id));
+  const activeConnections = connections.filter(c => activeConnectionIds.includes(c.id) || connState.activeById.has(c.id));
   // Home rule: when there are no active connections and no pinned tiles,
   // return to the welcome screen even if saved profiles still exist.
-  const showWorkspace = activeConnectionIds.length > 0 || rail.tiles.length > 0;
+  const showWorkspace = activeConnectionIds.length > 0 || connState.activeById.size > 0 || rail.tiles.length > 0;
 
   // Push to the debug store as a side effect — calling setState during render
   // schedules a re-render of DevDebug mid-commit, which React warns about.
@@ -333,6 +370,7 @@ function UnlockedApp() {
             onConnect={handleConnect}
             onAddConnection={handleAddConnection}
             onEditConnection={handleEditConnection}
+            onDeleteConnection={handleDeleteConnection}
           />
         ) : (
           <WelcomeView

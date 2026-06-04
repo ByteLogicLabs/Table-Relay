@@ -34,6 +34,9 @@ pub async fn db_connect(
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
 ) -> Result<ConnectionMeta, AdapterError> {
+    let connect_lock = registry.reconnect_lock(&connection_id).await;
+    let _connect_guard = connect_lock.lock().await;
+
     // Idempotency / tunnel reuse: if this connection is already live AND
     // healthy, return it instead of building a SECOND adapter + SSH tunnel.
     // A redundant `db_connect` (frontend state drift, a retry, two callers

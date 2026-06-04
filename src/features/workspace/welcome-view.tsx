@@ -14,8 +14,8 @@ import { useConnections } from '../../state/connections';
 interface WelcomeViewProps {
   connections: ConnectionProfile[];
   onConnect: (id: string) => void;
-  onAddConnection: (conn: ConnectionProfile) => void;
-  onEditConnection: (conn: ConnectionProfile) => void;
+  onAddConnection: (conn: ConnectionProfile) => void | Promise<void>;
+  onEditConnection: (conn: ConnectionProfile, previousId?: string) => void | Promise<void>;
   onDeleteConnection: (id: string) => void;
 }
 
@@ -197,7 +197,7 @@ export default function WelcomeView({
                           <Copy className="w-4 h-4 mr-2" /> Duplicate
                         </DropdownMenuItem>
                         <DropdownMenuItem 
-                          className="text-destructive focus:text-destructive"
+                          className="text-destructive focus:text-destructive whitespace-nowrap"
                           onClick={(e) => { 
                             e.stopPropagation(); 
                             if (confirm(`Are you sure you want to delete '${conn.name}'?`)) {
@@ -226,11 +226,11 @@ export default function WelcomeView({
       <ConnectionModal 
         isOpen={isModalOpen} 
         onClose={() => setIsModalOpen(false)} 
-        onSave={(conn) => {
+        onSave={async (conn) => {
           if (editingConnection) {
-            onEditConnection(conn);
+            await onEditConnection(conn, editingConnection.id);
           } else {
-            onAddConnection(conn);
+            await onAddConnection(conn);
           }
           setIsModalOpen(false);
         }}

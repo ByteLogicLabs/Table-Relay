@@ -226,6 +226,10 @@ impl RedisDriver {
         Ok(out)
     }
 
+    pub async fn list_databases(&self) -> Result<Vec<String>, AdapterError> {
+        Ok((0..MAX_DB).map(|db| format!("db{db}")).collect())
+    }
+
     pub async fn describe_table(
         &self,
         schema: &str,
