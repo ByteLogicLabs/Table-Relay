@@ -132,9 +132,10 @@ export default function ConnectionRail({
           const isFocused = tile.id === focusedTileId;
           const primary = tile.label ?? server?.name ?? '(missing server)';
           const ver = versionLabel(tile.serverId);
+          const dbLabel = tile.databaseName || '…';
           const secondary = ver
-            ? `${ver} · ${tile.databaseName}`
-            : `${server?.driver ?? '?'} · ${tile.databaseName}`;
+            ? `${ver} · ${dbLabel}`
+            : `${server?.driver ?? '?'} · ${dbLabel}`;
           const connected = connectedServerIds.has(tile.serverId);
           const isConnecting = connState.connectingIds.has(tile.serverId);
           const isDragging = draggingId === tile.id;
@@ -211,7 +212,7 @@ export default function ConnectionRail({
                           SSH
                         </span>
                       )}
-                      <span className="truncate">{tile.databaseName}</span>
+                      <span className="truncate">{tile.databaseName || '…'}</span>
                     </span>
                   )}
                 </button>

@@ -359,18 +359,6 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
             />
           </div>
 
-          <div className="grid gap-2">
-            <label className="text-sm font-medium">Connection ID</label>
-            <Input
-              className="w-full font-mono text-xs"
-              placeholder="Auto-generated if blank"
-              value={formData.id || ''}
-              onChange={(e) => handleChange('id', e.target.value)}
-            />
-            <div className="text-xs text-muted-foreground">
-              Used internally for saved tabs, pinned databases, and reconnect state.
-            </div>
-          </div>
 
           {/* Connection fields rendered from the adapter manifest. The
               adapter declares which fields exist, their labels, kinds

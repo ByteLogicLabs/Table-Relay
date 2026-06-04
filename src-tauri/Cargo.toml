@@ -65,9 +65,8 @@ async-stream = "0.3"
 bytes = "1"
 # SHA256 verification for downloaded GGUF weights (M8.1).
 sha2 = "0.10"
-# Encrypted app store: password-derived key + authenticated encryption for
+# Encrypted app store: AES-GCM authenticated encryption for
 # the serialized SQLite database snapshot.
-argon2 = "0.5.3"
 aes-gcm = "0.10.3"
 rand = "0.8.6"
 # TablePlus connection import: their `.tableplusconnection` export is encrypted

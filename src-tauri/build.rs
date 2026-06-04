@@ -35,6 +35,25 @@ struct AdapterEntry {
 fn main() {
     tauri_build::build();
 
+    // Load APP_TOKEN from the workspace .env file and forward it as a
+    // compile-time env var so the store can use it without exposing it at
+    // runtime. We intentionally don't use the `dotenv` crate — a simple
+    // two-liner keeps the build script dependency-free.
+    println!("cargo:rerun-if-changed=../.env");
+    let env_path = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap())
+        .parent()
+        .unwrap()
+        .join(".env");
+    if env_path.exists() {
+        for line in fs::read_to_string(&env_path).unwrap_or_default().lines() {
+            let line = line.trim();
+            if let Some(val) = line.strip_prefix("APP_TOKEN=") {
+                println!("cargo:rustc-env=APP_TOKEN={val}");
+                break;
+            }
+        }
+    }
+
     // Re-run whenever the enrollment list changes. Cargo will also re-run
     // on changes to `Cargo.toml` automatically.
     println!("cargo:rerun-if-changed=adapters.toml");

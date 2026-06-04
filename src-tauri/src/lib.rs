@@ -107,9 +107,18 @@ pub fn run() {
             let connection_new = MenuItemBuilder::with_id("connection_new", "New Connection")
                 .accelerator("CmdOrCtrl+N")
                 .build(handle)?;
+            let connection_edit_current =
+                MenuItemBuilder::with_id("connection_edit_current", "Edit Current Connection…")
+                    .build(handle)?;
+            let connection_open_database =
+                MenuItemBuilder::with_id("connection_open_database", "Open Database…")
+                    .build(handle)?;
             let connection_menu = SubmenuBuilder::new(handle, "Connection")
                 .item(&connection_picker)
                 .item(&connection_new)
+                .separator()
+                .item(&connection_edit_current)
+                .item(&connection_open_database)
                 .build()?;
 
             let mut menu_builder = MenuBuilder::new(handle);
@@ -176,9 +185,6 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Security / encrypted app store
             commands::security::security_status,
-            commands::security::security_initialize,
-            commands::security::security_unlock,
-            commands::security::security_lock,
             commands::security::security_remove_backup,
             // Connection store (plain, no encryption)
             commands::store::connections_list,
