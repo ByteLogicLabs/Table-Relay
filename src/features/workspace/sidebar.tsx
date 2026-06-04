@@ -386,21 +386,18 @@ export default function Sidebar({
         .finally(() => setLoadingExtras(false));
     };
     const onOpenConnectionPicker = () => setConnManagerOpen(true);
+    const onOpenConnectPicker = () => setConnectPickerOpen(true);
     const onOpenDatabase = () => {
       if (conn) setDbPickerOpen(true);
     };
     window.addEventListener("tablerelay:reload", onReload);
-    window.addEventListener(
-      "tablerelay:menu-connection-picker",
-      onOpenConnectionPicker,
-    );
+    window.addEventListener("tablerelay:menu-connection-picker", onOpenConnectionPicker);
+    window.addEventListener("tablerelay:open-connect-picker", onOpenConnectPicker);
     window.addEventListener("tablerelay:menu-open-database", onOpenDatabase);
     return () => {
       window.removeEventListener("tablerelay:reload", onReload);
-      window.removeEventListener(
-        "tablerelay:menu-connection-picker",
-        onOpenConnectionPicker,
-      );
+      window.removeEventListener("tablerelay:menu-connection-picker", onOpenConnectionPicker);
+      window.removeEventListener("tablerelay:open-connect-picker", onOpenConnectPicker);
       window.removeEventListener("tablerelay:menu-open-database", onOpenDatabase);
     };
   }, [conn, selectedDb]);

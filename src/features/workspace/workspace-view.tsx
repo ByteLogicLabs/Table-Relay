@@ -301,7 +301,7 @@ export default function WorkspaceView({
     if (!returnToConnectionManagerAfterEdit.current) return;
     returnToConnectionManagerAfterEdit.current = false;
     window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent("tablerelay:menu-connection-picker"));
+      window.dispatchEvent(new CustomEvent("tablerelay:open-connect-picker"));
     }, 0);
   };
   // Connection id the Import SQL dialog is bound to. `null` = dialog closed.
@@ -691,6 +691,10 @@ export default function WorkspaceView({
     }
   };
 
+  // Track pending placeholder tile ids by serverId so handlePinDatabase can
+  // reliably find and remove them even when railState hasn't re-rendered yet.
+  const pendingPlaceholderIds = useRef<Map<string, string>>(new Map());
+
   const handlePickConnection = (connectionId: string) => {
     // Pin a placeholder tile immediately so the connection appears in the rail
     // the instant the user clicks — no waiting on the (possibly slow, SSH)
@@ -699,6 +703,7 @@ export default function WorkspaceView({
     void (async () => {
       try {
         const placeholder = await pinTile({ serverId: connectionId, databaseName: '' });
+        pendingPlaceholderIds.current.set(connectionId, placeholder.id);
         setFocusedTileId(placeholder.id);
         setFocusedConnectionId(connectionId);
       } catch {
@@ -727,12 +732,16 @@ export default function WorkspaceView({
 
   const handlePinDatabase = async (serverId: string, databaseName: string) => {
     try {
-      // Remove any placeholder tile (databaseName === '') for this server
-      // before pinning the real one so we don't leave a ghost in the rail.
-      const placeholders = railState.tiles
-        .filter((t) => t.serverId === serverId && t.databaseName === '')
-        .map((t) => t.id);
-      if (placeholders.length > 0) await unpinManyTiles(placeholders);
+      // Remove placeholder tile using the ref (always current) so we catch it
+      // even when railState hasn't re-rendered with the new tile yet.
+      const refId = pendingPlaceholderIds.current.get(serverId);
+      const placeholderIds = refId
+        ? [refId]
+        : railState.tiles
+            .filter((t) => t.serverId === serverId && t.databaseName === '')
+            .map((t) => t.id);
+      pendingPlaceholderIds.current.delete(serverId);
+      if (placeholderIds.length > 0) await unpinManyTiles(placeholderIds);
 
       const tile = await pinTile({ serverId, databaseName });
       setFocusedTileId(tile.id);

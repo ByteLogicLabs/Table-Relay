@@ -57,6 +57,8 @@ export default function ConnectPickerDialog({
 
   const remove = (conn: ConnectionProfile) => {
     if (!window.confirm(`Delete '${conn.name}'?`)) return;
+    onOpenChange(false);
+    setQuery('');
     onDeleteConnection(conn.id);
   };
 
