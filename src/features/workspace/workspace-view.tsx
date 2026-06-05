@@ -28,7 +28,7 @@ import {
 import { useRail, pinTile, refreshRail, unpinManyTiles } from "../../state/rail";
 import type { RailTile } from "../../lib/rail";
 import { isDbError } from "../../lib/db";
-import { ai, type ChatFocus } from "../../lib/ai";
+import { ai } from "../../lib/ai";
 import {
   clearCachedGrid,
   clearCachedGridsWhere,
@@ -36,86 +36,23 @@ import {
 import { clearQueryResultSnapshot } from "../../state/query-result-cache";
 import { setDebugPage } from "../../state/debug";
 import { getAppState, setAppState } from "../../lib/app-state-store";
-
-const SIDEBAR_WIDTH = 256;
-const CHAT_WIDTH_KEY = "tablerelay:chatWidth:v1";
-const CHAT_MIN_WIDTH = 320;
-const CHAT_MAX_WIDTH = 800;
-const CHAT_DEFAULT_WIDTH = 384;
-const TABS_STORAGE_KEY = "tablerelay:tabs:v1";
-const ACTIVE_TAB_KEY = "tablerelay:activeTab:v1";
-const ACTIVE_TAB_BY_CONN_KEY = "tablerelay:activeTabByConn:v1";
-const FOCUSED_TILE_KEY = "tablerelay:focusedTile:v1";
-const OLD_TABS_STORAGE_KEY = "dbtable:tabs:v1";
-const OLD_ACTIVE_TAB_KEY = "dbtable:activeTab:v1";
-const OLD_ACTIVE_TAB_BY_CONN_KEY = "dbtable:activeTabByConn:v1";
-const OLD_FOCUSED_TILE_KEY = "dbtable:focusedTile:v1";
-const OLD_CHAT_WIDTH_KEY = "dbtable:chatWidth:v1";
-
-/**
- * Translate the active AppTab into a focus hint the AI context builder can
- * consume. Returns undefined for tabs that don't give the model anything
- * actionable to point at (e.g. diagram / schema / empty states) — the chat
- * then falls back to plain schema-level context.
- */
-function computeFocusHint(tab: AppTab | undefined): ChatFocus | undefined {
-  if (!tab) return undefined;
-  switch (tab.type) {
-    case "query":
-      return tab.query && tab.query.trim().length > 0
-        ? { type: "query", sql: tab.query }
-        : undefined;
-    case "routine":
-      if (!tab.routine) return undefined;
-      return {
-        type: "routine",
-        schema: tab.routine.schema,
-        name: tab.routine.name,
-        kind: tab.routine.kind,
-      };
-    case "data":
-    case "structure":
-      if (tab.schema && tab.table) {
-        return { type: "table", schema: tab.schema, name: tab.table };
-      }
-      return undefined;
-    case "realtime":
-      return {
-        type: "realtime",
-        pattern: tab.realtimePattern ?? "",
-        // Live subscription state isn't persisted on the tab; the
-        // adapter-primer in the system prompt carries the syntactical
-        // rules the model needs regardless. Keep the slot here for
-        // forward-compat with a richer status surface later.
-        isRunning: false,
-        recentChannels: [],
-      };
-    default:
-      return undefined;
-  }
-}
-
-function loadLegacyTabs(): AppTab[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw =
-      window.localStorage.getItem(TABS_STORAGE_KEY) ??
-      window.localStorage.getItem(OLD_TABS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (t): t is AppTab =>
-        t &&
-        typeof t.id === "string" &&
-        typeof t.title === "string" &&
-        typeof t.type === "string" &&
-        typeof t.connectionId === "string",
-    );
-  } catch {
-    return [];
-  }
-}
+import {
+  SIDEBAR_WIDTH,
+  CHAT_WIDTH_KEY,
+  CHAT_MIN_WIDTH,
+  CHAT_MAX_WIDTH,
+  CHAT_DEFAULT_WIDTH,
+  TABS_STORAGE_KEY,
+  ACTIVE_TAB_KEY,
+  ACTIVE_TAB_BY_CONN_KEY,
+  FOCUSED_TILE_KEY,
+  OLD_TABS_STORAGE_KEY,
+  OLD_ACTIVE_TAB_KEY,
+  OLD_ACTIVE_TAB_BY_CONN_KEY,
+  OLD_FOCUSED_TILE_KEY,
+  OLD_CHAT_WIDTH_KEY,
+} from "./workspace-constants";
+import { computeFocusHint, loadLegacyTabs } from "./workspace-utils";
 
 interface WorkspaceViewProps {
   activeConnections: ConnectionProfile[];
