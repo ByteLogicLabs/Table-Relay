@@ -5,7 +5,6 @@ import {
   Table as TableIcon,
   LayoutTemplate,
   FunctionSquare,
-  ChevronDown,
   MoreVertical,
   Loader2,
   Plus,
@@ -55,6 +54,13 @@ import { DestructiveConfirmDialog } from "../../components/destructive-confirm-d
 import { useMultiSelection } from "../../hooks/use-multi-selection";
 import { getClickIntent, getKeyIntent } from "../../lib/click-intent";
 import { dialectFromManifest } from "../data-grid/editor-kinds";
+import { Section } from "./sidebar-section";
+import {
+  pickDdlColumn,
+  quoteIdentForDialect,
+  toTitleCaseLabel,
+  type SectionKey,
+} from "./sidebar-utils";
 
 interface SidebarProps {
   focusedConnection: ConnectionProfile | null;
@@ -134,29 +140,6 @@ interface SidebarProps {
     /** For routines only — distinguishes function vs procedure. */
     routineKind?: "function" | "procedure";
   } | null;
-}
-
-type SectionKey = "tables" | "views" | "routines";
-
-function quoteIdentForDialect(
-  ident: string,
-  dialect: "mysql" | "postgres" | "sqlite" | "generic" | "none",
-): string {
-  if (dialect === "mysql") return "`" + ident.replace(/`/g, "``") + "`";
-  return '"' + ident.replace(/"/g, '""') + '"';
-}
-
-function toTitleCaseLabel(raw: string): string {
-  // Display-only prettifier for DB names in the sidebar header.
-  // Keeps underlying schema/database identifiers untouched for queries.
-  return raw
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .split(" ")
-    .filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
-    .join(" ");
 }
 
 export default function Sidebar({
@@ -788,18 +771,6 @@ export default function Sidebar({
     }`;
   const iconCls = (active: boolean) =>
     `w-3.5 h-3.5 shrink-0 ${active ? "text-primary" : "text-muted-foreground group-hover:text-primary"}`;
-
-  // Fetch the DDL for a view / routine via `SHOW CREATE ...` and hand it to
-  // the workspace to open as a pre-filled editor tab. We scaffold the output
-  // as `CREATE OR REPLACE` (views) or `DROP + CREATE` wrapped in DELIMITER
-  // directives (routines) so the user can just hit Run to apply edits.
-  const pickDdlColumn = (
-    columns: { name: string }[],
-    label: string,
-  ): number => {
-    const target = label.toLowerCase();
-    return columns.findIndex((c) => c.name.toLowerCase() === target);
-  };
 
   const openViewDefinition = async (
     connectionId: string,
@@ -1571,83 +1542,6 @@ export default function Sidebar({
           void performTableDestructive();
         }}
       />
-    </div>
-  );
-}
-
-function Section({
-  label,
-  count,
-  loading,
-  collapsed,
-  onToggle,
-  onAdd,
-  addTitle,
-  onRefresh,
-  refreshing,
-}: {
-  label: string;
-  count: number;
-  loading?: boolean;
-  collapsed: boolean;
-  onToggle: () => void;
-  /** Optional create-new action shown as a `+` on the right of the row. */
-  onAdd?: () => void;
-  addTitle?: string;
-  /** Optional re-sync action shown as a refresh icon on hover. */
-  onRefresh?: () => void;
-  /** Spin the refresh icon while this section's list is being refetched. */
-  refreshing?: boolean;
-}) {
-  return (
-    <div className="group/section w-full flex items-center gap-1 px-2 py-1 text-[11px] tracking-wide text-muted-foreground hover:text-foreground transition-colors">
-      <button
-        onClick={onToggle}
-        className="flex items-center gap-1 flex-1 min-w-0 text-left"
-      >
-        <ChevronDown
-          className={`w-3 h-3 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`}
-        />
-        {/* `capitalize` title-cases the single-word section labels
-            (tables → Tables) without touching the call sites. */}
-        <span className="truncate capitalize">{label}</span>
-      </button>
-      {onRefresh && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (!refreshing) onRefresh();
-          }}
-          title={`Refresh ${label}`}
-          disabled={refreshing}
-          className={`p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-opacity ${
-            refreshing
-              ? "opacity-100"
-              : "opacity-0 group-hover/section:opacity-100"
-          }`}
-        >
-          <RefreshCw className={`w-3 h-3 ${refreshing ? "animate-spin" : ""}`} />
-        </button>
-      )}
-      {loading ? (
-        <Loader2 className="w-3 h-3 animate-spin" />
-      ) : (
-        <span className="tabular-nums">{count}</span>
-      )}
-      {onAdd && (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onAdd();
-          }}
-          title={addTitle ?? "Add"}
-          className="opacity-0 group-hover/section:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
-        >
-          <Plus className="w-3 h-3" />
-        </button>
-      )}
     </div>
   );
 }

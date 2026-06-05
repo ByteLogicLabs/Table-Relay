@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, Check, CheckCircle2, Download, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Upload, Zap } from 'lucide-react';
+import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Upload, Zap } from 'lucide-react';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import {
@@ -25,182 +25,25 @@ import {
   type AppSettings, type AppTheme, type NullDisplay,
   applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
 } from '../../lib/settings-store';
-import { connectionsStore, type ConnectionProfileRecord } from '../../lib/connections-store';
+import { connectionsStore } from '../../lib/connections-store';
 import TablePlusImportDialog from './tableplus-import-dialog';
+import { Row, Toggle, DataRow } from './settings-controls';
+import { AppearanceSettings, EditorSettings } from './settings-sections';
+import {
+  AI_LIMIT_UNLIMITED,
+  PROVIDERS,
+  PROVIDER_COLORS,
+  type ProfileForm,
+  blankForm,
+  formFromProfile,
+  type Section,
+  type AiMode,
+  ROW_LIMIT_OPTIONS,
+  NULL_DISPLAY_OPTIONS,
+  isObject,
+  connectionInputFromUnknown,
+} from './settings-utils';
 import { toast } from 'sonner';
-
-// Sentinel for "no practical limit" on the AI tool-step / repeat-call caps.
-// The backend clamps to [1, 1000] and still uses this as a hard runaway
-// backstop, so it's effectively unlimited for any real conversation.
-const AI_LIMIT_UNLIMITED = 1000;
-
-// ── Small reusable controls ─────────────────────────────────────────────────────
-
-function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={checked}
-      onClick={() => onChange(!checked)}
-      className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${checked ? 'bg-primary' : 'bg-muted-foreground/30'}`}
-    >
-      <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : 'translate-x-0.5'}`} />
-    </button>
-  );
-}
-
-function Row({ title, desc, children }: { title: string; desc?: string; children: React.ReactNode }) {
-  return (
-    <div className="flex items-center justify-between gap-4 py-2.5">
-      <div className="min-w-0">
-        <div className="text-sm">{title}</div>
-        {desc && <div className="text-[11px] text-muted-foreground mt-0.5">{desc}</div>}
-      </div>
-      <div className="shrink-0">{children}</div>
-    </div>
-  );
-}
-
-/** A backup/transfer list row: label + description on the left, Export / Import on the right. */
-function DataRow({ label, desc, onExport, onImport }: {
-  label: string;
-  desc: string;
-  onExport: () => void;
-  onImport: () => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4 px-4 py-3">
-      <div className="min-w-0">
-        <div className="text-sm">{label}</div>
-        <div className="text-[11px] text-muted-foreground mt-0.5 truncate">{desc}</div>
-      </div>
-      <div className="shrink-0 flex items-center gap-1.5">
-        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={onExport}>
-          <Download className="w-3.5 h-3.5" /> Export
-        </Button>
-        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={onImport}>
-          <Upload className="w-3.5 h-3.5" /> Import
-        </Button>
-      </div>
-    </div>
-  );
-}
-
-// ── Provider meta ──────────────────────────────────────────────────────────────
-
-interface ProviderMeta {
-  kind: AiProviderKind;
-  label: string;
-  sublabel: string;
-  needsKey: boolean;
-  optionalKey?: boolean;
-  needsBaseUrl?: boolean;
-  defaultModel: string;
-}
-
-const PROVIDERS: ProviderMeta[] = [
-  { kind: 'openai',            label: 'OpenAI',            sublabel: 'GPT-4o, GPT-4o-mini…',        needsKey: true,                             defaultModel: 'gpt-4o-mini' },
-  { kind: 'anthropic',         label: 'Anthropic',         sublabel: 'Claude 3.5 Haiku / Sonnet…',  needsKey: true,                             defaultModel: 'claude-3-5-haiku-latest' },
-  { kind: 'gemini',            label: 'Google Gemini',     sublabel: 'Gemini 2.5 Pro / Flash…',     needsKey: true,                             defaultModel: 'gemini-2.5-pro' },
-  { kind: 'openai_compatible', label: 'OpenAI-compatible', sublabel: 'Ollama · Groq · LM Studio',   needsKey: false, optionalKey: true, needsBaseUrl: true, defaultModel: 'llama3.1' },
-];
-
-const PROVIDER_COLORS: Partial<Record<AiProviderKind, string>> = {
-  openai:            'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400',
-  anthropic:         'bg-orange-500/15 text-orange-600 dark:text-orange-400',
-  gemini:            'bg-blue-500/15 text-blue-600 dark:text-blue-400',
-  openai_compatible: 'bg-purple-500/15 text-purple-600 dark:text-purple-400',
-};
-
-// ── Theme data ─────────────────────────────────────────────────────────────────
-
-const THEMES: { id: AppTheme; label: string; desc: string; bg: string; fg: string; accent: string }[] = [
-  { id: 'one-dark',    label: 'One Dark',         desc: 'Atom One Dark Pro',    bg: '#282c34', fg: '#abb2bf', accent: '#61afef' },
-  { id: 'latte',       label: 'Catppuccin Latte', desc: 'Warm, clean light',    bg: '#eff1f5', fg: '#4c4f69', accent: '#1e66f5' },
-  { id: 'monokai',     label: 'Monokai',          desc: 'Classic dark palette', bg: '#272822', fg: '#f8f8f2', accent: '#fd971f' },
-  { id: 'dracula',     label: 'Dracula',          desc: 'Dark purple theme',    bg: '#282a36', fg: '#f8f8f2', accent: '#bd93f9' },
-  { id: 'nord',        label: 'Nord',             desc: 'Arctic, cool blue',    bg: '#2e3440', fg: '#eceff4', accent: '#88c0d0' },
-  { id: 'tokyo-night', label: 'Tokyo Night',      desc: 'Neon city vibes',      bg: '#1a1b26', fg: '#a9b1d6', accent: '#7aa2f7' },
-  { id: 'github-dark', label: 'GitHub Dark',      desc: 'GitHub\'s dark mode',  bg: '#0d1117', fg: '#c9d1d9', accent: '#58a6ff' },
-];
-
-// ── Form state ─────────────────────────────────────────────────────────────────
-
-interface ProfileForm {
-  name: string;
-  kind: AiProviderKind;
-  apiKey: string;
-  model: string;
-  baseUrl: string;
-  showKey: boolean;
-}
-
-function blankForm(kind: AiProviderKind = 'openai'): ProfileForm {
-  const meta = PROVIDERS.find(p => p.kind === kind)!;
-  return { name: '', kind, apiKey: '', model: meta.defaultModel, baseUrl: '', showKey: false };
-}
-
-function formFromProfile(p: CredentialProfile): ProfileForm {
-  return { name: p.name, kind: p.kind, apiKey: p.apiKey ?? '', model: p.model, baseUrl: p.baseUrl ?? '', showKey: false };
-}
-
-type Section = 'appearance' | 'general' | 'editor' | 'ai';
-type AiMode  = 'list' | 'form';
-
-const ROW_LIMIT_OPTIONS = [50, 100, 250, 500, 1000];
-const NULL_DISPLAY_OPTIONS: { value: NullDisplay; label: string }[] = [
-  { value: 'blank',     label: 'Blank' },
-  { value: 'null-text', label: 'NULL' },
-  { value: 'symbol',    label: '∅' },
-];
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value);
-}
-
-function asString(value: unknown): string | undefined {
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-function asNumber(value: unknown): number | undefined {
-  if (typeof value === 'number' && Number.isFinite(value)) return value;
-  if (typeof value === 'string' && value.trim()) {
-    const parsed = Number(value);
-    if (Number.isFinite(parsed)) return parsed;
-  }
-  return undefined;
-}
-
-function connectionInputFromUnknown(value: unknown) {
-  if (!isObject(value)) return null;
-  const name = asString(value.name);
-  const driver = asString(value.driver) as ConnectionProfileRecord['driver'] | undefined;
-  const host = asString(value.host);
-  const port = asNumber(value.port);
-  if (!name || !driver || !host || port === undefined) return null;
-  return {
-    id: asString(value.id),
-    name,
-    driver,
-    host,
-    port,
-    user: asString(value.user),
-    password: asString(value.password),
-    database: asString(value.database),
-    sslMode: asString(value.sslMode),
-    sshEnabled: Boolean(value.sshEnabled),
-    sshHost: asString(value.sshHost),
-    sshPort: asNumber(value.sshPort),
-    sshUser: asString(value.sshUser),
-    sshAuthKind: asString(value.sshAuthKind) as 'password' | 'key' | undefined,
-    sshKeyPath: asString(value.sshKeyPath),
-    sshPassword: asString(value.sshPassword),
-    sshKeyPassphrase: asString(value.sshKeyPassphrase),
-    color: asString(value.color),
-    isFavorite: Boolean(value.isFavorite),
-  };
-}
 
 // ── Component ──────────────────────────────────────────────────────────────────
 
@@ -691,42 +534,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
 
             {/* ── Appearance ── */}
             {section === 'appearance' && (
-              <div className="space-y-5">
-                <div>
-                  <h3 className="text-sm font-medium mb-0.5">Theme</h3>
-                  <p className="text-xs text-muted-foreground mb-4">Choose the color palette for the app and editor.</p>
-                  <div className="grid grid-cols-3 gap-3">
-                    {THEMES.map(t => (
-                      <button
-                        key={t.id}
-                        onClick={() => handleTheme(t.id)}
-                        className={`group relative rounded-xl overflow-hidden border-2 transition-all text-left
-                          ${theme === t.id ? 'border-primary shadow-md' : 'border-border hover:border-border/80'}`}
-                      >
-                        <div className="h-24 flex" style={{ background: t.bg }}>
-                          <div className="w-8 h-full flex flex-col gap-1.5 p-1.5" style={{ background: `color-mix(in srgb, ${t.bg} 60%, black)` }}>
-                            {[0,1,2].map(i => <div key={i} className="rounded-sm h-3" style={{ background: t.accent, opacity: i === 0 ? 1 : 0.4 }} />)}
-                          </div>
-                          <div className="flex-1 p-2 space-y-1">
-                            {[0.7, 0.5, 0.6].map((op, i) => (
-                              <div key={i} className="h-1.5 rounded-full" style={{ background: t.fg, opacity: op, width: `${60 + i * 15}%` }} />
-                            ))}
-                          </div>
-                        </div>
-                        <div className="px-2.5 py-2 bg-card border-t border-border">
-                          <div className="text-xs font-medium truncate">{t.label}</div>
-                          <div className="text-[10px] text-muted-foreground truncate">{t.desc}</div>
-                        </div>
-                        {theme === t.id && (
-                          <div className="absolute top-1.5 right-1.5 w-5 h-5 rounded-full bg-primary flex items-center justify-center">
-                            <Check className="w-3 h-3 text-primary-foreground" />
-                          </div>
-                        )}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              </div>
+              <AppearanceSettings theme={theme} onSelectTheme={handleTheme} />
             )}
 
             {/* ── General ── */}
@@ -804,52 +612,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
 
             {/* ── Editor ── */}
             {section === 'editor' && (
-              <div className="space-y-1">
-                <div className="mb-2">
-                  <h3 className="text-sm font-medium mb-0.5">Editor</h3>
-                  <p className="text-xs text-muted-foreground">Preferences for the SQL / query editor.</p>
-                </div>
-
-                <Row title="Font size" desc="Editor font size in pixels.">
-                  <Select
-                    value={String(settings.editorFontSize)}
-                    onValueChange={(v) => saveSettings({ editorFontSize: Number(v) })}
-                  >
-                    <SelectTrigger className="h-8 text-xs w-20"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {[11, 12, 13, 14, 15, 16, 18].map(n => (
-                        <SelectItem key={n} value={String(n)} className="text-xs">{n}px</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </Row>
-
-                <Row title="Tab size" desc="Spaces per indent level.">
-                  <Select
-                    value={String(settings.editorTabSize)}
-                    onValueChange={(v) => saveSettings({ editorTabSize: Number(v) })}
-                  >
-                    <SelectTrigger className="h-8 text-xs w-20"><SelectValue /></SelectTrigger>
-                    <SelectContent>
-                      {[2, 4, 8].map(n => (
-                        <SelectItem key={n} value={String(n)} className="text-xs">{n}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </Row>
-
-                <Row title="Word wrap" desc="Wrap long lines instead of scrolling horizontally.">
-                  <Toggle checked={settings.editorWordWrap} onChange={(v) => saveSettings({ editorWordWrap: v })} />
-                </Row>
-
-                <Row title="Minimap" desc="Show the code minimap on the right edge.">
-                  <Toggle checked={settings.editorMinimap} onChange={(v) => saveSettings({ editorMinimap: v })} />
-                </Row>
-
-                <Row title="Autocomplete" desc="Schema-aware suggestions while typing.">
-                  <Toggle checked={settings.editorAutocomplete} onChange={(v) => saveSettings({ editorAutocomplete: v })} />
-                </Row>
-              </div>
+              <EditorSettings settings={settings} />
             )}
 
             {/* ── AI Providers ── */}

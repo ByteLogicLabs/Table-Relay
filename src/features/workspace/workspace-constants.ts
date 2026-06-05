@@ -1,0 +1,14 @@
+export const SIDEBAR_WIDTH = 256;
+export const CHAT_WIDTH_KEY = "tablerelay:chatWidth:v1";
+export const CHAT_MIN_WIDTH = 320;
+export const CHAT_MAX_WIDTH = 800;
+export const CHAT_DEFAULT_WIDTH = 384;
+export const TABS_STORAGE_KEY = "tablerelay:tabs:v1";
+export const ACTIVE_TAB_KEY = "tablerelay:activeTab:v1";
+export const ACTIVE_TAB_BY_CONN_KEY = "tablerelay:activeTabByConn:v1";
+export const FOCUSED_TILE_KEY = "tablerelay:focusedTile:v1";
+export const OLD_TABS_STORAGE_KEY = "dbtable:tabs:v1";
+export const OLD_ACTIVE_TAB_KEY = "dbtable:activeTab:v1";
+export const OLD_ACTIVE_TAB_BY_CONN_KEY = "dbtable:activeTabByConn:v1";
+export const OLD_FOCUSED_TILE_KEY = "dbtable:focusedTile:v1";
+export const OLD_CHAT_WIDTH_KEY = "dbtable:chatWidth:v1";
