@@ -194,6 +194,11 @@ export default function Sidebar({
     new Map(),
   );
   const [loadingExtras, setLoadingExtras] = useState(false);
+  // Which section is mid-refresh from its hover sync button. Drives the
+  // spinning icon on just that section's header.
+  const [refreshingSection, setRefreshingSection] = useState<SectionKey | null>(
+    null,
+  );
 
   const [collapsed, setCollapsed] = useState<Record<SectionKey, boolean>>({
     tables: false,
@@ -436,6 +441,50 @@ export default function Sidebar({
     supportsViews,
     supportsRoutines,
   ]);
+
+  // Per-section re-sync from the hover button on each section header. Each
+  // refetches only its own list so a stale tables/views/routines list can be
+  // refreshed without a full ⌘+R. `refreshingSection` drives the spinner on
+  // just the section being synced.
+  const refreshTables = useCallback(async () => {
+    if (!conn) return;
+    setRefreshingSection("tables");
+    try {
+      await refreshSchemas(conn.id);
+    } catch (err) {
+      console.warn("refresh tables failed", err);
+    } finally {
+      setRefreshingSection((s) => (s === "tables" ? null : s));
+    }
+  }, [conn]);
+
+  const refreshViews = useCallback(async () => {
+    if (!conn || !effectiveSchema) return;
+    const key = `${conn.id}.${effectiveSchema}`;
+    setRefreshingSection("views");
+    try {
+      const v = await db.listViews(conn.id, effectiveSchema);
+      setViewsByDb((prev) => new Map(prev).set(key, v));
+    } catch (err) {
+      console.warn("refresh views failed", err);
+    } finally {
+      setRefreshingSection((s) => (s === "views" ? null : s));
+    }
+  }, [conn, effectiveSchema]);
+
+  const refreshRoutines = useCallback(async () => {
+    if (!conn || !effectiveSchema) return;
+    const key = `${conn.id}.${effectiveSchema}`;
+    setRefreshingSection("routines");
+    try {
+      const r = await db.listRoutines(conn.id, effectiveSchema);
+      setRoutinesByDb((prev) => new Map(prev).set(key, r));
+    } catch (err) {
+      console.warn("refresh routines failed", err);
+    } finally {
+      setRefreshingSection((s) => (s === "routines" ? null : s));
+    }
+  }, [conn, effectiveSchema]);
 
   const tables = useMemo(() => {
     if (!effectiveSchema) return [];
@@ -1148,6 +1197,8 @@ export default function Sidebar({
                   count={fTables.length}
                   collapsed={collapsed.tables}
                   onToggle={() => toggle("tables")}
+                  onRefresh={() => void refreshTables()}
+                  refreshing={refreshingSection === "tables"}
                   onAdd={
                     onNewTable
                       ? () => onNewTable(conn.id, schemaForActions)
@@ -1291,6 +1342,8 @@ export default function Sidebar({
                     loading={loadingExtras && views.length === 0}
                     collapsed={collapsed.views}
                     onToggle={() => toggle("views")}
+                    onRefresh={() => void refreshViews()}
+                    refreshing={refreshingSection === "views"}
                     onAdd={
                       onNewView
                         ? () => onNewView(conn.id, schemaForActions)
@@ -1363,6 +1416,8 @@ export default function Sidebar({
                     loading={loadingExtras && routines.length === 0}
                     collapsed={collapsed.routines}
                     onToggle={() => toggle("routines")}
+                    onRefresh={() => void refreshRoutines()}
+                    refreshing={refreshingSection === "routines"}
                     onAdd={
                       onNewRoutine
                         ? () =>
@@ -1528,6 +1583,8 @@ function Section({
   onToggle,
   onAdd,
   addTitle,
+  onRefresh,
+  refreshing,
 }: {
   label: string;
   count: number;
@@ -1537,6 +1594,10 @@ function Section({
   /** Optional create-new action shown as a `+` on the right of the row. */
   onAdd?: () => void;
   addTitle?: string;
+  /** Optional re-sync action shown as a refresh icon on hover. */
+  onRefresh?: () => void;
+  /** Spin the refresh icon while this section's list is being refetched. */
+  refreshing?: boolean;
 }) {
   return (
     <div className="group/section w-full flex items-center gap-1 px-2 py-1 text-[11px] tracking-wide text-muted-foreground hover:text-foreground transition-colors">
@@ -1547,8 +1608,28 @@ function Section({
         <ChevronDown
           className={`w-3 h-3 shrink-0 transition-transform ${collapsed ? "-rotate-90" : ""}`}
         />
-        <span className="truncate">{label}</span>
+        {/* `capitalize` title-cases the single-word section labels
+            (tables → Tables) without touching the call sites. */}
+        <span className="truncate capitalize">{label}</span>
       </button>
+      {onRefresh && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (!refreshing) onRefresh();
+          }}
+          title={`Refresh ${label}`}
+          disabled={refreshing}
+          className={`p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-opacity ${
+            refreshing
+              ? "opacity-100"
+              : "opacity-0 group-hover/section:opacity-100"
+          }`}
+        >
+          <RefreshCw className={`w-3 h-3 ${refreshing ? "animate-spin" : ""}`} />
+        </button>
+      )}
       {loading ? (
         <Loader2 className="w-3 h-3 animate-spin" />
       ) : (

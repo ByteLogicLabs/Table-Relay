@@ -65,6 +65,43 @@ export default function ConnectionRail({
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [overId, setOverId] = useState<string | null>(null);
   const dragSrcRef = useRef<string | null>(null);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // True while a tile's context menu is open. Its popup renders in a portal
+  // that can sit outside the rail's bounds, so we must NOT auto-collapse the
+  // rail while it's up — that would yank the menu's anchor out from under it.
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // The rail expands on hover and collapses when the pointer leaves. Relying on
+  // a single `onMouseLeave` is fragile: a context-menu/dialog portal, a drag
+  // ghost, or the window losing focus can swallow the leave event, wedging the
+  // rail open (its width feeds the content area's max-width, so a stuck-open
+  // rail also narrows the grid). These safety nets force a re-sync to the real
+  // pointer position whenever a leave event might have been missed.
+  useEffect(() => {
+    if (!expanded) return;
+    // Don't fight an open context menu or settings dialog — those own the
+    // pointer and the rail should stay put until they close.
+    if (menuOpen || settingsOpen) return;
+    // Collapse if the pointer ends up outside the rail for any reason — covers
+    // portals/overlays that eat `pointerleave`. Skipped while dragging so the
+    // drop target stays visible.
+    const checkOutside = (e: PointerEvent) => {
+      if (draggingId) return;
+      const el = rootRef.current;
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const outside =
+        e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+      if (outside) onExpandChange(false);
+    };
+    const onBlur = () => onExpandChange(false);
+    document.addEventListener('pointermove', checkOutside);
+    window.addEventListener('blur', onBlur);
+    return () => {
+      document.removeEventListener('pointermove', checkOutside);
+      window.removeEventListener('blur', onBlur);
+    };
+  }, [expanded, draggingId, menuOpen, settingsOpen, onExpandChange]);
 
   const handleDragStart = (id: string) => {
     dragSrcRef.current = id;
@@ -93,6 +130,11 @@ export default function ConnectionRail({
     setDraggingId(null);
     setOverId(null);
     dragSrcRef.current = null;
+    // A drag can swallow the `pointerleave` that would normally collapse the
+    // rail, leaving it stuck open. The pointermove safety net re-syncs on the
+    // next move, but collapse immediately if the pointer already rests outside.
+    const el = rootRef.current;
+    if (el && !el.matches(':hover')) onExpandChange(false);
   };
 
   const serversById = new Map(servers.map(s => [s.id, s]));
@@ -103,8 +145,12 @@ export default function ConnectionRail({
     const driver = serversById.get(serverId)?.driver;
     const manifest = resolveManifest(manifests, driver);
     // Default to `true` while manifests load so the menu item doesn't
-    // flicker in/out; once resolved, unsupported drivers hide it.
-    return manifest ? manifest.capabilities.import.length > 0 : true;
+    // flicker in/out; once resolved, unsupported drivers hide it. Import is
+    // offered when the adapter declares file formats OR can ingest rows
+    // (document stores like Mongo take CSV/JSON via insert_rows).
+    return manifest
+      ? manifest.capabilities.import.length > 0 || manifest.capabilities.insertRows
+      : true;
   }
 
   function versionLabel(serverId: string): string | null {
@@ -119,8 +165,14 @@ export default function ConnectionRail({
 
   return (
     <div
-      onMouseEnter={() => onExpandChange(true)}
-      onMouseLeave={() => onExpandChange(false)}
+      ref={rootRef}
+      onPointerEnter={() => onExpandChange(true)}
+      onPointerLeave={() => {
+        // Don't collapse mid-drag — the user needs the expanded tiles as drop
+        // targets — nor while a menu/dialog is open. The drag-end handler +
+        // pointermove net handle collapse for those cases.
+        if (!draggingId && !menuOpen && !settingsOpen) onExpandChange(false);
+      }}
       style={{ width: expanded ? RAIL_EXPANDED_WIDTH : RAIL_COLLAPSED_WIDTH }}
       className="shrink-0 flex flex-col bg-sidebar-bg/70 border-r border-border h-full transition-[width] duration-200 ease-out overflow-hidden"
     >
@@ -141,7 +193,7 @@ export default function ConnectionRail({
           const isDragging = draggingId === tile.id;
           const isOver = overId === tile.id;
           return (
-            <ContextMenu key={tile.id}>
+            <ContextMenu key={tile.id} onOpenChange={setMenuOpen}>
               <ContextMenuTrigger>
                 <div
                   draggable
@@ -227,7 +279,7 @@ export default function ConnectionRail({
                 )}
                 {server && connected && supportsImport(server.id) && (
                   <ContextMenuItem onClick={() => onImportSql(server.id)}>
-                    <FileUp className="w-3.5 h-3.5 mr-2" /> Import SQL…
+                    <FileUp className="w-3.5 h-3.5 mr-2" /> Import data…
                   </ContextMenuItem>
                 )}
                 <ContextMenuItem

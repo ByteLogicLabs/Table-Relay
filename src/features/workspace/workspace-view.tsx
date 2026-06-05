@@ -646,7 +646,8 @@ export default function WorkspaceView({
       focusedConnection?.driver,
     );
     menuCtxRef.current.focusedSupportsImport = focusedManifest
-      ? focusedManifest.capabilities.import.length > 0
+      ? focusedManifest.capabilities.import.length > 0 ||
+        focusedManifest.capabilities.insertRows
       : true;
     // Only surface data tabs to the export handler — exporting makes no
     // sense on query / routine / schema tabs.
@@ -1644,6 +1645,31 @@ export default function WorkspaceView({
             if (profile?.driver === "PostgreSQL") return "postgres";
             return null;
           })()
+        }
+        supportsSql={
+          // SQL execution is only meaningful where the adapter speaks a SQL
+          // dialect. Document/KV stores (Mongo) get CSV/JSON only.
+          (() => {
+            if (!importSqlForId) return true;
+            const profile = connections.find((c) => c.id === importSqlForId);
+            const manifest = resolveManifest(adapterManifests, profile?.driver);
+            return (manifest?.capabilities.sqlDialect ?? "generic") !== "none";
+          })()
+        }
+        supportsRowInsert={
+          // CSV/JSON imports go through `db.insertRows`; gate on the adapter
+          // actually supporting row inserts (Redis = false).
+          (() => {
+            if (!importSqlForId) return true;
+            const profile = connections.find((c) => c.id === importSqlForId);
+            const manifest = resolveManifest(adapterManifests, profile?.driver);
+            return manifest?.capabilities.insertRows ?? true;
+          })()
+        }
+        schemas={
+          importSqlForId
+            ? (connState.schemasById.get(importSqlForId) ?? [])
+            : []
         }
         onOpenInEditor={handleImportToEditor}
       />

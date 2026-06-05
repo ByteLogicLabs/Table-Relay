@@ -1,41 +1,96 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile } from '@tauri-apps/plugin-fs';
 import { toast } from 'sonner';
-import { Loader2, FileText, AlertCircle } from 'lucide-react';
+import {
+  Loader2,
+  FileText,
+  AlertCircle,
+  FileSpreadsheet,
+  Braces,
+  Database,
+  Table2,
+  CheckCircle2,
+} from 'lucide-react';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '../../components/ui/dialog';
 import { Button } from '../../components/ui/button';
-import { db } from '../../lib/db';
+import { Label } from '../../components/ui/label';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../../components/ui/select';
+import { db, type SchemaInfo } from '../../lib/db';
 import { refreshSchemas } from '../../state/connections';
 
 /**
- * "Import SQL" dialog — lets the user pick a `.sql` file, preview it,
- * and either run it against the active connection *immediately* (the
- * default action) or load it into a new query editor tab for review.
+ * "Import" dialog — pick a file (SQL / CSV / JSON), preview it when it's small
+ * enough, and load it into the active connection.
  *
- * Execution uses `db.runQuery` with the entire file as a single call;
- * the adapter splits statements itself (adapters already have robust
- * splitters that cope with `DELIMITER`, quoted identifiers, and
- * comments). Per-statement progress comes from the returned
- * `StatementResult[]` — we tally `rows_affected` / errors after the
- * fact rather than streaming progress, which keeps the dialog simple.
+ * Two execution paths, chosen by format:
+ *
+ *   • **SQL** (SQL stores only) — the whole file is handed to `db.runQuery`
+ *     as one call; the adapter splits statements itself (robust splitters
+ *     cope with `DELIMITER`, quoted identifiers, comments). Per-statement
+ *     outcomes come back as `StatementResult[]`. SQL can alternatively be
+ *     opened in a new editor tab for review.
+ *
+ *   • **CSV / JSON** (any store with `insert_rows`) — rows are parsed in the
+ *     webview and inserted into a chosen target table/collection one row at a
+ *     time via `db.insertRows`. This is the only meaningful import path for
+ *     document stores (Mongo), and a convenient one for SQL stores too. A
+ *     progress count + Cancel keep large files responsive.
  */
-/** Which import-safety prologue/epilogue to wrap the dump with. `null`
- *  means "don't add anything" — used for unknown adapters where we
- *  can't be sure the SQL-dialect-specific session tweaks would parse.
- *
- *  `postgres` behaves like `null` (no session wrapper, no `USE` prefix)
- *  because PG can't switch database mid-session and the per-dump
- *  `SET session_replication_role` trick needs a role most desktop
- *  users don't have. Dumps from `pg_dump` are safe to run as-is —
- *  they already carry their own `BEGIN;`/`COMMIT;` blocks. */
 export type ImportDialect = 'mysql' | 'sqlite' | 'postgres' | null;
+
+type ImportFormat = 'sql' | 'csv' | 'json';
+
+// Files larger than this are imported in full but NOT previewed — rendering a
+// huge string into a <pre> stalls the webview, and the preview is only ever a
+// sanity check. We still parse CSV/JSON for the row count regardless.
+const PREVIEW_MAX_BYTES = 512 * 1024; // 512 KB
+const PREVIEW_MAX_CHARS = 4000;
+
+interface FormatMeta {
+  value: ImportFormat;
+  label: string;
+  icon: typeof FileText;
+  hint: string;
+  exts: string[];
+}
+
+const FORMATS: FormatMeta[] = [
+  {
+    value: 'sql',
+    label: 'SQL',
+    icon: Database,
+    hint: 'Run a dump of statements (INSERT / CREATE / …) against the connection.',
+    exts: ['sql', 'ddl', 'txt'],
+  },
+  {
+    value: 'csv',
+    label: 'CSV',
+    icon: FileSpreadsheet,
+    hint: 'Insert spreadsheet rows into one table. First row is the header.',
+    exts: ['csv', 'tsv', 'txt'],
+  },
+  {
+    value: 'json',
+    label: 'JSON',
+    icon: Braces,
+    hint: 'Insert an array of objects (or newline-delimited objects) into one table.',
+    exts: ['json', 'ndjson', 'jsonl', 'txt'],
+  },
+];
 
 export default function ImportSqlDialog({
   isOpen,
@@ -44,39 +99,52 @@ export default function ImportSqlDialog({
   connectionName,
   targetDatabase,
   dialect,
+  /** Whether the active store can execute a SQL dump. False for document/KV
+   *  stores (Mongo); those import CSV/JSON only. */
+  supportsSql = true,
+  /** Whether the active store can ingest rows via `db.insertRows`. Gates the
+   *  CSV/JSON paths. Redis is false; everyone else is true. */
+  supportsRowInsert = true,
+  /** Schemas/tables of the connection, for the CSV/JSON target picker. */
+  schemas = [],
   onOpenInEditor,
 }: {
   isOpen: boolean;
   onClose: () => void;
-  /** Id of the live connection to run the import against. */
   connectionId: string | null;
-  /** Display name of the connection — shown in the dialog title. */
   connectionName: string;
-  /** Database currently focused on the rail for this connection, if any.
-   *  Used to prepend `USE <db>;` for SQL-server-style adapters so
-   *  `CREATE TABLE` in the dump lands in the right schema. Null for
-   *  single-schema adapters (SQLite) — the dump runs as-is. */
   targetDatabase?: string | null;
-  /** The adapter's SQL dialect, so we can wrap the dump with the right
-   *  "disable FK checks, restore on finish" block. */
   dialect?: ImportDialect;
-  /** Open the loaded SQL text in a new query tab for the given
-   *  connection. The caller owns the tab machinery; we just hand back
-   *  the contents. */
+  supportsSql?: boolean;
+  supportsRowInsert?: boolean;
+  schemas?: SchemaInfo[];
   onOpenInEditor: (connectionId: string, fileName: string, sql: string) => void;
 }) {
   const [filePath, setFilePath] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string>('');
   const [contents, setContents] = useState<string>('');
+  const [fileBytes, setFileBytes] = useState(0);
   const [loadingFile, setLoadingFile] = useState(false);
+  const [format, setFormat] = useState<ImportFormat>(supportsSql ? 'sql' : 'csv');
   const [mode, setMode] = useState<'execute' | 'editor'>('execute');
   const [executing, setExecuting] = useState(false);
-  // Per-statement outcome tally after a run.
+  // CSV/JSON target.
+  const [targetSchema, setTargetSchema] = useState<string>('');
+  const [targetTable, setTargetTable] = useState<string>('');
+  // Row-insert progress (CSV/JSON). `null` when not running.
+  const [rowProgress, setRowProgress] = useState<{ done: number; total: number } | null>(null);
+  const cancelRef = useRef(false);
+  // Per-statement / per-row outcome tally after a run.
   const [report, setReport] = useState<{
     ok: number;
     failed: number;
     firstError: string | null;
   } | null>(null);
+
+  const availableFormats = useMemo(
+    () => (supportsSql ? FORMATS : FORMATS.filter((f) => f.value !== 'sql')),
+    [supportsSql],
+  );
 
   // Reset everything whenever the dialog closes/reopens — stale file
   // previews confuse users who re-open for a different import.
@@ -85,60 +153,130 @@ export default function ImportSqlDialog({
       setFilePath(null);
       setFileName('');
       setContents('');
+      setFileBytes(0);
       setLoadingFile(false);
+      setFormat(supportsSql ? 'sql' : 'csv');
       setMode('execute');
       setExecuting(false);
+      setTargetSchema('');
+      setTargetTable('');
+      setRowProgress(null);
+      cancelRef.current = false;
       setReport(null);
     }
-  }, [isOpen]);
+  }, [isOpen, supportsSql]);
+
+  // When opening a row-import for a connection whose schema/table list hasn't
+  // been loaded yet (e.g. import launched from the rail before a tile was
+  // focused), kick a refresh so the target picker has tables/collections to
+  // offer. The parent subscribes to the connections store, so the fresh list
+  // flows back in as the `schemas` prop.
+  useEffect(() => {
+    if (!isOpen || !connectionId) return;
+    if (schemas.length === 0) void refreshSchemas(connectionId, { silent: true });
+    // Only re-run when the dialog opens or the connection changes — not on
+    // every schemas update (that would loop).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, connectionId]);
+
+  // Seed the target schema once schemas arrive / the dialog opens.
+  useEffect(() => {
+    if (!isOpen) return;
+    if (targetSchema && schemas.some((s) => s.name === targetSchema)) return;
+    const initial =
+      (targetDatabase && schemas.find((s) => s.name === targetDatabase)?.name) ??
+      schemas[0]?.name ??
+      '';
+    setTargetSchema(initial);
+  }, [isOpen, schemas, targetDatabase, targetSchema]);
+
+  const selectedSchema = useMemo(
+    () => schemas.find((s) => s.name === targetSchema) ?? null,
+    [schemas, targetSchema],
+  );
+  const targetTables = useMemo(
+    () => (selectedSchema?.tables ?? []).filter((t) => t.kind !== 'view'),
+    [selectedSchema],
+  );
+  // Keep the selected table valid when the schema changes.
+  useEffect(() => {
+    if (targetTable && targetTables.some((t) => t.name === targetTable)) return;
+    setTargetTable(targetTables[0]?.name ?? '');
+  }, [targetTables, targetTable]);
+
+  // If SQL becomes unavailable but is selected, snap to CSV.
+  useEffect(() => {
+    if (!supportsSql && format === 'sql') setFormat('csv');
+  }, [supportsSql, format]);
 
   const pickFile = useCallback(async () => {
     try {
       const picked = await openDialog({
-        title: 'Import SQL',
+        title: 'Import data',
         multiple: false,
         directory: false,
-        filters: [{ name: 'SQL file', extensions: ['sql', 'ddl', 'txt'] }],
+        filters: [
+          { name: 'Data file', extensions: ['sql', 'ddl', 'csv', 'tsv', 'json', 'ndjson', 'jsonl', 'txt'] },
+        ],
       });
       if (typeof picked !== 'string' || !picked) return;
       setLoadingFile(true);
       setFilePath(picked);
-      setFileName(picked.split('/').pop() ?? picked);
+      const name = picked.split(/[/\\]/).pop() ?? picked;
+      setFileName(name);
       setReport(null);
+      // Guess the format from the extension and switch to it if available.
+      const ext = name.split('.').pop()?.toLowerCase() ?? '';
+      const guessed = guessFormat(ext);
+      if (guessed && (guessed !== 'sql' || supportsSql)) setFormat(guessed);
       const text = await readTextFile(picked);
       setContents(text);
+      setFileBytes(new TextEncoder().encode(text).length);
     } catch (e) {
       toast.error(`Could not read file: ${String(e)}`);
     } finally {
       setLoadingFile(false);
     }
-  }, []);
+  }, [supportsSql]);
 
-  // Rough line + statement count for the summary line. Statement count
-  // is approximate — a semicolon inside a string literal inflates it —
-  // but it's just informational so precision isn't worth the work.
+  // Parse CSV/JSON into rows for insert + count. Returns null for SQL (or on
+  // parse failure, surfaced separately). Memoised so we don't re-parse on every
+  // render — big files make this non-trivial.
+  const parsed = useMemo<{ rows: Record<string, unknown>[]; error: string | null } | null>(() => {
+    if (!contents || format === 'sql') return null;
+    try {
+      const rows = format === 'csv' ? parseCsv(contents) : parseJsonRows(contents);
+      return { rows, error: null };
+    } catch (e) {
+      return { rows: [], error: e instanceof Error ? e.message : String(e) };
+    }
+  }, [contents, format]);
+
+  // Summary line below the file name.
   const stats = useMemo(() => {
     if (!contents) return null;
     const lines = contents.split('\n').length;
-    const approxStatements = (contents.match(/;\s*(\n|$)/g) ?? []).length;
-    const bytes = new TextEncoder().encode(contents).length;
-    return { lines, approxStatements, bytes };
-  }, [contents]);
-
-  const canRun = !!filePath && !!contents && !loadingFile && !executing;
-
-  const handleAction = async () => {
-    if (!canRun) return;
-    if (mode === 'editor') {
-      if (!connectionId) {
-        toast.error('No active connection to open the editor for');
-        return;
-      }
-      onOpenInEditor(connectionId, fileName, contents);
-      onClose();
-      return;
+    if (format === 'sql') {
+      const approxStatements = (contents.match(/;\s*(\n|$)/g) ?? []).length;
+      return { kind: 'sql' as const, lines, approxStatements, bytes: fileBytes };
     }
-    // Execute immediately.
+    return { kind: 'rows' as const, lines, rows: parsed?.rows.length ?? 0, bytes: fileBytes };
+  }, [contents, format, fileBytes, parsed]);
+
+  const previewable = fileBytes > 0 && fileBytes <= PREVIEW_MAX_BYTES;
+
+  const isRowImport = format === 'csv' || format === 'json';
+  const rowCount = parsed?.rows.length ?? 0;
+  const canRun =
+    !!filePath &&
+    !!contents &&
+    !loadingFile &&
+    !executing &&
+    (format === 'sql'
+      ? true
+      : !!parsed && !parsed.error && rowCount > 0 && !!targetSchema && !!targetTable);
+
+  const runSqlImport = async () => {
     if (!connectionId) {
       toast.error('No active connection to run the import against');
       return;
@@ -161,29 +299,16 @@ export default function ImportSqlDialog({
         }
       }
       setReport({ ok, failed, firstError });
-
-      // Refresh the sidebar's schema/table list and any open data grids
-      // whenever we ran SQL against the connection — even a partial
-      // import may have created some tables, and the user needs to see
-      // them without manually hitting ⌘+R. We fire both a schema refresh
-      // and the global `tablerelay:reload` event (which DataGrid, Sidebar,
-      // and DiagramView all listen for). Runs on success AND failure —
-      // an import that failed at statement 40 of 60 might still have
-      // created the first 39 tables.
       void refreshSchemas(connectionId);
       window.dispatchEvent(
         new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
       );
-
       if (failed === 0) {
         toast.success(
           statements.length === 1
             ? 'Import complete (1 statement)'
             : `Import complete (${ok} statements)`,
         );
-        // Auto-close on full success — the user doesn't need to see the
-        // report when there's nothing to act on. Failures keep the
-        // dialog open so the user can read the error + retry.
         onClose();
       } else {
         toast.error(
@@ -191,8 +316,6 @@ export default function ImportSqlDialog({
         );
       }
     } catch (err) {
-      // A runQuery-level error (connection dead, unsupported, etc.) —
-      // no per-statement info available.
       const msg = err instanceof Error ? err.message : String(err);
       setReport({ ok: 0, failed: 1, firstError: msg });
       toast.error(`Import failed: ${msg}`);
@@ -201,70 +324,238 @@ export default function ImportSqlDialog({
     }
   };
 
-  const actionLabel = mode === 'execute' ? 'Execute import' : 'Open in editor';
+  const runRowImport = async () => {
+    if (!connectionId) {
+      toast.error('No active connection to import into');
+      return;
+    }
+    if (!parsed || parsed.error || !targetSchema || !targetTable) return;
+    const rows = parsed.rows;
+    setExecuting(true);
+    setReport(null);
+    cancelRef.current = false;
+    setRowProgress({ done: 0, total: rows.length });
+    let ok = 0;
+    let failed = 0;
+    let firstError: string | null = null;
+    try {
+      for (let i = 0; i < rows.length; i++) {
+        if (cancelRef.current) break;
+        try {
+          await db.insertRows(connectionId, {
+            schema: targetSchema,
+            table: targetTable,
+            values: rows[i],
+          });
+          ok += 1;
+        } catch (e) {
+          failed += 1;
+          if (!firstError) firstError = e instanceof Error ? e.message : String(e);
+        }
+        // Throttle progress paints to keep large imports smooth.
+        if (i % 25 === 0 || i === rows.length - 1) {
+          setRowProgress({ done: i + 1, total: rows.length });
+        }
+      }
+      setReport({ ok, failed, firstError });
+      void refreshSchemas(connectionId);
+      window.dispatchEvent(
+        new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
+      );
+      const cancelled = cancelRef.current;
+      if (failed === 0 && !cancelled) {
+        toast.success(`Imported ${ok.toLocaleString()} row${ok === 1 ? '' : 's'} into ${targetTable}`);
+        onClose();
+      } else if (cancelled) {
+        toast.message(`Import cancelled — ${ok.toLocaleString()} row${ok === 1 ? '' : 's'} inserted`);
+      } else {
+        toast.error(
+          `Imported ${ok.toLocaleString()} row${ok === 1 ? '' : 's'}, ${failed.toLocaleString()} failed`,
+        );
+      }
+    } finally {
+      setExecuting(false);
+      setRowProgress(null);
+    }
+  };
+
+  const handleAction = async () => {
+    if (!canRun) return;
+    if (format === 'sql' && mode === 'editor') {
+      if (!connectionId) {
+        toast.error('No active connection to open the editor for');
+        return;
+      }
+      onOpenInEditor(connectionId, fileName, contents);
+      onClose();
+      return;
+    }
+    if (isRowImport) {
+      await runRowImport();
+    } else {
+      await runSqlImport();
+    }
+  };
+
+  const actionLabel =
+    format === 'sql'
+      ? mode === 'execute'
+        ? 'Execute import'
+        : 'Open in editor'
+      : `Import ${rowCount > 0 ? rowCount.toLocaleString() + ' ' : ''}row${rowCount === 1 ? '' : 's'}`;
 
   return (
     <Dialog open={isOpen} onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-2xl w-[92vw] max-h-[85vh] overflow-hidden flex flex-col">
-        <DialogHeader>
-          <DialogTitle>Import SQL · {connectionName}</DialogTitle>
+      <DialogContent className="sm:max-w-2xl w-[92vw] max-h-[85vh] overflow-hidden flex flex-col gap-0 p-0">
+        <DialogHeader className="px-5 pt-5 pb-4 border-b border-border/60">
+          <DialogTitle className="flex items-center gap-2">
+            <FileText className="w-4 h-4 text-primary" />
+            Import · {connectionName}
+          </DialogTitle>
+          <DialogDescription>
+            Pick a file and format, then run it against this connection.
+          </DialogDescription>
         </DialogHeader>
 
-        <div className="flex flex-col gap-4 overflow-y-auto">
-          {/* File picker row */}
-          <div className="flex gap-2 items-center">
-            <Button type="button" variant="outline" onClick={pickFile} disabled={loadingFile || executing}>
-              <FileText className="w-3.5 h-3.5 mr-1.5" />
-              {filePath ? 'Replace file…' : 'Pick SQL file…'}
-            </Button>
-            {loadingFile && (
-              <span className="text-xs text-muted-foreground flex items-center gap-1">
-                <Loader2 className="w-3 h-3 animate-spin" /> Reading file…
-              </span>
-            )}
-            {fileName && !loadingFile && (
-              <span className="text-xs text-muted-foreground truncate" title={filePath ?? ''}>
-                {fileName}
-                {stats && (
-                  <>
-                    {' '}·{' '}
-                    {stats.lines.toLocaleString()} lines ·{' '}
-                    ~{stats.approxStatements.toLocaleString()} statements ·{' '}
-                    {formatBytes(stats.bytes)}
-                  </>
-                )}
-              </span>
-            )}
-          </div>
-
-          {/* Mode selector */}
-          <div className="grid gap-2">
-            <label className="text-sm font-medium">What should happen?</label>
-            <div className="flex flex-col gap-2">
-              <ModeOption
-                value="execute"
-                current={mode}
-                onChange={setMode}
-                title="Execute immediately"
-                hint="Runs every statement against the current connection now. Safer for small, trusted dumps."
-                disabled={executing}
-              />
-              <ModeOption
-                value="editor"
-                current={mode}
-                onChange={setMode}
-                title="Open in editor"
-                hint="Loads the file into a new SQL tab so you can review, edit, and run it step by step."
-                disabled={executing}
-              />
+        <div className="flex flex-col gap-5 overflow-y-auto px-5 py-5">
+          {/* Format selector */}
+          <Field label="Format">
+            <div
+              className="grid gap-1.5"
+              style={{ gridTemplateColumns: `repeat(${availableFormats.length}, minmax(0,1fr))` }}
+            >
+              {availableFormats.map((f) => {
+                const active = format === f.value;
+                const Icon = f.icon;
+                return (
+                  <button
+                    key={f.value}
+                    type="button"
+                    onClick={() => setFormat(f.value)}
+                    disabled={executing}
+                    className={`flex flex-col items-center gap-1 rounded-lg border px-2 py-2.5 text-xs font-medium transition-colors ${
+                      active
+                        ? 'border-primary bg-primary/10 text-primary'
+                        : 'border-border bg-background text-muted-foreground hover:bg-muted/40 hover:text-foreground'
+                    } ${executing ? 'opacity-60 cursor-not-allowed' : ''}`}
+                  >
+                    <Icon className="w-4 h-4" />
+                    {f.label}
+                  </button>
+                );
+              })}
             </div>
-          </div>
+            <p className="text-[11px] text-muted-foreground leading-relaxed mt-1.5">
+              {FORMATS.find((f) => f.value === format)?.hint}
+            </p>
+          </Field>
 
-          {/* Target-database hint (MySQL only). The import always runs
-              inside the focused database — the user already chose it
-              when opening the connection — so this is pure info. SQLite
-              passes `targetDatabase=null` and this hides entirely. */}
-          {mode === 'execute' && targetDatabase && (
+          {/* File picker row */}
+          <Field label="File">
+            <div className="flex gap-2 items-center flex-wrap">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={pickFile}
+                disabled={loadingFile || executing}
+              >
+                <FileText className="w-3.5 h-3.5 mr-1.5" />
+                {filePath ? 'Replace file…' : 'Choose file…'}
+              </Button>
+              {loadingFile && (
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Reading file…
+                </span>
+              )}
+              {fileName && !loadingFile && (
+                <span className="text-xs text-muted-foreground truncate min-w-0" title={filePath ?? ''}>
+                  <span className="font-mono text-foreground">{fileName}</span>
+                  {stats && (
+                    <>
+                      {' '}·{' '}
+                      {stats.kind === 'sql'
+                        ? `~${stats.approxStatements.toLocaleString()} statements`
+                        : `${stats.rows.toLocaleString()} rows`}
+                      {' '}·{' '}
+                      {formatBytes(stats.bytes)}
+                    </>
+                  )}
+                </span>
+              )}
+            </div>
+          </Field>
+
+          {/* CSV/JSON target picker */}
+          {isRowImport && contents && (
+            <div className="grid grid-cols-2 gap-3">
+              {schemas.length > 1 && (
+                <Field label="Target database">
+                  <Select value={targetSchema} onValueChange={setTargetSchema} disabled={executing}>
+                    <SelectTrigger className="w-full">
+                      <Database className="w-3.5 h-3.5 text-muted-foreground mr-1.5 shrink-0" />
+                      <SelectValue placeholder="Select database" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {schemas.map((s) => (
+                        <SelectItem key={s.name} value={s.name}>
+                          {s.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
+              <Field label={isDocumentTarget(dialect) ? 'Target collection' : 'Target table'}>
+                <Select
+                  value={targetTable}
+                  onValueChange={setTargetTable}
+                  disabled={executing || targetTables.length === 0}
+                >
+                  <SelectTrigger className="w-full">
+                    <Table2 className="w-3.5 h-3.5 text-muted-foreground mr-1.5 shrink-0" />
+                    <SelectValue
+                      placeholder={targetTables.length === 0 ? 'No tables' : 'Select table'}
+                    />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {targetTables.map((t) => (
+                      <SelectItem key={t.name} value={t.name}>
+                        {t.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Field>
+            </div>
+          )}
+
+          {/* Mode selector — SQL only (CSV/JSON have no "open in editor"). */}
+          {format === 'sql' && (
+            <Field label="What should happen?">
+              <div className="flex flex-col gap-2">
+                <ModeOption
+                  value="execute"
+                  current={mode}
+                  onChange={setMode}
+                  title="Execute immediately"
+                  hint="Runs every statement against the current connection now. Safer for small, trusted dumps."
+                  disabled={executing}
+                />
+                <ModeOption
+                  value="editor"
+                  current={mode}
+                  onChange={setMode}
+                  title="Open in editor"
+                  hint="Loads the file into a new SQL tab so you can review, edit, and run it step by step."
+                  disabled={executing}
+                />
+              </div>
+            </Field>
+          )}
+
+          {/* Target-database hint (MySQL SQL only). */}
+          {format === 'sql' && mode === 'execute' && targetDatabase && (
             <div className="text-xs text-muted-foreground">
               Runs inside{' '}
               <span className="font-mono text-foreground">{targetDatabase}</span>.
@@ -273,34 +564,86 @@ export default function ImportSqlDialog({
             </div>
           )}
 
-          {/* Preview */}
+          {/* Parse error (CSV/JSON) */}
+          {parsed?.error && (
+            <div className="rounded-md border border-destructive/50 bg-destructive/10 text-destructive px-3 py-2 text-xs flex items-start gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0">
+                Couldn’t parse this {format.toUpperCase()} file: {parsed.error}
+              </span>
+            </div>
+          )}
+
+          {/* Preview — only for files small enough to render cheaply. */}
           {contents && (
-            <div className="grid gap-2 min-h-0 flex-1">
-              <label className="text-sm font-medium">Preview</label>
-              <pre className="text-[11px] leading-tight font-mono bg-muted/40 border border-border/50 rounded-md p-2 max-h-48 overflow-auto whitespace-pre">
-                {contents.length > 4000
-                  ? contents.slice(0, 4000) + `\n\n… ${(contents.length - 4000).toLocaleString()} more chars truncated from preview (full file will still be imported) …`
-                  : contents}
-              </pre>
+            <Field label="Preview">
+              {previewable ? (
+                <pre className="text-[11px] leading-tight font-mono bg-muted/40 border border-border/50 rounded-md p-2 max-h-48 overflow-auto whitespace-pre">
+                  {contents.length > PREVIEW_MAX_CHARS
+                    ? contents.slice(0, PREVIEW_MAX_CHARS) +
+                      `\n\n… ${(contents.length - PREVIEW_MAX_CHARS).toLocaleString()} more chars hidden from preview (full file is still imported) …`
+                    : contents}
+                </pre>
+              ) : (
+                <div className="text-xs text-muted-foreground rounded-md border border-border/50 bg-muted/20 px-3 py-2.5">
+                  File is {formatBytes(fileBytes)} — too large to preview. It will
+                  still be imported in full.
+                </div>
+              )}
+            </Field>
+          )}
+
+          {/* Row-insert progress (CSV/JSON) */}
+          {rowProgress && (
+            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2.5 text-xs">
+              <div className="flex items-center justify-between gap-2">
+                <span className="flex items-center gap-1.5 text-muted-foreground">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Inserting {rowProgress.done.toLocaleString()} of{' '}
+                  {rowProgress.total.toLocaleString()} rows…
+                </span>
+                <button
+                  type="button"
+                  className="text-destructive hover:underline"
+                  onClick={() => {
+                    cancelRef.current = true;
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+              <div className="mt-2 h-1.5 rounded-full bg-muted overflow-hidden">
+                <div
+                  className="h-full bg-primary transition-[width] duration-150"
+                  style={{
+                    width: `${rowProgress.total ? (rowProgress.done / rowProgress.total) * 100 : 0}%`,
+                  }}
+                />
+              </div>
             </div>
           )}
 
           {/* Post-run summary */}
           {report && (
             <div
-              className={`rounded-md border px-3 py-2 text-xs ${report.failed > 0
-                ? 'border-destructive/50 bg-destructive/10 text-destructive'
-                : 'border-emerald-500/30 bg-emerald-500/5 text-emerald-500'
-                }`}
+              className={`rounded-md border px-3 py-2 text-xs ${
+                report.failed > 0
+                  ? 'border-destructive/50 bg-destructive/10 text-destructive'
+                  : 'border-emerald-500/30 bg-emerald-500/5 text-emerald-500'
+              }`}
             >
               <div className="font-medium flex items-center gap-1.5">
-                {report.failed > 0 && <AlertCircle className="w-3.5 h-3.5" />}
+                {report.failed > 0 ? (
+                  <AlertCircle className="w-3.5 h-3.5" />
+                ) : (
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                )}
                 {report.failed === 0
-                  ? `Executed ${report.ok} statement${report.ok === 1 ? '' : 's'} successfully`
-                  : `${report.failed} statement${report.failed === 1 ? '' : 's'} failed, ${report.ok} succeeded`}
+                  ? `${report.ok.toLocaleString()} ${isRowImport ? 'row' : 'statement'}${report.ok === 1 ? '' : 's'} imported successfully`
+                  : `${report.failed.toLocaleString()} ${isRowImport ? 'row' : 'statement'}${report.failed === 1 ? '' : 's'} failed, ${report.ok.toLocaleString()} succeeded`}
               </div>
               {report.firstError && (
-                <div className="mt-1 font-mono opacity-80 whitespace-pre-wrap break-words">
+                <div className="mt-1 font-mono opacity-80 whitespace-pre-wrap wrap-break-word">
                   First error: {report.firstError}
                 </div>
               )}
@@ -308,17 +651,39 @@ export default function ImportSqlDialog({
           )}
         </div>
 
-        <DialogFooter className="mt-4">
-          <Button variant="ghost" onClick={onClose} disabled={executing}>
-            {report ? 'Close' : 'Cancel'}
-          </Button>
-          <Button onClick={handleAction} disabled={!canRun}>
-            {executing && <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />}
-            {actionLabel}
-          </Button>
+        <DialogFooter className="mx-0 mb-0 rounded-none border-t border-border/60 bg-muted/10 px-5 py-3.5 sm:justify-between items-center">
+          <span className="text-xs text-muted-foreground min-w-0 truncate">
+            {!filePath
+              ? 'Choose a file to import.'
+              : isRowImport && !supportsRowInsert
+                ? 'This connection can’t accept row imports.'
+                : isRowImport && targetTables.length === 0
+                  ? 'No table available to import into.'
+                  : isRowImport && rowCount === 0 && !parsed?.error
+                    ? 'No rows found in this file.'
+                    : ''}
+          </span>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" onClick={onClose} disabled={executing}>
+              {report ? 'Close' : 'Cancel'}
+            </Button>
+            <Button onClick={handleAction} disabled={!canRun || (isRowImport && !supportsRowInsert)}>
+              {executing && <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />}
+              {actionLabel}
+            </Button>
+          </div>
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid gap-1.5">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
+      {children}
+    </div>
   );
 }
 
@@ -343,15 +708,17 @@ function ModeOption({
       type="button"
       disabled={disabled}
       onClick={() => onChange(value)}
-      className={`text-left rounded-md border px-3 py-2 transition-colors ${selected
-        ? 'border-primary bg-primary/5'
-        : 'border-border/60 hover:border-border hover:bg-muted/40'
-        } ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
+      className={`text-left rounded-md border px-3 py-2 transition-colors ${
+        selected
+          ? 'border-primary bg-primary/5'
+          : 'border-border/60 hover:border-border hover:bg-muted/40'
+      } ${disabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer'}`}
     >
       <div className="flex items-center gap-2">
         <span
-          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${selected ? 'border-primary' : 'border-muted-foreground/50'
-            }`}
+          className={`w-3.5 h-3.5 rounded-full border flex items-center justify-center ${
+            selected ? 'border-primary' : 'border-muted-foreground/50'
+          }`}
         >
           {selected && <span className="w-1.5 h-1.5 rounded-full bg-primary" />}
         </span>
@@ -360,6 +727,132 @@ function ModeOption({
       <div className="mt-1 ml-5 text-xs text-muted-foreground">{hint}</div>
     </button>
   );
+}
+
+/** Map a file extension to its most likely import format. */
+function guessFormat(ext: string): ImportFormat | null {
+  if (['sql', 'ddl'].includes(ext)) return 'sql';
+  if (['csv', 'tsv'].includes(ext)) return 'csv';
+  if (['json', 'ndjson', 'jsonl'].includes(ext)) return 'json';
+  return null; // .txt — leave the current selection
+}
+
+/** SQL adapters call the target a "table"; document stores a "collection". */
+function isDocumentTarget(dialect: ImportDialect): boolean {
+  return dialect === null;
+}
+
+/**
+ * Parse a CSV (or TSV) string into row objects keyed by the header row.
+ * Handles quoted fields with embedded commas, quotes (`""`), and newlines,
+ * and auto-detects `\t` vs `,` from the header. Values stay strings — the
+ * adapter coerces them to column types on insert. Empty unquoted fields
+ * become `null` so they hit column defaults instead of empty strings.
+ */
+function parseCsv(text: string): Record<string, unknown>[] {
+  const rows = parseDelimited(text);
+  if (rows.length === 0) return [];
+  const header = rows[0].map((h) => h.trim());
+  const out: Record<string, unknown>[] = [];
+  for (let r = 1; r < rows.length; r++) {
+    const cells = rows[r];
+    // Skip fully-empty trailing lines.
+    if (cells.length === 1 && cells[0] === '') continue;
+    const obj: Record<string, unknown> = {};
+    for (let c = 0; c < header.length; c++) {
+      const key = header[c];
+      if (!key) continue;
+      const v = cells[c];
+      obj[key] = v === undefined || v === '' ? null : v;
+    }
+    out.push(obj);
+  }
+  return out;
+}
+
+/** Tokenize delimited text into a 2D array of cells. */
+function parseDelimited(text: string): string[][] {
+  // Detect delimiter from the first line: tab if present, else comma.
+  const firstLine = text.slice(0, text.indexOf('\n') === -1 ? text.length : text.indexOf('\n'));
+  const delim = firstLine.includes('\t') && !firstLine.includes(',') ? '\t' : ',';
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"';
+          i++;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === delim) {
+      row.push(field);
+      field = '';
+    } else if (ch === '\n') {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = '';
+    } else if (ch === '\r') {
+      // swallow — handled by the following \n
+    } else {
+      field += ch;
+    }
+  }
+  // Flush the last field/row if the file didn't end with a newline.
+  if (field !== '' || row.length > 0) {
+    row.push(field);
+    rows.push(row);
+  }
+  return rows;
+}
+
+/**
+ * Parse JSON rows. Accepts either a top-level array of objects, a single
+ * object, or newline-delimited JSON (NDJSON / JSONL — one object per line).
+ * Non-object array members are rejected with a clear error.
+ */
+function parseJsonRows(text: string): Record<string, unknown>[] {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  // Array or single object → standard JSON.
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    const data = JSON.parse(trimmed);
+    const arr = Array.isArray(data) ? data : [data];
+    return arr.map((item, i) => {
+      if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+        throw new Error(`item ${i + 1} is not an object`);
+      }
+      return item as Record<string, unknown>;
+    });
+  }
+  // Otherwise assume NDJSON — one object per non-empty line.
+  const out: Record<string, unknown>[] = [];
+  const lines = trimmed.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    let item: unknown;
+    try {
+      item = JSON.parse(line);
+    } catch {
+      throw new Error(`line ${i + 1} is not valid JSON`);
+    }
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`line ${i + 1} is not an object`);
+    }
+    out.push(item as Record<string, unknown>);
+  }
+  return out;
 }
 
 /** Build the final SQL payload sent to the adapter. Two transforms:
@@ -377,25 +870,17 @@ function ModeOption({
  *     unconditionally — it's idempotent if the dump disabled the same
  *     checks itself, and the per-statement error loop in the adapter
  *     means the closing block ALWAYS runs, even if the middle failed.
- *
- * Identifier quoting matches each dialect: MySQL uses backticks with
- * doubled-backtick escaping; SQLite uses double-quotes. For unknown
- * dialects we skip the wrapper and only do the `USE` prefix, which is
- * a safe no-op transformation.
  */
 function buildPayload(
   sql: string,
   targetDatabase: string | null | undefined,
   dialect: ImportDialect,
 ): string {
-  // Step 1: USE-prefix so the dump lands in the right schema. MySQL
-  // only — other dialects either can't switch database mid-session
-  // (Postgres) or have a single implicit one (SQLite).
   let out = sql;
   if (dialect === 'mysql' && targetDatabase) {
     const head = out
       .split('\n')
-      .filter(l => !/^\s*(--|#|$)/.test(l))
+      .filter((l) => !/^\s*(--|#|$)/.test(l))
       .slice(0, 5)
       .join('\n');
     if (!/^\s*(USE\s+|CREATE\s+DATABASE\b)/i.test(head)) {
@@ -404,11 +889,6 @@ function buildPayload(
     }
   }
 
-  // Step 2: safety wrapper. Stored session state in user-variables (for
-  // MySQL) so the epilogue restores the *caller*'s settings rather than
-  // hardcoding defaults — a connection the user left with
-  // `FOREIGN_KEY_CHECKS=0` for their own reasons shouldn't get silently
-  // re-enabled by an import.
   if (dialect === 'mysql') {
     const prologue = [
       '-- Import safety prologue (Table Relay)',
@@ -429,10 +909,6 @@ function buildPayload(
   }
 
   if (dialect === 'sqlite') {
-    // SQLite has no way to read the old pragma value back into a script
-    // variable, so we unconditionally re-enable FKs at the end. That
-    // matches the defaults we set on connect (`foreign_keys(true)` in
-    // the driver), so a re-enable won't surprise anyone.
     return [
       '-- Import safety prologue (Table Relay)',
       'PRAGMA foreign_keys = OFF;',
