@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use adapter_api::{
     Adapter, AdapterError, BrowseRequest, BrowseResult, CountRequest, ForeignKey, MutateRequest,
-    Mutation, QueryResult, SchemaInfo, ServerInfo, TableStructure, ViewInfo,
+    Mutation, QueryResult, SaveTriggerRequest, SchemaInfo, ServerInfo, TableStructure,
+    TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use async_trait::async_trait;
 
@@ -64,6 +65,31 @@ impl Adapter for SqliteAdapter {
 
     // Stored routines: SQLite has none. Fall back to the default
     // `Unsupported` trait implementations by not overriding the methods.
+
+    async fn list_triggers(&self, schema: &str) -> Result<Vec<TriggerInfo>, AdapterError> {
+        self.driver.list_triggers(schema).await
+    }
+
+    async fn describe_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<TriggerDefinition, AdapterError> {
+        self.driver.describe_trigger(schema, name).await
+    }
+
+    async fn save_trigger(&self, req: SaveTriggerRequest) -> Result<(), AdapterError> {
+        self.driver.save_trigger(req).await
+    }
+
+    async fn drop_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+        table: &str,
+    ) -> Result<(), AdapterError> {
+        self.driver.drop_trigger(schema, name, table).await
+    }
 
     async fn browse(&self, req: BrowseRequest) -> Result<BrowseResult, AdapterError> {
         browse::browse(&self.driver, req).await

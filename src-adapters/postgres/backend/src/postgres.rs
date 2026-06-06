@@ -14,8 +14,9 @@ use std::time::Instant;
 use adapter_api::log_line;
 use adapter_api::{
     AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
-    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SchemaInfo, ServerInfo,
-    StatementResult, TableInfo, TableKind, TableStructure, ViewInfo,
+    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest,
+    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
+    TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -394,7 +395,7 @@ impl PostgresDriver {
             entry.to_cols.push(ref_col);
         }
 
-        let columns = col_rows
+        let columns: Vec<ColumnInfo> = col_rows
             .into_iter()
             .map(
                 |(
@@ -486,7 +487,7 @@ impl PostgresDriver {
             schema,
             table,
             total_ms,
-            0,
+            columns.len(),
             indexes.len(),
             foreign_keys.len(),
         );
@@ -695,6 +696,140 @@ impl PostgresDriver {
             definer: String::new(),
             create_sql: body,
         })
+    }
+
+    pub async fn list_triggers(
+        &self,
+        schema: &str,
+    ) -> Result<Vec<TriggerInfo>, AdapterError> {
+        // pg_trigger.tgtype is a bitmask: bit 1 = ROW, bit 2 = BEFORE,
+        // bit 3 = INSERT, bit 4 = DELETE, bit 5 = UPDATE, bit 6 = INSTEAD.
+        // Skip internal/constraint triggers (tgisinternal).
+        let rows = sqlx::query_as::<_, (String, String, i16)>(
+            r#"SELECT t.tgname AS name,
+                      c.relname AS table_name,
+                      t.tgtype AS tgtype
+               FROM pg_catalog.pg_trigger t
+               JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = $1
+                 AND NOT t.tgisinternal
+               ORDER BY t.tgname"#,
+        )
+        .bind(schema)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, table, tgtype)| {
+                let (timing, event) = decode_pg_tgtype(tgtype);
+                TriggerInfo {
+                    name,
+                    table,
+                    timing,
+                    event,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn describe_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<TriggerDefinition, AdapterError> {
+        // pg_get_triggerdef gives the full, runnable CREATE TRIGGER statement —
+        // the canonical surface for the editor. We still return timing/event for
+        // the structured header.
+        let (table, tgtype, create_sql): (String, i16, String) = sqlx::query_as(
+            r#"SELECT c.relname AS table_name,
+                      t.tgtype AS tgtype,
+                      pg_catalog.pg_get_triggerdef(t.oid, true) AS create_sql
+               FROM pg_catalog.pg_trigger t
+               JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+               JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+               WHERE n.nspname = $1 AND t.tgname = $2 AND NOT t.tgisinternal
+               LIMIT 1"#,
+        )
+        .bind(schema)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AdapterError::NotFound(format!("{schema}.{name} (trigger)")),
+            other => other.into(),
+        })?;
+        let (timing, event) = decode_pg_tgtype(tgtype);
+
+        Ok(TriggerDefinition {
+            schema: schema.to_string(),
+            name: name.to_string(),
+            table,
+            timing,
+            event,
+            // Postgres triggers call a separate function; the full CREATE
+            // statement is the editable surface, so `body` mirrors it.
+            body: create_sql.clone(),
+            create_sql,
+        })
+    }
+
+    pub async fn save_trigger(&self, req: SaveTriggerRequest) -> Result<(), AdapterError> {
+        // Postgres triggers reference a function via EXECUTE FUNCTION, so the
+        // editor edits the full CREATE TRIGGER text. Require `create_sql`.
+        let create_sql = req
+            .create_sql
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AdapterError::Unsupported(
+                    "Postgres triggers require the full CREATE TRIGGER statement".into(),
+                )
+            })?;
+
+        let mut conn = self.pool.acquire().await?;
+
+        // Drop the previous definition when editing. PG's DROP TRIGGER needs the
+        // table name, so use original (when set) or current name on the request's
+        // table. PG14+ supports CREATE OR REPLACE TRIGGER, but drop-then-create
+        // works on all supported versions.
+        let drop_name = req.original_name.as_deref().filter(|s| !s.is_empty());
+        if let Some(orig) = drop_name {
+            if !req.table.trim().is_empty() {
+                let drop_sql = format!(
+                    "DROP TRIGGER IF EXISTS {} ON {}.{}",
+                    quote_ident(orig),
+                    quote_ident(req.schema.trim()),
+                    quote_ident(req.table.trim()),
+                );
+                conn.execute(drop_sql.as_str()).await?;
+            }
+        }
+
+        conn.execute(create_sql).await?;
+        Ok(())
+    }
+
+    pub async fn drop_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+        table: &str,
+    ) -> Result<(), AdapterError> {
+        if table.trim().is_empty() {
+            return Err(AdapterError::Unsupported(
+                "dropping a Postgres trigger requires its table".into(),
+            ));
+        }
+        let sql = format!(
+            "DROP TRIGGER IF EXISTS {} ON {}.{}",
+            quote_ident(name),
+            quote_ident(schema),
+            quote_ident(table),
+        );
+        sqlx::query(&sql).execute(&self.pool).await?;
+        Ok(())
     }
 
     pub async fn create_schema(
@@ -1660,6 +1795,38 @@ pub(crate) fn bind_json<'q>(
 pub(crate) fn quote_ident(ident: &str) -> String {
     let escaped = ident.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+/// Decode a Postgres `pg_trigger.tgtype` bitmask into (timing, event) strings.
+/// Bits (see `src/include/catalog/pg_trigger.h`):
+///   1 = ROW (else STATEMENT), 2 = BEFORE, 4 = INSERT, 8 = DELETE,
+///   16 = UPDATE, 32 = TRUNCATE, 64 = INSTEAD.
+/// A trigger may fire on several events, so events are OR-joined.
+fn decode_pg_tgtype(tgtype: i16) -> (String, String) {
+    let t = tgtype as u16;
+    let timing = if t & (1 << 6) != 0 {
+        "INSTEAD OF"
+    } else if t & (1 << 1) != 0 {
+        "BEFORE"
+    } else {
+        "AFTER"
+    }
+    .to_string();
+
+    let mut events: Vec<&str> = Vec::new();
+    if t & (1 << 2) != 0 {
+        events.push("INSERT");
+    }
+    if t & (1 << 3) != 0 {
+        events.push("DELETE");
+    }
+    if t & (1 << 4) != 0 {
+        events.push("UPDATE");
+    }
+    if t & (1 << 5) != 0 {
+        events.push("TRUNCATE");
+    }
+    (timing, events.join(" OR "))
 }
 
 #[cfg(test)]

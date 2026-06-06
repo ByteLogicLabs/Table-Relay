@@ -17,6 +17,7 @@ describe_schema   = true
 foreign_keys      = false
 views             = false
 routines          = false
+triggers          = false
 indexes           = true
 row_counts        = true
 
