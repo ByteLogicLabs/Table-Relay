@@ -34,8 +34,8 @@ pub use manifest::{
 pub use types::{
     BrowseResult, ColumnInfo, ColumnMeta, CommandWarning, ConnectionProfile, ForeignKey, IndexInfo,
     KillResult, ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam,
-    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, ViewInfo,
-    WarningKind,
+    SaveTriggerRequest, SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind,
+    TableStructure, TriggerDefinition, TriggerInfo, ViewInfo, WarningKind,
 };
 
 /// Contract every built-in adapter implements.
@@ -134,6 +134,51 @@ pub trait Adapter: Send + Sync {
     ) -> Result<RoutineDefinition, AdapterError> {
         Err(AdapterError::Unsupported(
             "describe_routine not implemented for this adapter".into(),
+        ))
+    }
+
+    /// List triggers in a schema (SQL-specific). Default `Unsupported`.
+    async fn list_triggers(
+        &self,
+        _schema: &str,
+    ) -> Result<Vec<TriggerInfo>, AdapterError> {
+        Err(AdapterError::Unsupported(
+            "list_triggers not implemented for this adapter".into(),
+        ))
+    }
+
+    /// Fetch a trigger's full definition. Default `Unsupported`.
+    async fn describe_trigger(
+        &self,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<TriggerDefinition, AdapterError> {
+        Err(AdapterError::Unsupported(
+            "describe_trigger not implemented for this adapter".into(),
+        ))
+    }
+
+    /// Create or replace a trigger. Adapters own the per-dialect DDL: MySQL
+    /// has no `CREATE OR REPLACE TRIGGER`, so it drops `original_name` (when
+    /// set) before creating. Default `Unsupported`.
+    async fn save_trigger(
+        &self,
+        _req: SaveTriggerRequest,
+    ) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "save_trigger not implemented for this adapter".into(),
+        ))
+    }
+
+    /// Drop a trigger. Default `Unsupported`.
+    async fn drop_trigger(
+        &self,
+        _schema: &str,
+        _name: &str,
+        _table: &str,
+    ) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "drop_trigger not implemented for this adapter".into(),
         ))
     }
 

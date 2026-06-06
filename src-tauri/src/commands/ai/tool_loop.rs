@@ -32,8 +32,22 @@ pub(super) async fn run_tool_loop(
     // Filter the tool catalog by the current scope: when cross-database access
     // is off, `list_schemas` is dropped so the model can't enumerate or loop on
     // databases it isn't allowed to reach (it already knows the active one).
+    // EXCEPT for Postgres-style adapters (database ≠ schema) where list_schemas
+    // lists schemas inside the active DB — there it stays so the model can
+    // discover what it can query.
     let cross_db = auto_approvals.get().await.cross_database;
-    let tools_catalog = tools::catalog_scoped(cross_db);
+    // `database_is_schema` is true when a "schema" IS a database (MySQL/SQLite).
+    // Only Postgres models the database as distinct from its (many) schemas, so
+    // key off the dialect — NOT `database_picker` (MySQL sets that too). Default
+    // to `true` (conservative MySQL behavior) if the adapter can't be resolved.
+    let database_is_schema = match db_registry.manifest(&connection_id).await {
+        Ok(m) => !matches!(
+            m.capabilities.sql_dialect,
+            adapter_api::SqlDialect::Postgres
+        ),
+        Err(_) => true,
+    };
+    let tools_catalog = tools::catalog_scoped(cross_db, database_is_schema);
     let tool_ctx = tools::ToolContext {
         connection_id: connection_id.clone(),
         default_schema: schema.clone(),

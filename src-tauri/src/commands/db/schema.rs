@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    AdapterError, ForeignKey, RoutineDefinition, RoutineInfo, SchemaInfo, TableStructure, ViewInfo,
+    AdapterError, ForeignKey, RoutineDefinition, RoutineInfo, SaveTriggerRequest, SchemaInfo,
+    TableStructure, TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use tauri::{AppHandle, State};
 
@@ -139,6 +140,72 @@ pub async fn db_describe_routine(
         let name = name.clone();
         let kind = kind.clone();
         async move { a.describe_routine(&schema, &name, &kind).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_list_triggers(
+    app: AppHandle,
+    connection_id: String,
+    schema: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<Vec<TriggerInfo>, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let schema = schema.clone();
+        async move { a.list_triggers(&schema).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_describe_trigger(
+    app: AppHandle,
+    connection_id: String,
+    schema: String,
+    name: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<TriggerDefinition, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let schema = schema.clone();
+        let name = name.clone();
+        async move { a.describe_trigger(&schema, &name).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_save_trigger(
+    app: AppHandle,
+    connection_id: String,
+    request: SaveTriggerRequest,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<(), AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let request = request.clone();
+        async move { a.save_trigger(request).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_drop_trigger(
+    app: AppHandle,
+    connection_id: String,
+    schema: String,
+    name: String,
+    table: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<(), AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let schema = schema.clone();
+        let name = name.clone();
+        let table = table.clone();
+        async move { a.drop_trigger(&schema, &name, &table).await }
     })
     .await
 }

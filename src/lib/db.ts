@@ -236,6 +236,40 @@ export interface RoutineDefinition {
   createSql: string;
 }
 
+export interface TriggerInfo {
+  name: string;
+  table: string;
+  /** "BEFORE" | "AFTER" | "INSTEAD OF". */
+  timing: string;
+  /** "INSERT" | "UPDATE" | "DELETE" (Postgres/SQLite may OR-combine). */
+  event: string;
+}
+
+export interface TriggerDefinition {
+  schema: string;
+  name: string;
+  table: string;
+  timing: string;
+  event: string;
+  body: string;
+  createSql: string;
+}
+
+/** Payload for `db.saveTrigger`. `originalName` is set when editing/renaming an
+ *  existing trigger so the adapter can drop the old one first. `createSql` is
+ *  required for Postgres/SQLite (their triggers don't decompose into a simple
+ *  body); MySQL can assemble from the structured fields when it's omitted. */
+export interface SaveTriggerInput {
+  schema: string;
+  name: string;
+  originalName?: string | null;
+  table: string;
+  timing: string;
+  event: string;
+  body: string;
+  createSql?: string | null;
+}
+
 // ---------- Adapter manifest + intent types (P4) ----------
 
 export interface AdapterInfo {
@@ -269,6 +303,7 @@ export interface Capabilities {
   foreignKeys: boolean;
   views: boolean;
   routines: boolean;
+  triggers: boolean;
   indexes: boolean;
   rowCounts: boolean;
   // data browsing
@@ -536,6 +571,14 @@ export const db = {
     invoke<RoutineInfo[]>('db_list_routines', { connectionId, schema }),
   describeRoutine: (connectionId: string, schema: string, name: string, kind: string) =>
     invoke<RoutineDefinition>('db_describe_routine', { connectionId, schema, name, kind }),
+  listTriggers: (connectionId: string, schema: string) =>
+    invoke<TriggerInfo[]>('db_list_triggers', { connectionId, schema }),
+  describeTrigger: (connectionId: string, schema: string, name: string) =>
+    invoke<TriggerDefinition>('db_describe_trigger', { connectionId, schema, name }),
+  saveTrigger: (connectionId: string, request: SaveTriggerInput) =>
+    invoke<void>('db_save_trigger', { connectionId, request }),
+  dropTrigger: (connectionId: string, schema: string, name: string, table: string) =>
+    invoke<void>('db_drop_trigger', { connectionId, schema, name, table }),
   createDatabase: (
     connectionId: string,
     name: string,

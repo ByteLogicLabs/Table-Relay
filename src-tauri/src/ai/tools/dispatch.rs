@@ -157,12 +157,29 @@ async fn require_approval(
 /// Guard for shape tools (`list_tables`, `describe_table`): when cross-database
 /// access is OFF, reject any `schema` that isn't the active one. Returns
 /// `Some(error)` to short-circuit, `None` to proceed.
+///
+/// IMPORTANT dialect distinction: on MySQL/SQLite "schema" == "database", so a
+/// schema other than the active one really is a different database and should be
+/// blocked. On Postgres a single database contains MANY schemas (public,
+/// netflix, …) — they all belong to the connected database, and a PG connection
+/// can't even query across databases. So for adapters where the database is a
+/// top-level object distinct from schemas (`database_picker`), we must NOT treat
+/// a sibling schema as a "different database" — that wrongly locked the AI out
+/// of every schema in its own active database.
 async fn guard_active_database(
     auto_approvals: &Arc<AutoApprovals>,
+    database_is_distinct_from_schema: bool,
     ctx: &ToolContext,
     requested_schema: &str,
 ) -> Option<ToolResult> {
     if auto_approvals.cross_database().await {
+        return None;
+    }
+    // Postgres-style adapters: schemas are inside the one connected database,
+    // not separate databases. Cross-database scoping is meaningless per
+    // connection (switching DB rebuilds the connection), so don't block by
+    // schema here — every schema the adapter exposes is in the active DB.
+    if database_is_distinct_from_schema {
         return None;
     }
     let active = ctx.default_schema.as_deref().unwrap_or_default();
@@ -203,6 +220,21 @@ pub async fn dispatch(
         Ok(d) => d,
         Err(e) => return ToolResult::error(format!("connection unavailable: {e}")),
     };
+
+    // Whether this adapter models the database as a top-level object distinct
+    // from schemas (Postgres: one DB, many schemas — `public`, `netflix`, …).
+    // Drives cross-database guards: for these, sibling schemas are NOT "other
+    // databases". MySQL/SQLite treat schema == database (a different schema IS
+    // a different database), so the guard must still fire there.
+    //
+    // NOTE: we key off `sql_dialect == Postgres`, NOT `database_picker` —
+    // MySQL also sets `database_picker: true` (it shows a DB picker), but on
+    // MySQL schema and database are the same thing.
+    let database_is_distinct_from_schema = db_registry
+        .manifest(&ctx.connection_id)
+        .await
+        .map(|m| matches!(m.capabilities.sql_dialect, adapter_api::SqlDialect::Postgres))
+        .unwrap_or(false);
 
     match name {
         "list_schemas" => {
@@ -251,7 +283,14 @@ pub async fn dispatch(
             if schema.is_empty() {
                 return ToolResult::error("schema is required (no active schema on this session)");
             }
-            if let Some(err) = guard_active_database(auto_approvals, ctx, &schema).await {
+            if let Some(err) = guard_active_database(
+                auto_approvals,
+                database_is_distinct_from_schema,
+                ctx,
+                &schema,
+            )
+            .await
+            {
                 return err;
             }
             if let Err(deny) = require_approval(
@@ -293,7 +332,14 @@ pub async fn dispatch(
             if schema.is_empty() {
                 return ToolResult::error("schema is required (no active schema on this session)");
             }
-            if let Some(err) = guard_active_database(auto_approvals, ctx, &schema).await {
+            if let Some(err) = guard_active_database(
+                auto_approvals,
+                database_is_distinct_from_schema,
+                ctx,
+                &schema,
+            )
+            .await
+            {
                 return err;
             }
             if let Err(deny) = require_approval(
@@ -363,7 +409,13 @@ pub async fn dispatch(
             // We only block a qualified reference when the qualifier is a REAL
             // other database (from `list_schemas`) — never a table alias or a
             // table-qualified column, which share the same `x.y` syntax.
-            if !auto_approvals.cross_database().await {
+            //
+            // Skipped entirely for Postgres-style adapters (`database_picker`):
+            // there `list_schemas` returns schemas WITHIN the one connected
+            // database (public, netflix, …), so `schema.table` references are
+            // same-database and must not be flagged as cross-database. A real
+            // cross-database query isn't even possible on a single PG connection.
+            if !auto_approvals.cross_database().await && !database_is_distinct_from_schema {
                 if let Some(active) = ctx.default_schema.as_deref() {
                     let known: Vec<String> = adapter
                         .list_schemas()
@@ -545,6 +597,90 @@ pub async fn dispatch(
                 "ok": true,
                 "mode": mode,
                 "message": format!("Wrote SQL to a {mode} query tab."),
+            }))
+        }
+        "open_object_tab" => {
+            let object = match args.get("object").and_then(|v| v.as_str()) {
+                Some(s) => s.trim().to_string(),
+                None => return ToolResult::error("`object` argument is required"),
+            };
+            if object != "trigger" && object != "table" {
+                return ToolResult::error("object must be 'trigger' or 'table'");
+            }
+            // Optional fields. `name` omitted => blank new-object editor.
+            let obj_name = args
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let req_schema = args
+                .get("schema")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let prefill_sql = args
+                .get("sql")
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let schema = req_schema
+                .or_else(|| ctx.default_schema.clone())
+                .unwrap_or_default();
+
+            use tauri::Emitter;
+            let started = Instant::now();
+            if auto_approvals.allows("open_object_tab").await {
+                crate::log_line!(
+                    "ai_tool",
+                    "open_object_tab auto-approved (object={object})"
+                );
+            } else {
+                let _ = app.emit(
+                    "ai://tool/approval_request",
+                    json!({
+                        "tool_call_id": tool_call_id,
+                        "name": name,
+                        "object": object,
+                        "objectName": obj_name,
+                        "schema": schema,
+                        "sql": prefill_sql,
+                    }),
+                );
+                match approvals.wait(tool_call_id).await {
+                    Ok(ApprovalDecision::Approve) => {
+                        crate::log_line!(
+                            "ai_tool",
+                            "open_object_tab approved after {:?} (object={object})",
+                            started.elapsed()
+                        );
+                    }
+                    Ok(ApprovalDecision::Deny) => {
+                        return ToolResult::error("user declined opening the editor tab");
+                    }
+                    Err(e) => return ToolResult::error(format!("approval: {e}")),
+                }
+            }
+
+            // The tabs state lives in React — emit and let WorkspaceView open
+            // the dedicated trigger / table editor tab.
+            let _ = app.emit(
+                "ai://tab/open-object",
+                json!({
+                    "tool_call_id": tool_call_id,
+                    "connection_id": ctx.connection_id,
+                    "object": object,
+                    "name": obj_name,
+                    "schema": schema,
+                    "sql": prefill_sql,
+                }),
+            );
+            ToolResult::from_value(json!({
+                "ok": true,
+                "object": object,
+                "message": format!("Opened a {object} editor tab for the user to review and save."),
             }))
         }
         "publish_notify" => {

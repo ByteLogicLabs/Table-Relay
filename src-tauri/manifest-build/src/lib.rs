@@ -74,6 +74,7 @@ struct CapabilitiesSection {
     #[serde(default)] foreign_keys: bool,
     #[serde(default)] views: bool,
     #[serde(default)] routines: bool,
+    #[serde(default)] triggers: bool,
     #[serde(default)] indexes: bool,
     #[serde(default)] row_counts: bool,
     // browse
@@ -256,6 +257,7 @@ fn render_capabilities(s: &mut String, c: &CapabilitiesSection) {
     let _ = writeln!(s, "        foreign_keys: {},", c.foreign_keys);
     let _ = writeln!(s, "        views: {},", c.views);
     let _ = writeln!(s, "        routines: {},", c.routines);
+    let _ = writeln!(s, "        triggers: {},", c.triggers);
     let _ = writeln!(s, "        indexes: {},", c.indexes);
     let _ = writeln!(s, "        row_counts: {},", c.row_counts);
     let _ = writeln!(s, "        browse: {},", c.browse);

@@ -20,14 +20,19 @@ pub struct ToolFunction {
     pub parameters: Value,
 }
 
-/// Catalog filtered for the current scope. When `cross_database` is false the
-/// model is locked to the active database, so we DROP `list_schemas` entirely:
-/// the active DB is already stated in the context, and exposing the tool only
-/// invited weak models to loop-call it (and hit the loop-guard abort). With it
-/// gone, the model can't enumerate or fixate on databases it can't reach.
-pub fn catalog_scoped(cross_database: bool) -> Vec<ToolDef> {
+/// Catalog filtered for the current scope.
+///
+/// `cross_database` — whether the user granted cross-database access.
+/// `database_is_schema` — true for MySQL/SQLite-style adapters where a "schema"
+///   IS a database. For those, with cross-DB off, we DROP `list_schemas`: the
+///   active DB is already stated in the context, and exposing the tool only
+///   invited weak models to loop-call it and enumerate databases they can't
+///   reach. For Postgres-style adapters (database ≠ schema) `list_schemas`
+///   lists the schemas WITHIN the active database — always safe and necessary
+///   for the model to discover what it can query — so we keep it regardless.
+pub fn catalog_scoped(cross_database: bool, database_is_schema: bool) -> Vec<ToolDef> {
     let mut tools = catalog_all();
-    if !cross_database {
+    if !cross_database && database_is_schema {
         tools.retain(|t| t.function.name != "list_schemas");
     }
     tools
@@ -107,6 +112,27 @@ fn catalog_all() -> Vec<ToolDef> {
                         "title": { "type": "string", "description": "Optional tab title — defaults to a short snippet of the SQL." }
                     },
                     "required": ["sql", "mode"]
+                }),
+            },
+        },
+        ToolDef {
+            kind: "function",
+            function: ToolFunction {
+                name: "open_object_tab",
+                description: "Open a dedicated EDITOR tab for a database object so the user can review and save it — NOT a plain SQL query tab. Use this when the user wants to create or edit a TRIGGER or a TABLE (its columns/structure), e.g. \"create a trigger\", \"edit this trigger\", \"open the trigger editor\", \"create a table\", \"edit the table structure\". For `trigger`, you may pass `sql` containing a complete `CREATE TRIGGER …` statement to prefill the editor (recommended — the user just reviews and clicks Save). For an existing object pass its `name` to open it for editing; omit `name` to start a blank new-object editor. Does NOT execute anything; the user saves from the editor. REQUIRES USER APPROVAL. To actually run DDL yourself instead, use `call_query`.",
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "object": {
+                            "type": "string",
+                            "enum": ["trigger", "table"],
+                            "description": "Which editor to open: `trigger` (CREATE TRIGGER editor) or `table` (table structure / create-table editor)."
+                        },
+                        "name": { "type": "string", "description": "Existing object name to open for editing. Omit to open a blank new-object editor." },
+                        "schema": { "type": "string", "description": "Schema/database the object lives in. Defaults to the active schema from the context." },
+                        "sql": { "type": "string", "description": "Optional. For `trigger`, a full `CREATE TRIGGER …` statement to prefill the editor buffer so the user can review and save it." }
+                    },
+                    "required": ["object"]
                 }),
             },
         },

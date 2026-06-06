@@ -24,7 +24,7 @@ export interface ConnectionProfile {
   isFavorite?: boolean;
 }
 
-export type TabType = 'data' | 'structure' | 'query' | 'erd' | 'routine' | 'realtime';
+export type TabType = 'data' | 'structure' | 'query' | 'erd' | 'routine' | 'trigger' | 'realtime';
 
 export type DataViewMode = 'table' | 'json' | 'diagram' | 'schema';
 
@@ -50,11 +50,27 @@ export interface AppTab {
   query?: string; // For query tab
   schemaName?: string; // For erd tab (legacy alias for schema)
   isNew?: boolean; // Indicates if the structure represents a new table
+  /** True when the tab's editor has unsaved edits. Editors report this up via
+   *  `onTabDirtyChange` so the tab strip can show a VSCode-style unsaved dot. */
+  dirty?: boolean;
   dataViewMode?: DataViewMode; // Persisted per-tab for `data` tabs
   /** Routine tabs carry their identity so we can dedupe + refetch. `view` is
    *  routed through the same RoutineView shell since both are "CREATE … AS …"
    *  single-buffer objects. */
   routine?: { schema: string; name: string; kind: 'function' | 'procedure' | 'view' };
+  /** Trigger tabs carry their identity so we can dedupe + refetch.
+   *  `initialSql` optionally prefills the editor buffer (used by the AI's
+   *  `open_object_tab` tool when it supplies a CREATE TRIGGER statement).
+   *  `draft` persists the in-progress editor buffer across tab switches so
+   *  unsaved edits survive the unmount that happens when another tab is
+   *  focused. */
+  trigger?: {
+    schema: string;
+    name: string;
+    isNew?: boolean;
+    initialSql?: string;
+    draft?: string;
+  };
   /** Marks query tabs opened by the AI via `write_query_tab`. Subsequent
    *  AI writes with mode='replace' against a non-query focus (e.g. the user
    *  is staring at a function/view tab) reuse the most-recent AI-owned tab

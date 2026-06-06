@@ -11,6 +11,9 @@ export interface QueryCompletionHookContext {
   adapterKey?: string;
   language: string;
   connectionId: string;
+  /** SQL dialect of the active connection, for dialect-aware completions
+   *  (snippets, etc.). Falls back to the adapter key when omitted. */
+  dialect?: 'mysql' | 'postgres' | 'sqlite' | 'generic' | 'none' | string;
   getSchemas: () => SchemaInfo[];
   defaultSchema?: string | (() => string | undefined);
   getCachedStructure: (schema: string, table: string) => TableStructure | undefined;

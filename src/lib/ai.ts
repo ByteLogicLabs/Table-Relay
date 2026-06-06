@@ -166,6 +166,11 @@ export interface ApprovalRequestEvent {
   /** Populated when `name === 'call_query'`: the operation tier the SQL
    *  classified into. Drives the approval card's tier badge. */
   tier?: QueryTier;
+  /** Populated when `name === 'open_object_tab'`: 'trigger' | 'table'. */
+  object?: 'trigger' | 'table';
+  /** Populated when `name === 'open_object_tab'`: existing object name being
+   *  opened for editing (undefined => blank new-object editor). */
+  objectName?: string | null;
 }
 
 /** Fires after the user approves a `write_query_tab` call. The frontend
@@ -177,6 +182,21 @@ export interface TabWriteEvent {
   sql: string;
   mode: 'new' | 'replace';
   title?: string;
+}
+
+/** Fires after the user approves an `open_object_tab` call. The frontend opens
+ *  the dedicated trigger / table editor tab (the same surfaces the sidebar
+ *  opens) — the backend can't reach React's tab state directly. */
+export interface TabOpenObjectEvent {
+  toolCallId: string;
+  connectionId?: string;
+  /** 'trigger' | 'table'. */
+  object: 'trigger' | 'table';
+  /** Existing object name to edit; undefined => blank new-object editor. */
+  name?: string | null;
+  schema?: string;
+  /** Optional prefill DDL (trigger editor seeds its buffer with this). */
+  sql?: string | null;
 }
 
 export type ApprovalDecision = 'approve' | 'deny';
@@ -373,7 +393,7 @@ export const ai = {
     ),
 
   onApprovalRequest: (cb: (e: ApprovalRequestEvent) => void): Promise<UnlistenFn> =>
-    listen<{ tool_call_id: string; name: string; sql?: string; summary?: string; mode?: 'new' | 'replace'; title?: string; tier?: QueryTier }>(
+    listen<{ tool_call_id: string; name: string; sql?: string; summary?: string; mode?: 'new' | 'replace'; title?: string; tier?: QueryTier; object?: 'trigger' | 'table'; objectName?: string | null }>(
       'ai://tool/approval_request',
       (ev) => {
         cb({
@@ -384,6 +404,8 @@ export const ai = {
           mode: ev.payload.mode,
           title: ev.payload.title,
           tier: ev.payload.tier,
+          object: ev.payload.object,
+          objectName: ev.payload.objectName,
         });
       },
     ),
@@ -406,6 +428,28 @@ export const ai = {
           sql: ev.payload.sql,
           mode: ev.payload.mode,
           title: ev.payload.title,
+        });
+      },
+    ),
+
+  onTabOpenObject: (cb: (e: TabOpenObjectEvent) => void): Promise<UnlistenFn> =>
+    listen<{
+      tool_call_id: string;
+      connection_id?: string;
+      object: 'trigger' | 'table';
+      name?: string | null;
+      schema?: string;
+      sql?: string | null;
+    }>(
+      'ai://tab/open-object',
+      (ev) => {
+        cb({
+          toolCallId: ev.payload.tool_call_id,
+          connectionId: ev.payload.connection_id,
+          object: ev.payload.object,
+          name: ev.payload.name,
+          schema: ev.payload.schema,
+          sql: ev.payload.sql,
         });
       },
     ),

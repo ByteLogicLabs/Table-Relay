@@ -1,4 +1,4 @@
-export type SectionKey = "tables" | "views" | "routines";
+export type SectionKey = "tables" | "views" | "routines" | "triggers";
 
 export function quoteIdentForDialect(
   ident: string,

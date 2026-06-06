@@ -1,17 +1,38 @@
-import { format, type FormatOptionsWithLanguage } from 'sql-formatter';
+import { format, type FormatOptionsWithLanguage, type SqlLanguage } from 'sql-formatter';
 
 /**
- * Default formatting profile used across the app. MySQL dialect is a safe
- * superset for the routines/views we open today; when PostgreSQL lands we can
- * pass a driver-specific override from the caller.
+ * Default formatting profile used across the app. Language defaults to `sql`
+ * (generic) but callers should pass their adapter's dialect via
+ * `languageForDialect(...)` so dialect-specific syntax (Postgres `::cast`,
+ * `$$` bodies, etc.) parses instead of throwing a MySQL parse error.
  */
 const DEFAULT_OPTIONS: FormatOptionsWithLanguage = {
-  language: 'mysql',
+  language: 'sql',
   keywordCase: 'upper',
   tabWidth: 2,
   useTabs: false,
   linesBetweenQueries: 2,
 };
+
+/**
+ * Map the app's adapter dialect tokens to a sql-formatter `language`. Unknown /
+ * non-SQL dialects fall back to the generic `sql` grammar, which is permissive
+ * enough not to choke on most dialect-specific syntax.
+ */
+export function languageForDialect(
+  dialect: 'mysql' | 'postgres' | 'sqlite' | 'generic' | 'none' | string | null | undefined,
+): SqlLanguage {
+  switch (dialect) {
+    case 'mysql':
+      return 'mysql';
+    case 'postgres':
+      return 'postgresql';
+    case 'sqlite':
+      return 'sqlite';
+    default:
+      return 'sql';
+  }
+}
 
 /**
  * Format a SQL string. On parse errors sql-formatter throws; we fall back to

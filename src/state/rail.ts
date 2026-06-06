@@ -65,15 +65,60 @@ export async function refreshRail(): Promise<void> {
     }
   }
   hydrated = true;
-  mutate(() => ({ tiles }));
+  mutate(() => ({ tiles: dedupeTiles(tiles) }));
 }
+
+/** Collapse tiles that share a (server, database) identity, keeping the first.
+ *  The backend enforces this with a unique index, so this is purely a defensive
+ *  net against any transient in-memory duplication. */
+function dedupeTiles(tiles: RailTile[]): RailTile[] {
+  const seen = new Set<string>();
+  const out: RailTile[] = [];
+  for (const t of tiles) {
+    const key = `${t.serverId}::${t.databaseName}`;
+    if (seen.has(key) || seen.has(`id:${t.id}`)) continue;
+    seen.add(key);
+    seen.add(`id:${t.id}`);
+    out.push(t);
+  }
+  return out;
+}
+
+// In-flight pin de-dup. Without this, two rapid `pinTile` calls for the same
+// (server, database) both observe `state.tiles` *before* either has resolved
+// and appended — so both call the backend (which is idempotent and returns the
+// SAME row) and both append it, leaving duplicate copies of one tile in the
+// in-memory list. Coalescing concurrent calls on the input key collapses them
+// to a single backend round-trip and a single append.
+const inflightPins = new Map<string, Promise<RailTile>>();
 
 export async function pinTile(input: RailTileInput): Promise<RailTile> {
   const existing = state.tiles.find(t => t.serverId === input.serverId && t.databaseName === input.databaseName);
   if (existing) return existing;
-  const tile = await railStore.pin(input);
-  mutate(s => ({ tiles: [...s.tiles, tile] }));
-  return tile;
+
+  const key = `${input.serverId}::${input.databaseName}`;
+  const pending = inflightPins.get(key);
+  if (pending) return pending;
+
+  const promise = (async () => {
+    const tile = await railStore.pin(input);
+    // Append only if this tile (by id, or by server+database identity) isn't
+    // already present — guards against duplicates from races or a concurrent
+    // refreshRail landing the same row first.
+    mutate(s =>
+      s.tiles.some(t => t.id === tile.id || (t.serverId === tile.serverId && t.databaseName === tile.databaseName))
+        ? s
+        : { tiles: [...s.tiles, tile] },
+    );
+    return tile;
+  })();
+
+  inflightPins.set(key, promise);
+  try {
+    return await promise;
+  } finally {
+    inflightPins.delete(key);
+  }
 }
 
 export async function unpinTile(id: string): Promise<void> {

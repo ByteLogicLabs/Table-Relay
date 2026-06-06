@@ -130,6 +130,7 @@ mod tests {
             foreign_keys: false,
             views: false,
             routines: false,
+            triggers: false,
             indexes: false,
             row_counts: false,
             browse: false,

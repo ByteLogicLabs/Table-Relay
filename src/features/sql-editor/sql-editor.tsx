@@ -17,7 +17,7 @@ import {
   refreshSchemas,
   useConnections,
 } from '../../state/connections';
-import { formatSql } from '../../lib/format-sql';
+import { formatSql, languageForDialect } from '../../lib/format-sql';
 import { useSettings } from '../../lib/settings-store';
 import { prefillChat } from '../../state/ai';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
@@ -223,6 +223,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     completionDisposerRef.current = registerQueryCompletion({
       monaco,
       adapterKey: activeManifest?.adapter.key,
+      dialect: dialectFromManifest(activeManifest?.capabilities),
       language,
       connectionId: connection.id,
       defaultSchema: () => defaultSchemaRef.current,
@@ -753,7 +754,11 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
         ?.run();
       return;
     }
-    const { formatted, error: err } = formatSql(query);
+    const { formatted, error: err } = formatSql(query, {
+      language: languageForDialect(
+        dialectFromManifest(activeManifest?.capabilities),
+      ),
+    });
     if (err) {
       toast.error(`Format failed: ${err}`);
       return;
