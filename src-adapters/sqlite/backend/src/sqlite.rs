@@ -9,8 +9,9 @@ use std::time::Instant;
 
 use adapter_api::log_line;
 use adapter_api::{
-    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, QueryResult, SchemaInfo,
-    ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, ViewInfo,
+    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, QueryResult, SaveTriggerRequest,
+    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
+    TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
 use serde_json::{Value as JsonValue, json};
@@ -434,6 +435,101 @@ impl SqliteDriver {
             .collect())
     }
 
+    pub async fn list_triggers(&self, schema: &str) -> Result<Vec<TriggerInfo>, AdapterError> {
+        ensure_main_schema(schema)?;
+        // SQLite keeps the full CREATE TRIGGER text in sqlite_schema.sql and the
+        // owning table in tbl_name. Timing/event aren't separate columns, so we
+        // parse them out of the SQL.
+        let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT name, tbl_name, sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name NOT LIKE 'sqlite_%'
+             ORDER BY name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, table, sql)| {
+                let (timing, event) = parse_sqlite_trigger_meta(sql.as_deref().unwrap_or(""));
+                TriggerInfo {
+                    name,
+                    table,
+                    timing,
+                    event,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn describe_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<TriggerDefinition, AdapterError> {
+        ensure_main_schema(schema)?;
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT tbl_name, sql FROM sqlite_schema
+             WHERE type = 'trigger' AND name = ? LIMIT 1",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?;
+        let (table, sql) =
+            row.ok_or_else(|| AdapterError::NotFound(format!("{name} (trigger)")))?;
+        let create_sql = sql.unwrap_or_default();
+        let (timing, event) = parse_sqlite_trigger_meta(&create_sql);
+        Ok(TriggerDefinition {
+            schema: MAIN_SCHEMA.to_string(),
+            name: name.to_string(),
+            table,
+            timing,
+            event,
+            body: create_sql.clone(),
+            create_sql,
+        })
+    }
+
+    pub async fn save_trigger(&self, req: SaveTriggerRequest) -> Result<(), AdapterError> {
+        // SQLite has no CREATE OR REPLACE TRIGGER and triggers reference no
+        // separate function — the editor edits the full statement. Drop the old
+        // one (when editing) then create, on one connection.
+        let create_sql = req
+            .create_sql
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AdapterError::Unsupported(
+                    "SQLite triggers require the full CREATE TRIGGER statement".into(),
+                )
+            })?;
+
+        let mut conn = self.pool.acquire().await?;
+        let drop_name = req
+            .original_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(req.name.trim());
+        if !drop_name.is_empty() {
+            let drop_sql = format!("DROP TRIGGER IF EXISTS {}", quote_ident(drop_name));
+            conn.execute(drop_sql.as_str()).await?;
+        }
+        conn.execute(create_sql).await?;
+        Ok(())
+    }
+
+    pub async fn drop_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+        _table: &str,
+    ) -> Result<(), AdapterError> {
+        ensure_main_schema(schema)?;
+        let sql = format!("DROP TRIGGER IF EXISTS {}", quote_ident(name));
+        sqlx::query(&sql).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn run_query(
         &self,
         statement: &str,
@@ -604,6 +700,35 @@ pub(crate) fn quote_ident(ident: &str) -> String {
     // embedded double quotes by doubling them up.
     let escaped = ident.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+/// Pull (timing, event) out of a SQLite `CREATE TRIGGER` statement. SQLite
+/// doesn't expose these as catalog columns, so we scan the SQL text. Timing is
+/// BEFORE / AFTER / INSTEAD OF (defaults to BEFORE when omitted, matching
+/// SQLite's own default); event is INSERT / UPDATE / DELETE (UPDATE may be
+/// `UPDATE OF col`, which we collapse to UPDATE for display).
+fn parse_sqlite_trigger_meta(sql: &str) -> (String, String) {
+    let upper = sql.to_ascii_uppercase();
+    let timing = if upper.contains("INSTEAD OF") {
+        "INSTEAD OF"
+    } else if upper.contains(" AFTER ") {
+        "AFTER"
+    } else {
+        // BEFORE is SQLite's default when neither BEFORE nor AFTER is given.
+        "BEFORE"
+    }
+    .to_string();
+    let event = if upper.contains("INSERT") {
+        "INSERT"
+    } else if upper.contains("DELETE") {
+        "DELETE"
+    } else if upper.contains("UPDATE") {
+        "UPDATE"
+    } else {
+        ""
+    }
+    .to_string();
+    (timing, event)
 }
 
 fn is_query(sql: &str) -> bool {

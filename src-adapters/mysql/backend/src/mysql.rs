@@ -9,8 +9,9 @@ use std::time::Instant;
 
 use adapter_api::{
     AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
-    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SchemaInfo, ServerInfo,
-    StatementResult, TableInfo, TableKind, TableStructure, ViewInfo,
+    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest,
+    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, TriggerDefinition,
+    TriggerInfo, ViewInfo,
 };
 use adapter_api::log_line;
 use bigdecimal::BigDecimal;
@@ -1039,6 +1040,128 @@ impl MysqlDriver {
         })
     }
 
+    pub async fn list_triggers(&self, schema: &str) -> Result<Vec<TriggerInfo>, AdapterError> {
+        let rows = sqlx::query_as::<_, (String, String, String, String)>(
+            r#"SELECT CAST(TRIGGER_NAME AS CHAR CHARACTER SET utf8mb4),
+                      CAST(EVENT_OBJECT_TABLE AS CHAR CHARACTER SET utf8mb4),
+                      CAST(ACTION_TIMING AS CHAR CHARACTER SET utf8mb4),
+                      CAST(EVENT_MANIPULATION AS CHAR CHARACTER SET utf8mb4)
+               FROM information_schema.TRIGGERS
+               WHERE TRIGGER_SCHEMA = ?
+               ORDER BY TRIGGER_NAME"#,
+        )
+        .bind(schema)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|(name, table, timing, event)| TriggerInfo {
+                name,
+                table,
+                timing,
+                event,
+            })
+            .collect())
+    }
+
+    pub async fn describe_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+    ) -> Result<TriggerDefinition, AdapterError> {
+        let meta: (String, String, String, String) = sqlx::query_as(
+            r#"SELECT CAST(EVENT_OBJECT_TABLE AS CHAR CHARACTER SET utf8mb4),
+                      CAST(ACTION_TIMING AS CHAR CHARACTER SET utf8mb4),
+                      CAST(EVENT_MANIPULATION AS CHAR CHARACTER SET utf8mb4),
+                      CAST(ACTION_STATEMENT AS CHAR CHARACTER SET utf8mb4)
+               FROM information_schema.TRIGGERS
+               WHERE TRIGGER_SCHEMA = ? AND TRIGGER_NAME = ?"#,
+        )
+        .bind(schema)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => AdapterError::NotFound(format!("{schema}.{name} (trigger)")),
+            other => other.into(),
+        })?;
+        let (table, timing, event, body) = meta;
+
+        // Reconstruct a runnable CREATE TRIGGER (information_schema doesn't store
+        // the full original text). `ACTION_STATEMENT` is the body after
+        // `FOR EACH ROW`, which is exactly what we need.
+        let create_sql = format!(
+            "CREATE TRIGGER {}\n{} {} ON {}\nFOR EACH ROW\n{}",
+            quote_ident(name),
+            timing,
+            event,
+            quote_ident(&table),
+            body,
+        );
+
+        Ok(TriggerDefinition {
+            schema: schema.to_string(),
+            name: name.to_string(),
+            table,
+            timing,
+            event,
+            body,
+            create_sql,
+        })
+    }
+
+    pub async fn save_trigger(&self, req: SaveTriggerRequest) -> Result<(), AdapterError> {
+        // MySQL has no CREATE OR REPLACE TRIGGER — drop the old one first when
+        // editing, then create. Run on a single connection so the drop+create
+        // see a consistent catalog.
+        let mut conn = self.pool.acquire().await?;
+
+        // Pooled connections have no default database, so an unqualified table
+        // in `CREATE TRIGGER … ON tbl` (and a bare trigger name in DROP) fails
+        // with "No database selected". Select the trigger's schema first so the
+        // statements resolve against it. The trigger and its table always live
+        // in the same database in MySQL.
+        if !req.schema.trim().is_empty() {
+            let use_sql = format!("USE {}", quote_ident(req.schema.trim()));
+            conn.execute(use_sql.as_str()).await?;
+        }
+
+        // Drop the previous definition when editing (rename or in-place edit).
+        if let Some(orig) = req.original_name.as_deref() {
+            if !orig.is_empty() {
+                let drop_sql = format!("DROP TRIGGER IF EXISTS {}", quote_ident(orig));
+                conn.execute(drop_sql.as_str()).await?;
+            }
+        } else {
+            // New trigger sharing a name with an existing one would error; make
+            // creation idempotent from the editor's perspective.
+            let drop_sql = format!("DROP TRIGGER IF EXISTS {}", quote_ident(&req.name));
+            conn.execute(drop_sql.as_str()).await?;
+        }
+
+        let create_sql = build_trigger_create_sql(&req)?;
+        conn.execute(create_sql.as_str()).await?;
+        Ok(())
+    }
+
+    pub async fn drop_trigger(
+        &self,
+        schema: &str,
+        name: &str,
+        _table: &str,
+    ) -> Result<(), AdapterError> {
+        // `DROP TRIGGER schema.name` — qualify with the schema so it works on a
+        // pooled connection with no default database selected.
+        let qualified = if schema.trim().is_empty() {
+            quote_ident(name)
+        } else {
+            format!("{}.{}", quote_ident(schema.trim()), quote_ident(name))
+        };
+        let sql = format!("DROP TRIGGER IF EXISTS {qualified}");
+        sqlx::query(&sql).execute(&self.pool).await?;
+        Ok(())
+    }
+
     pub async fn create_database(
         &self,
         name: &str,
@@ -1127,6 +1250,58 @@ fn is_safe_ident(s: &str) -> bool {
 pub(crate) fn quote_ident(ident: &str) -> String {
     let escaped = ident.replace('`', "``");
     format!("`{escaped}`")
+}
+
+/// Assemble a MySQL `CREATE TRIGGER` statement from a structured save request.
+/// When the editor supplies a raw `create_sql`, that wins (free-form DDL mode);
+/// otherwise we build it from the timing/event/table/body fields.
+fn build_trigger_create_sql(req: &SaveTriggerRequest) -> Result<String, AdapterError> {
+    if let Some(raw) = req.create_sql.as_deref() {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            return Ok(trimmed.to_string());
+        }
+    }
+    if req.name.trim().is_empty() {
+        return Err(AdapterError::Unsupported("trigger name is required".into()));
+    }
+    if req.table.trim().is_empty() {
+        return Err(AdapterError::Unsupported("trigger table is required".into()));
+    }
+    let timing = req.timing.trim().to_ascii_uppercase();
+    let event = req.event.trim().to_ascii_uppercase();
+    // MySQL only allows BEFORE/AFTER and a single INSERT/UPDATE/DELETE event.
+    if !matches!(timing.as_str(), "BEFORE" | "AFTER") {
+        return Err(AdapterError::Unsupported(format!(
+            "MySQL trigger timing must be BEFORE or AFTER (got `{}`)",
+            req.timing
+        )));
+    }
+    if !matches!(event.as_str(), "INSERT" | "UPDATE" | "DELETE") {
+        return Err(AdapterError::Unsupported(format!(
+            "MySQL trigger event must be INSERT, UPDATE or DELETE (got `{}`)",
+            req.event
+        )));
+    }
+    let mut body = req.body.trim().to_string();
+    if body.is_empty() {
+        return Err(AdapterError::Unsupported("trigger body is required".into()));
+    }
+    // Allow the user to omit the trailing semicolon on a single-statement body;
+    // MySQL needs the action statement terminated. Wrapping BEGIN…END bodies
+    // already carry their own terminators.
+    let upper = body.to_ascii_uppercase();
+    if !upper.starts_with("BEGIN") && !body.ends_with(';') {
+        body.push(';');
+    }
+    Ok(format!(
+        "CREATE TRIGGER {}\n{} {} ON {}\nFOR EACH ROW\n{}",
+        quote_ident(req.name.trim()),
+        timing,
+        event,
+        quote_ident(req.table.trim()),
+        body,
+    ))
 }
 
 fn is_routine_ddl(upper: &str) -> bool {
