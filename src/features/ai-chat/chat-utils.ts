@@ -76,6 +76,7 @@ export function formatMessageTime(ms: number): string {
 // conversion for unknown tools so new backends still get a sensible label.
 const TOOL_LABELS: Record<string, string> = {
   write_query_tab:   'Write Query Tab',
+  open_object_tab:   'Open Editor Tab',
   call_query:        'Run Query',
   list_schemas:      'List Schemas',
   list_tables:       'List Tables',

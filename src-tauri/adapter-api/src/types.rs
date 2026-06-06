@@ -291,3 +291,54 @@ pub struct RoutineDefinition {
     pub definer: String,
     pub create_sql: String,
 }
+
+/// Summary row for a trigger, surfaced in the sidebar's "Triggers" section.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerInfo {
+    pub name: String,
+    /// Table the trigger is attached to.
+    pub table: String,
+    /// "BEFORE" | "AFTER" | "INSTEAD OF".
+    pub timing: String,
+    /// "INSERT" | "UPDATE" | "DELETE" (MySQL: single event; Postgres/SQLite
+    /// may combine, e.g. "INSERT OR UPDATE" — adapters return the raw form).
+    pub event: String,
+}
+
+/// Full definition for one trigger, used by the trigger editor.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerDefinition {
+    pub schema: String,
+    pub name: String,
+    pub table: String,
+    pub timing: String,
+    pub event: String,
+    /// Trigger body / action statement (the part after `FOR EACH ROW` etc.).
+    pub body: String,
+    /// The full `CREATE TRIGGER …` statement reconstructed for display/editing.
+    pub create_sql: String,
+}
+
+/// Structured request to create-or-replace a trigger. The adapter owns the
+/// DDL generation per dialect (MySQL has no `CREATE OR REPLACE TRIGGER`, so it
+/// drops then recreates inside the same call).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveTriggerRequest {
+    pub schema: String,
+    pub name: String,
+    /// Previous name when renaming/editing an existing trigger; `None` for a
+    /// brand-new trigger. Adapters drop the old one before creating the new.
+    pub original_name: Option<String>,
+    pub table: String,
+    pub timing: String,
+    pub event: String,
+    pub body: String,
+    /// Optional raw `CREATE TRIGGER …` override. When provided the adapter runs
+    /// it verbatim (after dropping `original_name` if set) instead of assembling
+    /// the statement from the structured fields. Lets the editor offer a
+    /// free-form DDL mode for dialect features the structured form can't express.
+    pub create_sql: Option<String>,
+}

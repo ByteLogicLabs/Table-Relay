@@ -33,6 +33,9 @@ export interface ChatMessage {
       /** Operation tier for `call_query` approvals — drives the card's
        *  tier badge. Undefined for non-query tools. */
       tier?: QueryTier;
+      /** For `open_object_tab` approvals: which editor + the target name. */
+      object?: 'trigger' | 'table';
+      objectName?: string | null;
     };
     approved?: boolean;
     denied?: boolean;
@@ -279,6 +282,8 @@ async function ensureWired() {
             mode: ev.mode,
             title: ev.title,
             tier: ev.tier,
+            object: ev.object,
+            objectName: ev.objectName,
           },
         },
       };

@@ -133,6 +133,8 @@ interface DataGridProps {
   /** Toolbar "Realtime" action. Opens (or refocuses) a realtime tab for
    *  this connection. Gated on `capabilities.realtime`. */
   onOpenRealtime?: (connectionId: string) => void;
+  /** Reports unsaved edit state to the owning tab (drives the unsaved dot). */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 
@@ -148,6 +150,7 @@ export default function DataGrid({
   onLogQuery,
   onImportSql,
   onOpenRealtime,
+  onDirtyChange,
 }: DataGridProps) {
   // Seed from the tab's in-memory cache so switching back to an already-opened
   // tab renders instantly without a round trip. First boot / post-reload the
@@ -989,6 +992,16 @@ export default function DataGrid({
   const nonEmptyInserts = pendingInserts.filter(rowHasData);
   const hasPending =
     hasEdits || pendingDeletes.size > 0 || nonEmptyInserts.length > 0;
+
+  // Report unsaved edit state to the owning tab (drives the unsaved dot).
+  // Skip the initial mount fire so the dot never flickers on when opening.
+  const dirtyMountedRef = useRef(false);
+  useEffect(() => {
+    if (!dirtyMountedRef.current) { dirtyMountedRef.current = true; return; }
+    onDirtyChange?.(hasPending);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasPending]);
+
   // Refs let the keyboard handler read current values without re-subscribing
   // on every edit stroke.
   const activeEditRef = useRef(activeEdit);

@@ -58,6 +58,13 @@ pub fn system_prompt() -> &'static str {
      ANSWER or wants the work done, use `call_query` instead — do not `write_query_tab` and \
      consider the task finished, because nothing ran. mode=replace overwrites the current \
      query tab, mode=new opens a separate one.\n\
+     - `open_object_tab` — opens a dedicated EDITOR tab for a TRIGGER or a TABLE so the user \
+     can review and save it (not a plain query tab). Use when the user wants to create or \
+     edit a trigger or a table's structure: \"create a trigger\", \"edit this trigger\", \
+     \"create a table\", \"edit the table\". For a trigger you can pass `sql` with a full \
+     `CREATE TRIGGER …` statement to prefill the editor; pass `name` to edit an existing \
+     object, or omit it for a blank new editor. It does NOT execute — the user saves from \
+     the editor. To run DDL yourself instead, use `call_query`.\n\
      - `publish_notify` — use when the user asks you to publish / notify / send / trigger \
      a message on a pub/sub channel. Works on Postgres (NOTIFY) and Redis (PUBLISH).\n\
      - `subscribe_channel` — use when the user asks you to subscribe / listen / watch / \

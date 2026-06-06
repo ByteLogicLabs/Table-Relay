@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { toast } from "sonner";
 import {
   ConnectionProfile,
@@ -76,6 +76,20 @@ export default function WorkspaceView({
 }: WorkspaceViewProps) {
   const workspaceStateHydrated = useRef(false);
   const [tabs, setTabs] = useState<AppTab[]>([]);
+  // De-dup + stable-closure refs for the AI `open_object_tab` handler. Declared
+  // up front so the handler (a const further down) and its listener effect can
+  // both reference them regardless of declaration order.
+  const handledOpenObjectRef = useRef<Set<string>>(new Set());
+  const openObjectTabRef = useRef<
+    (e: {
+      toolCallId?: string;
+      connectionId?: string;
+      object: "trigger" | "table";
+      name?: string | null;
+      schema?: string;
+      sql?: string | null;
+    }) => void
+  >(() => {});
   // Per-connection active-tab map: each connection remembers its own last
   // active tab, so switching between connections never steals tab focus from
   // the other. Legacy single-id value is read once and folded into the map.
@@ -546,11 +560,37 @@ export default function WorkspaceView({
   const scopeKey = focusedTile
     ? `${focusedTile.serverId}::${focusedTile.databaseName}`
     : null;
+  // For Postgres the rail tile's `databaseName` is the PG *database* (e.g.
+  // "Apps"), but tables/tabs are keyed by the SQL *schema* (e.g. "public") —
+  // the sidebar resolves the database to an effective schema and opens tabs
+  // with THAT. So tab visibility must match against the same resolved schema,
+  // not the raw database name, or PG data tabs are filtered out and never show.
+  // For MySQL/SQLite schema == database, so this collapses to the tile name.
+  const focusedTileEffectiveSchema = useMemo(() => {
+    if (!focusedTile) return null;
+    const db = focusedTile.databaseName;
+    const schemas = connState.schemasById.get(focusedTile.serverId) ?? [];
+    if (schemas.length === 0) return db;
+    if (schemas.some((s) => s.name === db)) return db;
+    const ci = schemas.find((s) => s.name.toLowerCase() === db.toLowerCase());
+    if (ci) return ci.name;
+    const pub = schemas.find((s) => s.name === "public");
+    if (pub) return pub.name;
+    const nonEmpty = schemas.find((s) => s.tables.length > 0);
+    if (nonEmpty) return nonEmpty.name;
+    return schemas[0]?.name ?? db;
+  }, [focusedTile, connState.schemasById]);
   const visibleTabs = focusedConnection
     ? tabs.filter((t) => {
         if (t.connectionId !== focusedConnection.id) return false;
         if (!t.schema) return true; // connection-scoped query tab
-        return scopeKey === `${t.connectionId}::${t.schema}`;
+        // Match the tab's schema against either the tile's raw database name
+        // (MySQL/SQLite) or the resolved effective schema (Postgres).
+        return (
+          scopeKey === `${t.connectionId}::${t.schema}` ||
+          (focusedTileEffectiveSchema != null &&
+            t.schema === focusedTileEffectiveSchema)
+        );
       })
     : [];
   const storedActive = scopeKey ? activeTabByConn[scopeKey] : undefined;
@@ -777,6 +817,26 @@ export default function WorkspaceView({
     };
     setTabs((prev) => [...prev, newTab]);
     setActiveTabId(newTab.id);
+  };
+
+  // Export is table-scoped (the export modal lives in the data grid), but the
+  // rail / sidebar menus are connection-scoped. Resolve a data tab for the
+  // connection — prefer the active one, otherwise the first open data tab —
+  // and fire the same `tablerelay:menu-export` event the File menu uses. If no
+  // table tab is open we can't know what to export, so tell the user.
+  const handleExportForConnection = (connectionId: string) => {
+    const dataTabs = tabs.filter(
+      (t) => t.connectionId === connectionId && t.type === "data",
+    );
+    const active = dataTabs.find((t) => t.id === activeTabId);
+    const target = active ?? dataTabs[0];
+    if (!target) {
+      toast.error("Open a table before exporting");
+      return;
+    }
+    window.dispatchEvent(
+      new CustomEvent("tablerelay:menu-export", { detail: { tabId: target.id } }),
+    );
   };
 
   const handleNewQuery = (connectionId: string, tableName?: string) => {
@@ -1016,6 +1076,112 @@ export default function WorkspaceView({
     setActiveTabId(newTab.id);
   };
 
+  const handleOpenTrigger = (
+    connectionId: string,
+    schema: string,
+    name: string,
+  ) => {
+    const id = `trigger-${connectionId}-${schema}.${name}`;
+    const existing = tabs.find((t) => t.id === id);
+    if (existing) {
+      setActiveTabId(existing.id);
+      return;
+    }
+    const newTab: AppTab = {
+      id,
+      title: name,
+      type: "trigger",
+      connectionId,
+      schema,
+      trigger: { schema, name },
+    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  };
+
+  const handleNewTrigger = (connectionId: string, schema: string) => {
+    const id = `new-trigger-${connectionId}-${schema}-${Date.now()}`;
+    const newTab: AppTab = {
+      id,
+      title: "New trigger",
+      type: "trigger",
+      connectionId,
+      schema,
+      trigger: { schema, name: "(new)", isNew: true },
+    };
+    setTabs((prev) => [...prev, newTab]);
+    setActiveTabId(newTab.id);
+  };
+
+  // AI `open_object_tab` handler. Declared here (a `const` after the open/new
+  // handlers it delegates to are in scope); the listener effect below reads it
+  // through `openObjectTabRef` so it always sees the latest closure.
+  const handleOpenObjectTab = (ev: {
+    toolCallId?: string;
+    connectionId?: string;
+    object: "trigger" | "table";
+    name?: string | null;
+    schema?: string;
+    sql?: string | null;
+  }) => {
+    if (ev.toolCallId) {
+      if (handledOpenObjectRef.current.has(ev.toolCallId)) return;
+      handledOpenObjectRef.current.add(ev.toolCallId);
+    }
+    const targetConn = ev.connectionId ?? focusedConnection?.id;
+    if (!targetConn) {
+      toast.error("No active connection — cannot open editor tab");
+      return;
+    }
+    const schema =
+      ev.schema ||
+      (focusedTile?.serverId === targetConn ? focusedTile.databaseName : "") ||
+      "";
+    const objName = ev.name?.trim() || undefined;
+    const seed = ev.sql?.trim() || undefined;
+
+    if (ev.object === "trigger") {
+      if (objName && !seed) {
+        // Edit existing trigger by name (TriggerView fetches its DDL).
+        handleOpenTrigger(targetConn, schema, objName);
+      } else {
+        // New trigger, or AI-prefilled DDL → editor seeded with the SQL.
+        const id = seed
+          ? `trigger-ai-${targetConn}-${schema}-${Date.now()}`
+          : `new-trigger-${targetConn}-${schema}-${Date.now()}`;
+        const newTab: AppTab = {
+          id,
+          title: objName ? objName : "New trigger",
+          type: "trigger",
+          connectionId: targetConn,
+          schema,
+          trigger: {
+            schema,
+            name: objName ?? "(new)",
+            isNew: !objName,
+            initialSql: seed,
+          },
+        };
+        setTabs((prev) => [...prev, newTab]);
+        setActiveTabId(newTab.id);
+      }
+      toast.success(
+        objName ? `Opened trigger ${objName}` : "Opened new trigger editor",
+      );
+      return;
+    }
+
+    // object === "table" → schema (structure) editor.
+    if (objName) {
+      handleOpenStructure(targetConn, schema, objName);
+      toast.success(`Opened table ${objName}`);
+    } else {
+      handleNewTable(targetConn, schema);
+      toast.success("Opened new table editor");
+    }
+  };
+  openObjectTabRef.current = handleOpenObjectTab;
+
   const handleOpenErd = (
     connectionId: string,
     schemaName: string,
@@ -1178,6 +1344,35 @@ export default function WorkspaceView({
     );
   };
 
+  // An editor reports whether it has unsaved edits so the tab strip can show a
+  // VSCode-style unsaved dot. Cheap no-op when the flag is unchanged.
+  const handleTabDirtyChange = (tabId: string, dirty: boolean) => {
+    setTabs((prev) => {
+      // Bail out with the SAME array reference when nothing changes.
+      // `prev.map(...)` always allocates a new array, so returning it
+      // unconditionally would retrigger a render every time a child's
+      // `onDirtyChange` fires (those are fresh closures each render),
+      // which spins into an infinite render loop. Only build a new array
+      // when the target tab's dirty flag actually flips.
+      const target = prev.find((t) => t.id === tabId);
+      if (!target || (target.dirty ?? false) === dirty) return prev;
+      return prev.map((t) => (t.id === tabId ? { ...t, dirty } : t));
+    });
+  };
+
+  // Persist the trigger editor's in-progress buffer onto its tab so switching
+  // away and back doesn't discard unsaved edits (the editor unmounts when
+  // another tab is focused — only the active tab renders).
+  const handleTabTriggerDraftChange = (tabId: string, draft: string) => {
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId && t.type === "trigger" && t.trigger
+          ? { ...t, trigger: { ...t.trigger, draft } }
+          : t,
+      ),
+    );
+  };
+
   // A "new table" structure tab successfully created its table on the
   // server. Re-target the tab at the now-real table: drop the
   // `(new)` placeholder, swap in the real name, clear `isNew`, retitle.
@@ -1300,6 +1495,21 @@ export default function WorkspaceView({
     };
   }, []);
 
+  // Listener for the AI `open_object_tab` tool. Reads `openObjectTabRef`
+  // (assigned where `handleOpenObjectTab` is declared) so it always invokes the
+  // latest closure. Mirrors the sidebar open/new flows.
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    void ai
+      .onTabOpenObject((ev) => openObjectTabRef.current(ev))
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      unlisten?.();
+    };
+  }, []);
+
   const handleSaveNewConnection = async (conn: ConnectionProfile) => {
     await onAddConnection(conn);
     setNewConnectionOpen(false);
@@ -1386,6 +1596,7 @@ export default function WorkspaceView({
           if (conn) openEditConnection(conn);
         }}
         onImportSql={(id) => setImportSqlForId(id)}
+        onExport={handleExportForConnection}
         connectedServerIds={new Set(connState.activeById.keys())}
         expanded={railExpanded}
         onExpandChange={setRailExpanded}
@@ -1404,11 +1615,15 @@ export default function WorkspaceView({
         onDeleteConnection={onDeleteConnection}
         onOpenNewServer={() => setNewConnectionOpen(true)}
         onPinDatabase={handlePinDatabase}
+        onImportSql={(id) => setImportSqlForId(id)}
+        onExport={handleExportForConnection}
         onOpenDefinition={handleOpenDefinition}
         onOpenRoutine={handleOpenRoutine}
+        onOpenTrigger={handleOpenTrigger}
         onNewTable={handleNewTable}
         onNewView={handleNewView}
         onNewRoutine={handleNewRoutine}
+        onNewTrigger={handleNewTrigger}
         onOpenRealtime={handleNewRealtime}
         activeItem={(() => {
           const tab = visibleTabs.find((t) => t.id === activeTabId);
@@ -1444,6 +1659,18 @@ export default function WorkspaceView({
                 tab.routine.kind === "view" ? undefined : tab.routine.kind,
             };
           }
+          if (
+            tab.type === "trigger" &&
+            tab.trigger &&
+            tab.trigger.name !== "(new)"
+          ) {
+            return {
+              type: "trigger",
+              connectionId: tab.connectionId,
+              schema: tab.schema,
+              name: tab.trigger.name,
+            };
+          }
           return null;
         })()}
       />
@@ -1461,6 +1688,8 @@ export default function WorkspaceView({
           onOpenRealtime={handleNewRealtime}
           onTabViewModeChange={handleTabViewModeChange}
           onTabQueryChange={handleTabQueryChange}
+          onTabTriggerDraftChange={handleTabTriggerDraftChange}
+          onTabDirtyChange={handleTabDirtyChange}
           onTabRealtimePatternChange={handleTabRealtimePatternChange}
           onTableCreated={handleTabTableCreated}
           queryLogs={queryLogs}

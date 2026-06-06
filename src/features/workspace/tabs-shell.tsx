@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
-import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Radio, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Zap, Radio, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '../../components/ui/context-menu';
@@ -9,6 +9,7 @@ import SchemaView from '../schema/schema-view';
 import SqlEditor from '../sql-editor/sql-editor';
 import DiagramView from '../diagram/diagram-view';
 import RoutineView from '../routine/routine-view';
+import TriggerView from '../trigger/trigger-view';
 import RealtimeView from '../realtime/realtime-view';
 import QueryLog from '../sql-editor/query-log';
 import { useRail } from '../../state/rail';
@@ -29,6 +30,11 @@ interface TabsShellProps {
   onTabViewModeChange: (tabId: string, mode: DataViewMode) => void;
   /** Persist SQL editor edits back onto the owning query tab. */
   onTabQueryChange?: (tabId: string, query: string) => void;
+  /** Persist the trigger editor's in-progress buffer onto its tab so unsaved
+   *  edits survive switching away (the editor unmounts on tab switch). */
+  onTabTriggerDraftChange?: (tabId: string, draft: string) => void;
+  /** An editor reports its unsaved state so the tab shows an unsaved dot. */
+  onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
   /** A new-table structure tab successfully created its table. The
    *  workspace updates the tab so it points at the now-real table
    *  (un-`isNew`, retitled with the saved name). Without this the
@@ -58,6 +64,8 @@ export default function TabsShell({
   onOpenRealtime,
   onTabViewModeChange,
   onTabQueryChange,
+  onTabTriggerDraftChange,
+  onTabDirtyChange,
   onTabRealtimePatternChange,
   onTableCreated,
   queryLogs,
@@ -262,21 +270,36 @@ export default function TabsShell({
                   {tab.type === 'query' && <Terminal className="w-3.5 h-3.5 shrink-0" />}
                   {tab.type === 'erd' && <Waypoints className="w-3.5 h-3.5 shrink-0" />}
                   {tab.type === 'routine' && <FunctionSquare className="w-3.5 h-3.5 shrink-0" />}
+                  {tab.type === 'trigger' && <Zap className="w-3.5 h-3.5 shrink-0" />}
                   {tab.type === 'realtime' && <Radio className="w-3.5 h-3.5 shrink-0" />}
 
                   <span className="truncate flex-1">{tab.title}</span>
-                  {tab.type !== 'erd' && tab.connectionId && (
-                    <span className="w-2 h-2 rounded-full shrink-0" title={activeConnections.find(c => c.id === tab.connectionId)?.name} style={{ backgroundColor: activeConnections.find(c => c.id === tab.connectionId)?.color || '#888' }} />
-                  )}
 
+                  {/* Close / unsaved-dot slot (VSCode-style). When the tab has
+                      unsaved edits we show a dot by default and reveal the X on
+                      hover; otherwise the X follows the usual show-on-active/
+                      hover rule. The dot sits in the SAME slot so the layout
+                      never shifts. */}
                   <div
-                    className={`w-4 h-4 rounded-sm flex items-center justify-center hover:bg-muted shrink-0 ${activeTabId === tab.id ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}`}
+                    className={`group/close relative w-4 h-4 rounded-sm flex items-center justify-center hover:bg-muted shrink-0 ${
+                      tab.dirty || activeTabId === tab.id
+                        ? 'opacity-100'
+                        : 'opacity-0 group-hover:opacity-100'
+                    }`}
+                    title={tab.dirty ? 'Unsaved changes — click to close' : 'Close'}
                     onClick={(e) => {
                       e.stopPropagation();
                       onCloseTab(tab.id);
                     }}
                   >
-                    <X className="w-3 h-3" />
+                    {tab.dirty && (
+                      <span className="absolute inset-0 flex items-center justify-center group-hover/close:opacity-0 transition-opacity">
+                        <span className="w-2 h-2 rounded-full bg-sky-500 dark:bg-sky-400" />
+                      </span>
+                    )}
+                    <X
+                      className={`w-3 h-3 ${tab.dirty ? 'opacity-0 group-hover/close:opacity-100 transition-opacity' : ''}`}
+                    />
                   </div>
                 </div>
               </ContextMenuTrigger>
@@ -352,6 +375,7 @@ export default function TabsShell({
                   onViewModeChange={(mode) => onTabViewModeChange(tab.id, mode)}
                   onImportSql={onImportSql}
                   onOpenRealtime={onOpenRealtime}
+                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
                   onLogQuery={(statement, opts) => onAppendQueryLog({
                     connectionId: tabConnection.id,
                     statement,
@@ -370,6 +394,7 @@ export default function TabsShell({
               connection={connection}
               schema={activeTab.schema}
               isNew={activeTab.isNew}
+              onDirtyChange={(d) => onTabDirtyChange?.(activeTab.id, d)}
               onTableCreated={(savedName) => onTableCreated?.(activeTab.id, savedName)}
             />
           )}
@@ -409,6 +434,27 @@ export default function TabsShell({
               name={activeTab.routine.name}
               kind={activeTab.routine.kind}
               isNew={activeTab.isNew}
+              onDirtyChange={(d) => onTabDirtyChange?.(activeTab.id, d)}
+              onLogQuery={(statement, opts) => onAppendQueryLog({
+                connectionId: connection.id,
+                statement,
+                source: opts?.source ?? 'system',
+                durationMs: opts?.durationMs,
+                status: opts?.status ?? 'ok',
+                message: opts?.message,
+              })}
+            />
+          )}
+          {activeTab?.type === 'trigger' && connection && activeTab.trigger && (
+            <TriggerView
+              connection={connection}
+              schema={activeTab.trigger.schema}
+              name={activeTab.trigger.name}
+              isNew={activeTab.trigger.isNew}
+              initialSql={activeTab.trigger.initialSql}
+              draft={activeTab.trigger.draft}
+              onDraftChange={(d) => onTabTriggerDraftChange?.(activeTab.id, d)}
+              onDirtyChange={(d) => onTabDirtyChange?.(activeTab.id, d)}
               onLogQuery={(statement, opts) => onAppendQueryLog({
                 connectionId: connection.id,
                 statement,
@@ -485,6 +531,7 @@ export default function TabsShell({
               || (activeTab.type === 'query' && connection)
               || (activeTab.type === 'erd' && connection)
               || (activeTab.type === 'routine' && connection && activeTab.routine)
+              || (activeTab.type === 'trigger' && connection && activeTab.trigger)
             ) && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 text-muted-foreground bg-background px-6 text-center">
               <div className="w-14 h-14 rounded-2xl bg-muted flex items-center justify-center">
@@ -500,7 +547,7 @@ export default function TabsShell({
 
         {/* Query log — tabs that can fire server-side commands (data, query,
             routine) plus the realtime tab (it runs PUBLISH via runQuery). */}
-        {activeTab && connection && (activeTab.type === 'data' || activeTab.type === 'query' || activeTab.type === 'routine' || activeTab.type === 'realtime') && (
+        {activeTab && connection && (activeTab.type === 'data' || activeTab.type === 'query' || activeTab.type === 'routine' || activeTab.type === 'trigger' || activeTab.type === 'realtime') && (
           <QueryLog
             entries={queryLogs[connection.id] ?? []}
             onClear={() => onClearQueryLog(connection.id)}

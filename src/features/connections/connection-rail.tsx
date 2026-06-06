@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, GripVertical, Settings, Unplug, Pencil, FileUp, Loader2 } from 'lucide-react';
+import { Database, GripVertical, Settings, Unplug, Pencil, FileUp, FileDown, Loader2 } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -29,6 +29,8 @@ interface ConnectionRailProps {
   onEditServer: (serverId: string) => void;
   /** Kebab → Import SQL file into this server's current database. */
   onImportSql: (serverId: string) => void;
+  /** Kebab → Export the connection's active table (data tab). */
+  onExport: (serverId: string) => void;
   /** Connected server ids — render dot indicator. */
   connectedServerIds: Set<string>;
   expanded: boolean;
@@ -49,6 +51,7 @@ export default function ConnectionRail({
   onDisconnectServer,
   onEditServer,
   onImportSql,
+  onExport,
   connectedServerIds,
   expanded,
   onExpandChange,
@@ -151,6 +154,14 @@ export default function ConnectionRail({
     return manifest
       ? manifest.capabilities.import.length > 0 || manifest.capabilities.insertRows
       : true;
+  }
+
+  function supportsExport(serverId: string): boolean {
+    const driver = serversById.get(serverId)?.driver;
+    const manifest = resolveManifest(manifests, driver);
+    // Default to `true` while manifests load; once resolved, adapters that
+    // declare no export formats hide the item.
+    return manifest ? manifest.capabilities.export.length > 0 : true;
   }
 
   function versionLabel(serverId: string): string | null {
@@ -280,6 +291,11 @@ export default function ConnectionRail({
                 {server && connected && supportsImport(server.id) && (
                   <ContextMenuItem onClick={() => onImportSql(server.id)}>
                     <FileUp className="w-3.5 h-3.5 mr-2" /> Import data…
+                  </ContextMenuItem>
+                )}
+                {server && connected && supportsExport(server.id) && (
+                  <ContextMenuItem onClick={() => onExport(server.id)}>
+                    <FileDown className="w-3.5 h-3.5 mr-2" /> Export data…
                   </ContextMenuItem>
                 )}
                 <ContextMenuItem

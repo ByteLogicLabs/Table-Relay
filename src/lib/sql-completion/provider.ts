@@ -1,7 +1,7 @@
 import type { Monaco } from '@monaco-editor/react';
 import type { editor as MonacoEditor, languages, IDisposable, IRange } from 'monaco-editor';
 import { MYSQL_KEYWORDS, matchKeywordCasing, maybeQuoteIdent } from './keywords';
-import { SQL_SNIPPETS } from './snippets';
+import { snippetsForDialect, type SnippetDialect } from './snippets';
 import { analyzeContext, type SqlClause, type SqlReferencedTable } from './context';
 import type { SchemaInfo, TableStructure } from '../db';
 
@@ -22,6 +22,9 @@ export interface SqlCompletionOptions {
    * switches without re-registering.
    */
   defaultSchema?: string | (() => string | undefined);
+  /** SQL dialect for dialect-specific snippets (e.g. the `ctbl` CREATE TABLE
+   *  scaffold). Defaults to MySQL flavour when omitted. */
+  dialect?: SnippetDialect;
 }
 
 /**
@@ -34,6 +37,7 @@ export function registerSqlCompletion(
 ): IDisposable {
   const Kind = monaco.languages.CompletionItemKind;
   const SnippetRule = monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet;
+  const snippets = snippetsForDialect(options.dialect);
 
   const provider: languages.CompletionItemProvider = {
     triggerCharacters: ['.', '`'],
@@ -180,7 +184,7 @@ export function registerSqlCompletion(
         }
 
         function pushSnippets() {
-          for (const snip of SQL_SNIPPETS) {
+          for (const snip of snippets) {
             suggestions.push({
               label: snip.label,
               kind: Kind.Snippet,

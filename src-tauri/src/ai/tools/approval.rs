@@ -130,7 +130,10 @@ impl AutoApprovals {
             "list_schemas" | "list_tables" => f.read_schema,
             "describe_table" => f.read_structure,
             // `call_query` is gated per-tier via `allows_tier`, not here.
-            "write_query_tab" => f.write_query_tab,
+            // `open_object_tab` is the same class of action as `write_query_tab`
+            // (the AI opens an editor tab for the user to review/save), so it
+            // shares the auto-approval toggle rather than adding a new one.
+            "write_query_tab" | "open_object_tab" => f.write_query_tab,
             "publish_notify" => f.publish_notify,
             "subscribe_channel" => f.subscribe_channel,
             _ => false,

@@ -75,6 +75,10 @@ pub struct Capabilities {
     pub foreign_keys: bool,
     pub views: bool,
     pub routines: bool,
+    /// Adapter supports trigger introspection + DDL via `list_triggers`,
+    /// `describe_trigger`, `save_trigger`, `drop_trigger`. The sidebar shows a
+    /// "Triggers" section when set.
+    pub triggers: bool,
     pub indexes: bool,
     pub row_counts: bool,
     // data browsing

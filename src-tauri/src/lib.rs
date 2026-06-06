@@ -81,12 +81,31 @@ pub fn run() {
             let export_data = MenuItemBuilder::with_id("file_export", "Export…")
                 .accelerator("CmdOrCtrl+Shift+E")
                 .build(handle)?;
-            let file_menu = SubmenuBuilder::new(handle, "File")
+            let mut file_builder = SubmenuBuilder::new(handle, "File")
                 .item(&import_sql)
                 .item(&export_data)
-                .separator()
-                .item(&PredefinedMenuItem::close_window(handle, None)?)
-                .build()?;
+                .separator();
+            // On macOS, Settings / About / Quit live in the app menu (the
+            // first, app-named submenu). Windows & Linux have no app menu, so
+            // those entries would be unreachable — surface them in the File
+            // menu there instead. Settings reuses the `app_settings` id so it
+            // routes through the same `menu-app-settings` → open-settings flow.
+            #[cfg(not(target_os = "macos"))]
+            {
+                let open_settings = MenuItemBuilder::with_id("app_settings", "Settings…")
+                    .accelerator("CmdOrCtrl+,")
+                    .build(handle)?;
+                file_builder = file_builder
+                    .item(&open_settings)
+                    .item(&PredefinedMenuItem::about(handle, None, None)?)
+                    .separator();
+            }
+            file_builder = file_builder.item(&PredefinedMenuItem::close_window(handle, None)?);
+            #[cfg(not(target_os = "macos"))]
+            {
+                file_builder = file_builder.item(&PredefinedMenuItem::quit(handle, None)?);
+            }
+            let file_menu = file_builder.build()?;
 
             // Predefined submenus give us Copy/Paste, fullscreen, etc.
             // without having to rebuild each item by hand.
@@ -228,6 +247,10 @@ pub fn run() {
             commands::db::db_list_views,
             commands::db::db_list_routines,
             commands::db::db_describe_routine,
+            commands::db::db_list_triggers,
+            commands::db::db_describe_trigger,
+            commands::db::db_save_trigger,
+            commands::db::db_drop_trigger,
             commands::db::db_create_database,
             commands::db::db_list_charsets,
             commands::db::db_list_collations,

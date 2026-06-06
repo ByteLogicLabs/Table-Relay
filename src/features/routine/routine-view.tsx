@@ -1,11 +1,13 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
 import { ConnectionProfile } from '../../types';
 import { db, isDbError, type RoutineDefinition } from '../../lib/db';
-import { formatSql } from '../../lib/format-sql';
+import { formatSql, languageForDialect } from '../../lib/format-sql';
+import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
+import { dialectFromManifest } from '../data-grid/editor-kinds';
 
 interface LogQueryOptions {
   source?: 'editor' | 'grid' | 'system';
@@ -21,6 +23,8 @@ interface RoutineViewProps {
   kind: 'function' | 'procedure' | 'view';
   /** When true, skip the describe fetch and seed the buffer with a scaffold. */
   isNew?: boolean;
+  /** Reports unsaved state to the owning tab (drives the unsaved dot). */
+  onDirtyChange?: (dirty: boolean) => void;
   onLogQuery?: (statement: string, opts?: LogQueryOptions) => void;
 }
 
@@ -54,6 +58,54 @@ function q(ident: string): string {
   return '`' + ident.replace(/`/g, '``') + '`';
 }
 
+/** Double-quote an identifier for ANSI dialects (Postgres / SQLite). */
+function qd(ident: string): string {
+  return '"' + ident.replace(/"/g, '""') + '"';
+}
+
+/**
+ * Fetch a view's CREATE DDL as editor text, per dialect. MySQL uses
+ * SHOW CREATE VIEW; Postgres has no such statement (pg_get_viewdef returns the
+ * SELECT body, which we wrap); SQLite stores the original text in
+ * sqlite_master. Returns the text to drop into the editor buffer.
+ */
+async function loadViewDdl(
+  connectionId: string,
+  schema: string,
+  name: string,
+  dialect: ReturnType<typeof dialectFromManifest>,
+): Promise<string> {
+  if (dialect === 'postgres') {
+    const qualified = `${qd(schema)}.${qd(name)}`;
+    const res = await db.runQuery(
+      connectionId,
+      `SELECT pg_get_viewdef('${qualified.replace(/'/g, "''")}'::regclass, true) AS def`,
+    );
+    const last = res.statements[res.statements.length - 1];
+    if (!last || last.error) throw new Error(last?.error ?? 'no definition returned');
+    const body = last.rows[0]?.[0];
+    if (typeof body !== 'string') throw new Error('definition not found in response');
+    return `CREATE OR REPLACE VIEW ${qualified} AS\n${body.trim()}\n`;
+  }
+  if (dialect === 'sqlite') {
+    const res = await db.runQuery(
+      connectionId,
+      `SELECT sql FROM sqlite_master WHERE type='view' AND name='${name.replace(/'/g, "''")}'`,
+    );
+    const last = res.statements[res.statements.length - 1];
+    if (!last || last.error) throw new Error(last?.error ?? 'no definition returned');
+    const ddl = last.rows[0]?.[0];
+    if (typeof ddl !== 'string') throw new Error('definition not found in response');
+    return `${ddl.trim()};\n`;
+  }
+  // MySQL / generic.
+  const res = await db.runQuery(connectionId, `SHOW CREATE VIEW ${q(schema)}.${q(name)}`);
+  const last = res.statements[res.statements.length - 1];
+  if (!last || last.error) throw new Error(last?.error ?? 'no definition returned');
+  const idx = last.columns.findIndex(c => /create view/i.test(c.name));
+  return idx >= 0 ? String(last.rows[0]?.[idx] ?? '') : '';
+}
+
 /**
  * MySQL's SHOW CREATE always includes a `DEFINER=\`user\`@\`host\`` clause
  * between the verb and the routine type. The user never needs to see or edit
@@ -76,16 +128,26 @@ function stripDefiner(ddl: string): string {
  * body with its internal `;` in one shot.
  */
 export default function RoutineView({
-  connection, schema, name, kind, isNew, onLogQuery,
+  connection, schema, name, kind, isNew, onDirtyChange, onLogQuery,
 }: RoutineViewProps) {
+  const manifests = useAdapterManifests();
+  const dialect = dialectFromManifest(
+    resolveManifest(manifests, connection.driver)?.capabilities ?? null,
+  );
+  const isPg = dialect === "postgres";
+  const isSqlite = dialect === "sqlite";
+
   const [def, setDef] = useState<RoutineDefinition | null>(null);
   const [loading, setLoading] = useState(!isNew);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState(() => isNew ? scaffoldFor(kind, schema) : '');
+  const [draft, setDraftState] = useState(() => isNew ? scaffoldFor(kind, schema) : '');
   // Baseline we compare drafts against — empty string for new objects so any
   // edit counts as dirty immediately.
   const baselineRef = useState(() => isNew ? scaffoldFor(kind, schema) : '')[0];
+  // True once the user has made at least one explicit edit via Monaco onChange.
+  // Prevents the scaffold from showing the unsaved dot before any typing.
+  const [userEdited, setUserEdited] = useState(false);
 
   const load = async () => {
     if (kind === 'view') {
@@ -93,11 +155,7 @@ export default function RoutineView({
       setLoading(true);
       setError(null);
       try {
-        const res = await db.runQuery(connection.id, `SHOW CREATE VIEW ${q(schema)}.${q(name)}`);
-        const last = res.statements[res.statements.length - 1];
-        if (!last || last.error) throw new Error(last?.error ?? 'no definition returned');
-        const idx = last.columns.findIndex(c => /create view/i.test(c.name));
-        const ddl = idx >= 0 ? String(last.rows[0]?.[idx] ?? '') : '';
+        const ddl = await loadViewDdl(connection.id, schema, name, dialect);
         const synthetic: RoutineDefinition = {
           schema, name, kind: 'view',
           returns: null, parameters: [], body: '',
@@ -105,7 +163,7 @@ export default function RoutineView({
           createSql: ddl,
         };
         setDef(synthetic);
-        setDraft(stripDefiner(ddl));
+        setDraftState(stripDefiner(ddl));
       } catch (e) {
         setError(isDbError(e) ? e.message : String(e));
       } finally { setLoading(false); }
@@ -116,7 +174,7 @@ export default function RoutineView({
     try {
       const d = await db.describeRoutine(connection.id, schema, name, kind);
       setDef(d);
-      setDraft(stripDefiner(d.createSql || ''));
+      setDraftState(stripDefiner(d.createSql || ''));
     } catch (e) {
       setError(isDbError(e) ? e.message : String(e));
     } finally {
@@ -130,12 +188,8 @@ export default function RoutineView({
     (async () => {
       try {
         if (kind === 'view') {
-          const res = await db.runQuery(connection.id, `SHOW CREATE VIEW ${q(schema)}.${q(name)}`);
+          const ddl = await loadViewDdl(connection.id, schema, name, dialect);
           if (cancelled) return;
-          const last = res.statements[res.statements.length - 1];
-          if (!last || last.error) throw new Error(last?.error ?? 'no definition returned');
-          const idx = last.columns.findIndex(c => /create view/i.test(c.name));
-          const ddl = idx >= 0 ? String(last.rows[0]?.[idx] ?? '') : '';
           const synthetic: RoutineDefinition = {
             schema, name, kind: 'view',
             returns: null, parameters: [], body: '',
@@ -143,12 +197,12 @@ export default function RoutineView({
             createSql: ddl,
           };
           setDef(synthetic);
-          setDraft(stripDefiner(ddl));
+          setDraftState(stripDefiner(ddl));
         } else {
           const d = await db.describeRoutine(connection.id, schema, name, kind);
           if (cancelled) return;
           setDef(d);
-          setDraft(stripDefiner(d.createSql || ''));
+          setDraftState(stripDefiner(d.createSql || ''));
         }
       } catch (e) {
         if (!cancelled) setError(isDbError(e) ? e.message : String(e));
@@ -157,29 +211,56 @@ export default function RoutineView({
       }
     })();
     return () => { cancelled = true; };
-  }, [connection.id, schema, name, kind, isNew]);
+  }, [connection.id, schema, name, kind, isNew, dialect]);
 
-  const dirty = isNew
+  const dirty = userEdited && (isNew
     ? draft.trim().length > 0 && draft !== baselineRef
-    : def ? draft !== stripDefiner(def.createSql || '') : false;
+    : def ? draft !== stripDefiner(def.createSql || '') : false);
+
+  // Report dirty changes to the owning tab. Skip the initial mount so the dot
+  // never flickers on — only fires when the value transitions after mount.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (!mountedRef.current) { mountedRef.current = true; return; }
+    onDirtyChange?.(dirty);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dirty]);
 
   const save = async () => {
     if (!def && !isNew) return;
     const typeWord = kind === 'function' ? 'FUNCTION' : kind === 'procedure' ? 'PROCEDURE' : 'VIEW';
-    const batchLines: string[] = [`USE ${q(schema)};`];
-    // For existing objects we DROP-then-CREATE; for new objects we just CREATE.
-    if (!isNew && def) {
-      batchLines.push(`DROP ${typeWord} IF EXISTS ${q(schema)}.${q(def.name)};`);
-    }
-    if (kind === 'view') {
-      // Views don't need DELIMITER (no inner semicolons).
-      batchLines.push(`${draft.trim().replace(/;\s*$/, '')};`);
+    const body = draft.trim();
+    let batch: string;
+
+    if (isPg || isSqlite) {
+      // Postgres & SQLite: no USE, no DELIMITER, ANSI quoting. The editor
+      // buffer already holds a complete CREATE statement:
+      //   - PG views/routines come from pg_get_viewdef/pg_get_functiondef as
+      //     `CREATE OR REPLACE …`, runnable as-is (no DROP needed).
+      //   - SQLite views are full `CREATE VIEW …` text; we DROP first since
+      //     SQLite has no CREATE OR REPLACE VIEW.
+      const lines: string[] = [];
+      if (isSqlite && kind === 'view' && !isNew && def) {
+        lines.push(`DROP VIEW IF EXISTS ${qd(def.name)};`);
+      }
+      lines.push(body.replace(/;\s*$/, '') + ';');
+      batch = lines.join('\n');
     } else {
-      batchLines.push('DELIMITER //');
-      batchLines.push(`${draft.trim().replace(/;\s*$/, '')}//`);
-      batchLines.push('DELIMITER ;');
+      // MySQL / generic: USE + DROP + (DELIMITER-wrapped) CREATE.
+      const batchLines: string[] = [`USE ${q(schema)};`];
+      if (!isNew && def) {
+        batchLines.push(`DROP ${typeWord} IF EXISTS ${q(schema)}.${q(def.name)};`);
+      }
+      if (kind === 'view') {
+        // Views don't need DELIMITER (no inner semicolons).
+        batchLines.push(`${body.replace(/;\s*$/, '')};`);
+      } else {
+        batchLines.push('DELIMITER //');
+        batchLines.push(`${body.replace(/;\s*$/, '')}//`);
+        batchLines.push('DELIMITER ;');
+      }
+      batch = batchLines.join('\n');
     }
-    const batch = batchLines.join('\n');
 
     setSaving(true);
     const started = performance.now();
@@ -205,6 +286,7 @@ export default function RoutineView({
         message: `${res.statements.length} statement${res.statements.length === 1 ? '' : 's'}`,
       });
       toast.success(`Saved ${kind}`);
+      setUserEdited(false);
     } catch (e) {
       const msg = isDbError(e) ? e.message : String(e);
       onLogQuery?.(batch, { source: 'system', status: 'error', message: msg });
@@ -215,17 +297,20 @@ export default function RoutineView({
   };
 
   const discard = () => {
-    if (isNew) setDraft(baselineRef);
-    else if (def) setDraft(stripDefiner(def.createSql || ''));
+    setUserEdited(false);
+    if (isNew) setDraftState(baselineRef);
+    else if (def) setDraftState(stripDefiner(def.createSql || ''));
   };
 
   const prettify = () => {
-    const { formatted, error: err } = formatSql(draft);
+    const { formatted, error: err } = formatSql(draft, {
+      language: languageForDialect(dialect),
+    });
     if (err) {
       toast.error(`Format failed: ${err}`);
       return;
     }
-    setDraft(formatted);
+    setDraftState(formatted);
   };
 
   if (loading) {
@@ -280,7 +365,7 @@ export default function RoutineView({
         <Editor
           defaultLanguage="sql"
           value={draft}
-          onChange={v => setDraft(v ?? '')}
+          onChange={v => { setUserEdited(true); setDraftState(v ?? ''); }}
           theme="vs-dark"
           options={{
             fontSize: 13,

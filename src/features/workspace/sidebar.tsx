@@ -5,6 +5,7 @@ import {
   Table as TableIcon,
   LayoutTemplate,
   FunctionSquare,
+  Zap,
   MoreVertical,
   Loader2,
   Plus,
@@ -14,6 +15,8 @@ import {
   Waypoints,
   Radio,
   Activity,
+  FileUp,
+  FileDown,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../../components/ui/button";
@@ -47,7 +50,7 @@ import {
   useAdapterManifests,
   resolveManifest,
 } from "../../state/adapter-manifests";
-import { db, type RoutineInfo, type ViewInfo } from "../../lib/db";
+import { db, type RoutineInfo, type TriggerInfo, type ViewInfo } from "../../lib/db";
 import DbIcon from "../../components/db-icon";
 import { SidebarListSkeleton } from "../../components/skeleton";
 import { DestructiveConfirmDialog } from "../../components/destructive-confirm-dialog";
@@ -94,6 +97,10 @@ interface SidebarProps {
   onOpenNewServer: () => void;
   /** Pin (server, database) to the rail and switch focus to it. */
   onPinDatabase: (serverId: string, databaseName: string) => void;
+  /** Open the Import dialog for the focused connection. */
+  onImportSql?: (connectionId: string) => void;
+  /** Export the focused connection's active table (data tab). */
+  onExport?: (connectionId: string) => void;
   /**
    * Open (or re-focus) a query tab pre-filled with a DDL definition.
    * `key` identifies the object so opening the same view / routine twice
@@ -114,6 +121,8 @@ interface SidebarProps {
   ) => void;
   /** Open a dedicated view editor tab (reuses the RoutineView shell). */
   onOpenView?: (connectionId: string, schema: string, name: string) => void;
+  /** Open a dedicated trigger editor tab. */
+  onOpenTrigger?: (connectionId: string, schema: string, name: string) => void;
   /** Start a "new table" flow — opens an empty Schema editor tab. */
   onNewTable?: (connectionId: string, schema: string) => void;
   /** Start a "new view" flow — opens a blank view editor. */
@@ -124,6 +133,8 @@ interface SidebarProps {
     schema: string,
     kind: "function" | "procedure",
   ) => void;
+  /** Start a "new trigger" flow — opens a blank trigger editor. */
+  onNewTrigger?: (connectionId: string, schema: string) => void;
   /** Open (or refocus) the realtime tab for the focused server. */
   onOpenRealtime?: (connectionId: string) => void;
   /**
@@ -133,7 +144,7 @@ interface SidebarProps {
    * active AppTab.
    */
   activeItem?: {
-    type: "table" | "view" | "routine";
+    type: "table" | "view" | "routine" | "trigger";
     connectionId: string;
     schema: string;
     name: string;
@@ -155,11 +166,16 @@ export default function Sidebar({
   onDeleteConnection,
   onOpenNewServer,
   onPinDatabase,
+  onImportSql,
+  onExport,
   onOpenDefinition,
   onOpenRoutine,
+  onOpenView,
+  onOpenTrigger,
   onNewTable,
   onNewView,
   onNewRoutine,
+  onNewTrigger,
   onOpenRealtime,
   activeItem,
 }: SidebarProps) {
@@ -176,6 +192,9 @@ export default function Sidebar({
   const [routinesByDb, setRoutinesByDb] = useState<Map<string, RoutineInfo[]>>(
     new Map(),
   );
+  const [triggersByDb, setTriggersByDb] = useState<Map<string, TriggerInfo[]>>(
+    new Map(),
+  );
   const [loadingExtras, setLoadingExtras] = useState(false);
   // Which section is mid-refresh from its hover sync button. Drives the
   // spinning icon on just that section's header.
@@ -187,6 +206,7 @@ export default function Sidebar({
     tables: false,
     views: false,
     routines: false,
+    triggers: false,
   });
 
   // Destructive confirmation state for table drops / truncates triggered
@@ -199,7 +219,13 @@ export default function Sidebar({
   };
   const [tableConfirm, setTableConfirm] =
     useState<TableDestructiveAction | null>(null);
+  // Trigger pending-drop confirmation (mirrors the table drop dialog flow).
+  const [triggerConfirm, setTriggerConfirm] = useState<TriggerInfo | null>(null);
   const tablesContainerRef = useRef<HTMLDivElement>(null);
+  // Tracks which (conn.id + schema) keys have been fetched for views/routines/
+  // triggers. Declared early so both the reload event handler AND the lazy-load
+  // effect can reference it without closure ordering issues.
+  const fetchedExtrasRef = useRef(new Set<string>());
 
   const connState = useConnections();
   const conn = focusedConnection;
@@ -227,12 +253,26 @@ export default function Sidebar({
   // swallows failures. Once the manifest arrives, strict gating kicks in.
   const supportsViews = activeManifest?.capabilities.views ?? true;
   const supportsRoutines = activeManifest?.capabilities.routines ?? true;
+  // Triggers default to `false` (only the three SQL adapters declare them) so
+  // document/KV stores don't flash the section while the manifest loads.
+  const supportsTriggers = activeManifest?.capabilities.triggers ?? false;
   const supportsDiagram = activeManifest?.capabilities.diagram ?? true;
   // Realtime defaults to `false` so SQL-only adapters don't flash the
   // menu entry while manifests load — the opposite of views/routines,
   // where historically everything supported them.
   const supportsRealtime = activeManifest?.capabilities.realtime ?? false;
   const supportsProcessList = activeManifest?.capabilities.processList ?? false;
+  // Create-table is offered for SQL adapters (createTable DDL) and for
+  // document stores, where the same "new" flow creates a collection.
+  const supportsCreateTable =
+    (activeManifest?.capabilities.createTable ?? false) ||
+    activeManifest?.capabilities.sqlDialect === "none";
+  // Import is offered when the adapter declares importable formats OR can
+  // ingest rows (Mongo via insert_rows); export when it declares any formats.
+  const supportsImport =
+    (activeManifest?.capabilities.import.length ?? 1) > 0 ||
+    (activeManifest?.capabilities.insertRows ?? false);
+  const supportsExport = (activeManifest?.capabilities.export.length ?? 1) > 0;
   // Generic noun for the primary-entity section header. Document stores (Mongo)
   // report sql_dialect=none — same flag the data grid uses for isDocumentStore.
   // We label the section "documents"/"tables" (the kind) rather than the
@@ -349,6 +389,8 @@ export default function Sidebar({
       if (!conn || !selectedDb) {
         setViewsByDb(new Map());
         setRoutinesByDb(new Map());
+        setTriggersByDb(new Map());
+        fetchedExtrasRef.current.clear();
         return;
       }
       // Refresh the schema list (tables, kinds, row counts) so structural
@@ -356,6 +398,10 @@ export default function Sidebar({
       void refreshSchemas(conn.id);
       const schemaForCalls = effectiveSchema ?? selectedDb;
       const key = `${conn.id}.${schemaForCalls}`;
+      // Clear the in-flight marks so the lazy-load effect re-fetches on next render.
+      fetchedExtrasRef.current.delete(`v:${key}`);
+      fetchedExtrasRef.current.delete(`r:${key}`);
+      fetchedExtrasRef.current.delete(`t:${key}`);
       setLoadingExtras(true);
       // Skip unsupported calls — the adapter would reject them with
       // `Unsupported` and we'd log a bogus "reload failed" warning.
@@ -365,12 +411,20 @@ export default function Sidebar({
       const routinesFut = supportsRoutines
         ? db.listRoutines(conn.id, schemaForCalls)
         : Promise.resolve([] as RoutineInfo[]);
-      void Promise.all([viewsFut, routinesFut])
-        .then(([v, r]) => {
+      const triggersFut = supportsTriggers
+        ? db.listTriggers(conn.id, schemaForCalls)
+        : Promise.resolve([] as TriggerInfo[]);
+      void Promise.all([viewsFut, routinesFut, triggersFut])
+        .then(([v, r, t]) => {
           setViewsByDb((prev) => new Map(prev).set(key, v));
           setRoutinesByDb((prev) => new Map(prev).set(key, r));
+          setTriggersByDb((prev) => new Map(prev).set(key, t));
+          // Re-mark as fetched so the lazy-load effect doesn't double-fetch.
+          fetchedExtrasRef.current.add(`v:${key}`);
+          fetchedExtrasRef.current.add(`r:${key}`);
+          fetchedExtrasRef.current.add(`t:${key}`);
         })
-        .catch((err) => console.warn("reload views/routines failed", err))
+        .catch((err) => console.warn("reload views/routines/triggers failed", err))
         .finally(() => setLoadingExtras(false));
     };
     const onOpenConnectionPicker = () => setConnManagerOpen(true);
@@ -396,34 +450,46 @@ export default function Sidebar({
   useEffect(() => {
     if (!conn || !effectiveSchema) return;
     const key = `${conn.id}.${effectiveSchema}`;
-    const needV = supportsViews && !viewsByDb.has(key);
-    const needR = supportsRoutines && !routinesByDb.has(key);
-    if (!needV && !needR) return;
+    const fetched = fetchedExtrasRef.current;
+    const needV = supportsViews && !fetched.has(`v:${key}`);
+    const needR = supportsRoutines && !fetched.has(`r:${key}`);
+    const needT = supportsTriggers && !fetched.has(`t:${key}`);
+    if (!needV && !needR && !needT) return;
+    // Mark as in-flight immediately so concurrent renders don't double-fetch.
+    if (needV) fetched.add(`v:${key}`);
+    if (needR) fetched.add(`r:${key}`);
+    if (needT) fetched.add(`t:${key}`);
     setLoadingExtras(true);
     const viewsFut = needV
       ? db.listViews(conn.id, effectiveSchema)
-      : Promise.resolve(viewsByDb.get(key) ?? ([] as ViewInfo[]));
+      : Promise.resolve([] as ViewInfo[]);
     const routinesFut = needR
       ? db.listRoutines(conn.id, effectiveSchema)
-      : Promise.resolve(routinesByDb.get(key) ?? ([] as RoutineInfo[]));
-    void Promise.all([viewsFut, routinesFut])
-      .then(([v, r]) => {
-        setViewsByDb((prev) => new Map(prev).set(key, v));
-        setRoutinesByDb((prev) => new Map(prev).set(key, r));
+      : Promise.resolve([] as RoutineInfo[]);
+    const triggersFut = needT
+      ? db.listTriggers(conn.id, effectiveSchema)
+      : Promise.resolve([] as TriggerInfo[]);
+    void Promise.all([viewsFut, routinesFut, triggersFut])
+      .then(([v, r, t]) => {
+        if (needV) setViewsByDb((prev) => new Map(prev).set(key, v));
+        if (needR) setRoutinesByDb((prev) => new Map(prev).set(key, r));
+        if (needT) setTriggersByDb((prev) => new Map(prev).set(key, t));
       })
       .catch((err) => {
-        console.warn("list_views/routines failed", err);
-        // Don't toast — tables list still works; these are supplementary.
+        // On error, clear the in-flight marks so a retry (⌘+R) can refetch.
+        if (needV) fetched.delete(`v:${key}`);
+        if (needR) fetched.delete(`r:${key}`);
+        if (needT) fetched.delete(`t:${key}`);
+        console.warn("list_views/routines/triggers failed", err);
       })
       .finally(() => setLoadingExtras(false));
   }, [
     conn,
     effectiveSchema,
-    viewsByDb,
-    routinesByDb,
     supportsViews,
     supportsRoutines,
-  ]);
+    supportsTriggers,
+  ]); // Maps intentionally excluded — tracked via fetchedExtrasRef instead
 
   // Per-section re-sync from the hover button on each section header. Each
   // refetches only its own list so a stale tables/views/routines list can be
@@ -448,7 +514,9 @@ export default function Sidebar({
     try {
       const v = await db.listViews(conn.id, effectiveSchema);
       setViewsByDb((prev) => new Map(prev).set(key, v));
+      fetchedExtrasRef.current.add(`v:${key}`);
     } catch (err) {
+      fetchedExtrasRef.current.delete(`v:${key}`);
       console.warn("refresh views failed", err);
     } finally {
       setRefreshingSection((s) => (s === "views" ? null : s));
@@ -462,10 +530,28 @@ export default function Sidebar({
     try {
       const r = await db.listRoutines(conn.id, effectiveSchema);
       setRoutinesByDb((prev) => new Map(prev).set(key, r));
+      fetchedExtrasRef.current.add(`r:${key}`);
     } catch (err) {
+      fetchedExtrasRef.current.delete(`r:${key}`);
       console.warn("refresh routines failed", err);
     } finally {
       setRefreshingSection((s) => (s === "routines" ? null : s));
+    }
+  }, [conn, effectiveSchema]);
+
+  const refreshTriggers = useCallback(async () => {
+    if (!conn || !effectiveSchema) return;
+    const key = `${conn.id}.${effectiveSchema}`;
+    setRefreshingSection("triggers");
+    try {
+      const t = await db.listTriggers(conn.id, effectiveSchema);
+      setTriggersByDb((prev) => new Map(prev).set(key, t));
+      fetchedExtrasRef.current.add(`t:${key}`);
+    } catch (err) {
+      fetchedExtrasRef.current.delete(`t:${key}`);
+      console.warn("refresh triggers failed", err);
+    } finally {
+      setRefreshingSection((s) => (s === "triggers" ? null : s));
     }
   }, [conn, effectiveSchema]);
 
@@ -485,6 +571,11 @@ export default function Sidebar({
     return routinesByDb.get(`${conn.id}.${effectiveSchema}`) ?? [];
   }, [conn, effectiveSchema, routinesByDb]);
 
+  const triggers: TriggerInfo[] = useMemo(() => {
+    if (!conn || !effectiveSchema) return [];
+    return triggersByDb.get(`${conn.id}.${effectiveSchema}`) ?? [];
+  }, [conn, effectiveSchema, triggersByDb]);
+
   // Everywhere the sidebar passes a "schema" down to a command or a
   // click handler, use `effectiveSchema`. For PG that's a real namespace
   // (e.g. `public`); for MySQL/SQLite it collapses to `selectedDb`.
@@ -500,6 +591,29 @@ export default function Sidebar({
   const fRoutines = q
     ? routines.filter((r) => r.name.toLowerCase().includes(q))
     : routines;
+  const fTriggers = q
+    ? triggers.filter(
+        (t) =>
+          t.name.toLowerCase().includes(q) ||
+          t.table.toLowerCase().includes(q),
+      )
+    : triggers;
+  // Postgres allows overloaded routines (same name + kind, different argument
+  // signatures). Our active-item model identifies routines by name+kind only,
+  // so it can't tell overloads apart — highlighting by name would light up
+  // ALL overloads at once. Track which name+kind combos are duplicated so we
+  // can suppress the "active" highlight for them (better to highlight none
+  // than to wrongly highlight several).
+  const duplicateRoutineKeys = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const r of fRoutines) {
+      const key = `${r.kind.toLowerCase()}:${r.name}`;
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    const dups = new Set<string>();
+    for (const [key, n] of counts) if (n > 1) dups.add(key);
+    return dups;
+  }, [fRoutines]);
 
   // Multi-selection over the visible (filtered) tables list. Selection
   // resets implicitly when the orderedIds() function returns a new array
@@ -572,6 +686,26 @@ export default function Sidebar({
       );
     }
   }, [buildDropSql, buildTruncateSql, conn, tableConfirm, tableSelection]);
+
+  const performTriggerDrop = useCallback(async () => {
+    if (!conn || !triggerConfirm) return;
+    try {
+      await db.dropTrigger(
+        conn.id,
+        schemaForActions,
+        triggerConfirm.name,
+        triggerConfirm.table,
+      );
+      toast.success(`Dropped trigger ${triggerConfirm.name}`);
+      void refreshTriggers();
+    } catch (err) {
+      toast.error(
+        `Drop failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      setTriggerConfirm(null);
+    }
+  }, [conn, triggerConfirm, schemaForActions, refreshTriggers]);
 
   const requestDropSelected = useCallback(
     (triggerName?: string) => {
@@ -743,7 +877,7 @@ export default function Sidebar({
   // Scoped to the connection + database the sidebar is currently showing,
   // so pins on different servers / databases can't falsely highlight.
   const matchesActive = (
-    type: "table" | "view" | "routine",
+    type: "table" | "view" | "routine" | "trigger",
     name: string,
     routineKind?: "function" | "procedure",
   ): boolean => {
@@ -778,25 +912,59 @@ export default function Sidebar({
     viewName: string,
   ) => {
     try {
-      // No row limit — `SHOW CREATE` rejects a trailing `LIMIT`.
-      const res = await db.runQuery(
-        connectionId,
-        `SHOW CREATE VIEW \`${dbName}\`.\`${viewName}\``,
-      );
-      const last = res.statements[res.statements.length - 1];
-      if (!last || last.error)
-        throw new Error(last?.error ?? "no definition returned");
-      const idx = pickDdlColumn(last.columns, "Create View");
-      const ddl = idx >= 0 ? last.rows[0]?.[idx] : null;
-      if (typeof ddl !== "string")
-        throw new Error("definition not found in response");
-      // MySQL returns `CREATE ALGORITHM=... DEFINER=... VIEW ... AS ...`.
-      const editable = ddl.replace(/^CREATE\s+/i, "CREATE OR REPLACE ");
+      let editable: string;
+      if (dialect === "postgres") {
+        // Postgres has no SHOW CREATE. `pg_get_viewdef` returns the SELECT
+        // body; we wrap it into a CREATE OR REPLACE VIEW so the editor can
+        // run it back. Schema-qualify via regclass.
+        const qualified = `${quoteIdentForDialect(dbName, dialect)}.${quoteIdentForDialect(viewName, dialect)}`;
+        const res = await db.runQuery(
+          connectionId,
+          `SELECT pg_get_viewdef('${qualified.replace(/'/g, "''")}'::regclass, true) AS def`,
+        );
+        const last = res.statements[res.statements.length - 1];
+        if (!last || last.error)
+          throw new Error(last?.error ?? "no definition returned");
+        const body = last.rows[0]?.[0];
+        if (typeof body !== "string")
+          throw new Error("definition not found in response");
+        editable = `CREATE OR REPLACE VIEW ${qualified} AS\n${body.trim()}\n`;
+      } else if (dialect === "sqlite") {
+        // SQLite stores the original CREATE VIEW text in sqlite_master.
+        const res = await db.runQuery(
+          connectionId,
+          `SELECT sql FROM sqlite_master WHERE type='view' AND name='${viewName.replace(/'/g, "''")}'`,
+        );
+        const last = res.statements[res.statements.length - 1];
+        if (!last || last.error)
+          throw new Error(last?.error ?? "no definition returned");
+        const ddl = last.rows[0]?.[0];
+        if (typeof ddl !== "string")
+          throw new Error("definition not found in response");
+        editable = `DROP VIEW IF EXISTS ${quoteIdentForDialect(viewName, dialect)};\n\n${ddl.trim()};\n`;
+      } else {
+        // MySQL / generic: SHOW CREATE VIEW. No row limit — it rejects a
+        // trailing LIMIT.
+        const res = await db.runQuery(
+          connectionId,
+          `SHOW CREATE VIEW \`${dbName}\`.\`${viewName}\``,
+        );
+        const last = res.statements[res.statements.length - 1];
+        if (!last || last.error)
+          throw new Error(last?.error ?? "no definition returned");
+        const idx = pickDdlColumn(last.columns, "Create View");
+        const ddl = idx >= 0 ? last.rows[0]?.[idx] : null;
+        if (typeof ddl !== "string")
+          throw new Error("definition not found in response");
+        // MySQL returns `CREATE ALGORITHM=... DEFINER=... VIEW ... AS ...`.
+        const replaced = ddl.replace(/^CREATE\s+/i, "CREATE OR REPLACE ");
+        editable = `USE \`${dbName}\`;\n\n${replaced};\n`;
+      }
       onOpenDefinition(
         connectionId,
         `view:${dbName}.${viewName}`,
         viewName,
-        `USE \`${dbName}\`;\n\n${editable};\n`,
+        editable,
       );
     } catch (err) {
       toast.error(
@@ -813,33 +981,56 @@ export default function Sidebar({
   ) => {
     const k = kind.toUpperCase() === "FUNCTION" ? "FUNCTION" : "PROCEDURE";
     try {
-      const res = await db.runQuery(
-        connectionId,
-        `SHOW CREATE ${k} \`${dbName}\`.\`${routineName}\``,
-      );
-      const last = res.statements[res.statements.length - 1];
-      if (!last || last.error)
-        throw new Error(last?.error ?? "no definition returned");
-      const idx = pickDdlColumn(
-        last.columns,
-        `Create ${k.charAt(0) + k.slice(1).toLowerCase()}`,
-      );
-      const ddl = idx >= 0 ? last.rows[0]?.[idx] : null;
-      if (typeof ddl !== "string")
-        throw new Error("definition not found in response");
-      // Routines have `;` inside their body, so wrap in DELIMITER directives
-      // (our splitter handles them client-side) and scaffold a DROP + CREATE
-      // so Run replaces the routine atomically.
-      const editable = [
-        `USE \`${dbName}\`;`,
-        "",
-        `DROP ${k} IF EXISTS \`${routineName}\`;`,
-        "",
-        "DELIMITER //",
-        `${ddl}//`,
-        "DELIMITER ;",
-        "",
-      ].join("\n");
+      let editable: string;
+      if (dialect === "postgres") {
+        // Postgres: pg_get_functiondef returns a complete
+        // `CREATE OR REPLACE FUNCTION/PROCEDURE …` body, runnable as-is.
+        const res = await db.runQuery(
+          connectionId,
+          `SELECT pg_get_functiondef(p.oid) AS def
+             FROM pg_proc p
+             JOIN pg_namespace n ON n.oid = p.pronamespace
+            WHERE n.nspname = '${dbName.replace(/'/g, "''")}'
+              AND p.proname = '${routineName.replace(/'/g, "''")}'
+            LIMIT 1`,
+        );
+        const last = res.statements[res.statements.length - 1];
+        if (!last || last.error)
+          throw new Error(last?.error ?? "no definition returned");
+        const ddl = last.rows[0]?.[0];
+        if (typeof ddl !== "string")
+          throw new Error("definition not found in response");
+        editable = `${ddl.trim()}\n`;
+      } else {
+        // MySQL / generic: SHOW CREATE FUNCTION|PROCEDURE.
+        const res = await db.runQuery(
+          connectionId,
+          `SHOW CREATE ${k} \`${dbName}\`.\`${routineName}\``,
+        );
+        const last = res.statements[res.statements.length - 1];
+        if (!last || last.error)
+          throw new Error(last?.error ?? "no definition returned");
+        const idx = pickDdlColumn(
+          last.columns,
+          `Create ${k.charAt(0) + k.slice(1).toLowerCase()}`,
+        );
+        const ddl = idx >= 0 ? last.rows[0]?.[idx] : null;
+        if (typeof ddl !== "string")
+          throw new Error("definition not found in response");
+        // Routines have `;` inside their body, so wrap in DELIMITER directives
+        // (our splitter handles them client-side) and scaffold a DROP + CREATE
+        // so Run replaces the routine atomically.
+        editable = [
+          `USE \`${dbName}\`;`,
+          "",
+          `DROP ${k} IF EXISTS \`${routineName}\`;`,
+          "",
+          "DELIMITER //",
+          `${ddl}//`,
+          "DELIMITER ;",
+          "",
+        ].join("\n");
+      }
       onOpenDefinition(
         connectionId,
         `${k.toLowerCase()}:${dbName}.${routineName}`,
@@ -965,6 +1156,14 @@ export default function Sidebar({
               <DropdownMenuItem onClick={() => onNewQuery(conn.id)}>
                 <Plus className="w-4 h-4 mr-2" /> New query
               </DropdownMenuItem>
+              {selectedDb && onNewTable && supportsCreateTable && (
+                <DropdownMenuItem
+                  onClick={() => onNewTable(conn.id, schemaForActions)}
+                >
+                  <TableIcon className="w-4 h-4 mr-2" />{" "}
+                  {isDocumentStore ? "Create collection" : "Create table"}
+                </DropdownMenuItem>
+              )}
               {selectedDb && supportsDiagram && (
                 <DropdownMenuItem
                   onClick={() => onOpenErd(conn.id, schemaForActions)}
@@ -980,6 +1179,20 @@ export default function Sidebar({
               {supportsProcessList && (
                 <DropdownMenuItem onClick={() => setProcessListOpen(true)}>
                   <Activity className="w-4 h-4 mr-2" /> Processes
+                </DropdownMenuItem>
+              )}
+              {(onImportSql && supportsImport) ||
+              (onExport && supportsExport) ? (
+                <DropdownMenuSeparator />
+              ) : null}
+              {onImportSql && supportsImport && (
+                <DropdownMenuItem onClick={() => onImportSql(conn.id)}>
+                  <FileUp className="w-4 h-4 mr-2" /> Import data…
+                </DropdownMenuItem>
+              )}
+              {onExport && supportsExport && (
+                <DropdownMenuItem onClick={() => onExport(conn.id)}>
+                  <FileDown className="w-4 h-4 mr-2" /> Export data…
                 </DropdownMenuItem>
               )}
               <DropdownMenuSeparator />
@@ -1400,7 +1613,7 @@ export default function Sidebar({
                 )}
                 {supportsRoutines &&
                   !collapsed.routines &&
-                  fRoutines.map((r) => {
+                  fRoutines.map((r, i) => {
                     const sig = r.parameters
                       .map((p) => `${p.mode ?? "IN"} ${p.name}:${p.dataType}`)
                       .join(", ");
@@ -1411,13 +1624,22 @@ export default function Sidebar({
                         ? "function"
                         : "procedure"
                     ) as "function" | "procedure";
-                    const active = matchesActive(
-                      "routine",
-                      r.name,
-                      routineKind,
+                    // Don't highlight overloaded routines — name+kind can't
+                    // disambiguate them, so a match would light up every
+                    // overload at once.
+                    const isOverloaded = duplicateRoutineKeys.has(
+                      `${r.kind.toLowerCase()}:${r.name}`,
                     );
+                    const active =
+                      !isOverloaded &&
+                      matchesActive("routine", r.name, routineKind);
                     return (
-                      <ContextMenu key={`r-${r.name}`}>
+                      // Postgres allows overloaded routines (same name, same
+                      // kind, different argument signatures) — so name alone is
+                      // not unique. Include kind + index to guarantee a stable
+                      // unique React key; duplicate keys silently break list
+                      // reconciliation and wedge sidebar click handlers.
+                      <ContextMenu key={`r-${r.kind}-${r.name}-${i}`}>
                         <ContextMenuTrigger>
                           <button
                             className={rowCls(active)}
@@ -1488,10 +1710,17 @@ export default function Sidebar({
                           </ContextMenuItem>
                           <ContextMenuItem
                             onClick={() => {
+                              // Quote per dialect (backticks on MySQL, ANSI
+                              // double-quotes on Postgres/SQLite) so the copied
+                              // call snippet runs as-is on the active engine.
+                              const qual = `${quoteIdentForDialect(schemaForActions, dialect)}.${quoteIdentForDialect(r.name, dialect)}`;
+                              const params = r.parameters
+                                .map(() => "?")
+                                .join(", ");
                               const call =
                                 r.kind === "function"
-                                  ? `SELECT \`${schemaForActions}\`.\`${r.name}\`(${r.parameters.map(() => "?").join(", ")});`
-                                  : `CALL \`${schemaForActions}\`.\`${r.name}\`(${r.parameters.map(() => "?").join(", ")});`;
+                                  ? `SELECT ${qual}(${params});`
+                                  : `CALL ${qual}(${params});`;
                               onNewQuery(conn.id, r.name);
                               void navigator.clipboard.writeText(call);
                               toast.success("Call copied to clipboard");
@@ -1512,9 +1741,88 @@ export default function Sidebar({
                     );
                   })}
 
+                {supportsTriggers && (
+                  <Section
+                    label="triggers"
+                    count={fTriggers.length}
+                    loading={loadingExtras && triggers.length === 0}
+                    collapsed={collapsed.triggers}
+                    onToggle={() => toggle("triggers")}
+                    onRefresh={() => void refreshTriggers()}
+                    refreshing={refreshingSection === "triggers"}
+                    onAdd={
+                      onNewTrigger
+                        ? () => onNewTrigger(conn.id, schemaForActions)
+                        : undefined
+                    }
+                    addTitle="New trigger"
+                  />
+                )}
+                {supportsTriggers &&
+                  !collapsed.triggers &&
+                  fTriggers.map((t, i) => {
+                    const active = matchesActive("trigger", t.name);
+                    const meta = [t.timing, t.event].filter(Boolean).join(" ");
+                    const tooltip = `${t.timing} ${t.event} ON ${t.table}`;
+                    return (
+                      <ContextMenu key={`tg-${t.name}-${t.table}-${i}`}>
+                        <ContextMenuTrigger>
+                          <button
+                            className={rowCls(active)}
+                            title={tooltip}
+                            onClick={() =>
+                              onOpenTrigger?.(
+                                conn.id,
+                                schemaForActions,
+                                t.name,
+                              )
+                            }
+                          >
+                            <Zap className={iconCls(active)} />
+                            <span className="flex-1 truncate">{t.name}</span>
+                            <span
+                              className={`text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
+                            >
+                              {meta}
+                            </span>
+                          </button>
+                        </ContextMenuTrigger>
+                        <ContextMenuContent className="w-48">
+                          <ContextMenuItem
+                            onClick={() =>
+                              onOpenTrigger?.(
+                                conn.id,
+                                schemaForActions,
+                                t.name,
+                              )
+                            }
+                          >
+                            Edit definition
+                          </ContextMenuItem>
+                          <ContextMenuItem
+                            onClick={() => {
+                              void navigator.clipboard.writeText(t.name);
+                              toast.success("Name copied");
+                            }}
+                          >
+                            Copy name
+                          </ContextMenuItem>
+                          <ContextMenuSeparator />
+                          <ContextMenuItem
+                            className="text-destructive focus:text-destructive"
+                            onClick={() => setTriggerConfirm(t)}
+                          >
+                            Drop trigger
+                          </ContextMenuItem>
+                        </ContextMenuContent>
+                      </ContextMenu>
+                    );
+                  })}
+
                 {fTables.length === 0 &&
                   fViews.length === 0 &&
-                  fRoutines.length === 0 && (
+                  fRoutines.length === 0 &&
+                  fTriggers.length === 0 && (
                     <div className="px-4 py-6 text-center text-xs text-muted-foreground">
                       {filter ? "No matches." : "Database is empty."}
                     </div>
@@ -1523,6 +1831,79 @@ export default function Sidebar({
             )}
         </div>
       </ScrollArea>
+
+      {/* Fixed-bottom Add button — only shown when a database is selected and at
+          least one "create" action is available for this adapter. */}
+      {isConnected && selectedDb && (
+        supportsCreateTable || supportsViews || supportsRoutines || supportsTriggers
+      ) && (
+        <div className="shrink-0 border-t border-border/50 p-2">
+          <DropdownMenu>
+            <DropdownMenuTrigger
+              render={(props) => (
+                <Button
+                  {...props}
+                  variant="outline"
+                  size="sm"
+                  className="w-full justify-start gap-2 text-xs font-medium"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  {isDocumentStore ? "New collection" : "New table"}
+                  <span className="ml-auto text-muted-foreground/60">▾</span>
+                </Button>
+              )}
+            />
+            <DropdownMenuContent align="start" side="top" className="w-52 mb-1">
+              {supportsCreateTable && (
+                <DropdownMenuItem
+                  onClick={() =>
+                    conn && onNewTable?.(conn.id, schemaForActions)
+                  }
+                >
+                  <TableIcon className="w-4 h-4 mr-2" />
+                  {isDocumentStore ? "New collection" : "New table"}
+                </DropdownMenuItem>
+              )}
+              {supportsViews && onNewView && (
+                <DropdownMenuItem
+                  onClick={() => onNewView(conn.id, schemaForActions)}
+                >
+                  <LayoutTemplate className="w-4 h-4 mr-2" />
+                  New view
+                </DropdownMenuItem>
+              )}
+              {supportsRoutines && onNewRoutine && (
+                <>
+                  <DropdownMenuItem
+                    onClick={() =>
+                      onNewRoutine(conn.id, schemaForActions, "function")
+                    }
+                  >
+                    <FunctionSquare className="w-4 h-4 mr-2" />
+                    New function
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={() =>
+                      onNewRoutine(conn.id, schemaForActions, "procedure")
+                    }
+                  >
+                    <FunctionSquare className="w-4 h-4 mr-2" />
+                    New procedure
+                  </DropdownMenuItem>
+                </>
+              )}
+              {supportsTriggers && onNewTrigger && (
+                <DropdownMenuItem
+                  onClick={() => onNewTrigger(conn.id, schemaForActions)}
+                >
+                  <Zap className="w-4 h-4 mr-2" />
+                  New trigger
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
+      )}
 
       <DestructiveConfirmDialog
         open={tableConfirm !== null}
@@ -1540,6 +1921,23 @@ export default function Sidebar({
         }
         onConfirm={() => {
           void performTableDestructive();
+        }}
+      />
+
+      <DestructiveConfirmDialog
+        open={triggerConfirm !== null}
+        onOpenChange={(o) => {
+          if (!o) setTriggerConfirm(null);
+        }}
+        action="Drop"
+        itemNoun="trigger"
+        itemNames={triggerConfirm ? [triggerConfirm.name] : []}
+        context={
+          triggerConfirm ? `on ${triggerConfirm.table}` : undefined
+        }
+        warning="The trigger will be removed. This cannot be undone."
+        onConfirm={() => {
+          void performTriggerDrop();
         }}
       />
     </div>

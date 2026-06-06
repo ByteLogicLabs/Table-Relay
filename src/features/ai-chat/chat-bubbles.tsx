@@ -180,6 +180,8 @@ export function ToolBubble({ message }: { message: StoreChatMessage }) {
             mode={t.pendingApproval.mode}
             title={t.pendingApproval.title}
             tier={t.pendingApproval.tier}
+            object={t.pendingApproval.object}
+            objectName={t.pendingApproval.objectName}
           />
         ) : (
           <ToolCardBody name={t.name} args={t.arguments} result={t.result} denied={denied} />
@@ -291,6 +293,30 @@ function renderToolArgs(
             sql={sql}
             className="text-[11px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1.5 max-h-48 overflow-auto"
           />
+        </>
+      );
+    }
+    case 'open_object_tab': {
+      const object = typeof args.object === 'string' ? args.object : '';
+      const objName = typeof args.name === 'string' ? args.name : undefined;
+      const sql = typeof args.sql === 'string' ? args.sql : '';
+      return (
+        <>
+          <div className="text-[10.5px] text-muted-foreground">
+            {object && <span>open: <code className="font-mono">{object}</code></span>}
+            {object && objName && <span> · </span>}
+            {objName ? (
+              <span>edit <code className="font-mono">{objName}</code></span>
+            ) : (
+              object && <span>(new)</span>
+            )}
+          </div>
+          {sql && (
+            <HighlightedSql
+              sql={sql}
+              className="text-[11px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1.5 max-h-48 overflow-auto"
+            />
+          )}
         </>
       );
     }
@@ -462,6 +488,7 @@ function renderToolResult(name: string, result: unknown): ReactNode {
       );
     }
     case 'write_query_tab':
+    case 'open_object_tab':
     case 'publish_notify':
     case 'subscribe_channel': {
       const ok = r.ok === true;
@@ -487,6 +514,8 @@ function ApprovalCard({
   mode,
   title,
   tier,
+  object,
+  objectName,
 }: {
   toolCallId: string;
   sql?: string;
@@ -495,6 +524,8 @@ function ApprovalCard({
   mode?: 'new' | 'replace';
   title?: string;
   tier?: QueryTier;
+  object?: 'trigger' | 'table';
+  objectName?: string | null;
 }) {
   const [busy, setBusy] = useState(false);
   const doApprove = async (approve: boolean) => {
@@ -505,6 +536,7 @@ function ApprovalCard({
   const isTabWrite = toolName === 'write_query_tab';
   const isPublish = toolName === 'publish_notify';
   const isSubscribe = toolName === 'subscribe_channel';
+  const isOpenObject = toolName === 'open_object_tab';
   const isRead = toolName === 'list_schemas' || toolName === 'list_tables' || toolName === 'describe_table';
   let prompt: string;
   let approveLabel: string;
@@ -513,6 +545,12 @@ function ApprovalCard({
       ? `Model wants to replace the current query tab with this query${title ? ` (title: ${title})` : ''}:`
       : `Model wants to open a new query tab with this query${title ? ` (title: ${title})` : ''}:`;
     approveLabel = mode === 'replace' ? 'Approve & replace' : 'Approve & open';
+  } else if (isOpenObject) {
+    const obj = object ?? 'object';
+    prompt = objectName
+      ? `Model wants to open the ${obj} editor for "${objectName}":`
+      : `Model wants to open a new ${obj} editor:`;
+    approveLabel = 'Approve & open';
   } else if (isPublish) {
     prompt = 'Model wants to publish this message:';
     approveLabel = 'Approve & publish';

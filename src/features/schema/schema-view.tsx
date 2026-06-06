@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useState } from 'react';
+import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ConnectionProfile } from '../../types';
 import { db, isDbError, type IndexKeyValue, type IndexSpecPayload, type TableStructure } from '../../lib/db';
 import { ensureTableStructure, refreshTableStructure } from '../../state/connections';
@@ -157,6 +157,10 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
     const declared = activeManifest?.columnTypes;
     return declared && declared.length > 0 ? declared : FALLBACK_DATA_TYPES;
   }, [activeManifest]);
+  const dialect = useMemo(
+    () => dialectFromManifest(activeManifest?.capabilities),
+    [activeManifest],
+  );
   // Safe default: read-only until the active adapter explicitly advertises
   // DDL support (ALTER/CREATE/DROP table).
   const supportsAlterTable = activeManifest?.capabilities.alterTable ?? false;
@@ -249,7 +253,17 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
         || isFksDirty(structure.foreignKeys, foreignKeys);
   }, [schemaEditable, structure, columns, indexes, foreignKeys, effectiveIsNew, newTableName]);
 
-  useEffect(() => { onDirtyChange?.(dirty); }, [dirty, onDirtyChange]);
+  // Hold the latest onDirtyChange in a ref so the dirty-reporting effect can
+  // depend on `dirty` alone. The parent passes a fresh arrow closure every
+  // render; if it were in the deps the effect would fire on every parent
+  // render and (via setTabs) spin into a render loop.
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    if (!mountedRef.current) { mountedRef.current = true; return; }
+    onDirtyChangeRef.current?.(dirty);
+  }, [dirty]);
 
   // Create-mode name collision: precheck against the live sibling
   // table list (already fetched for the FK picker). Disable Save with
@@ -731,7 +745,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                       <CellCombobox
                         value={c.extra}
                         onCommit={v => updateColumn(c.id, { extra: v === 'NONE' ? '' : v })}
-                        options={extraOptionsFor(c.dataType)}
+                        options={extraOptionsFor(c.dataType, dialect)}
                         disabled={!columnsEditable || c.pendingDelete}
                         placeholder="—"
                       />
