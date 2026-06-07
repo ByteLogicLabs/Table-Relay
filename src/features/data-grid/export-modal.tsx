@@ -18,6 +18,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../../components/ui/select";
+import { SearchableSelect } from "../../components/ui/searchable-select";
 import { Download, Table2, Search, FileSpreadsheet, Braces, Database } from "lucide-react";
 import type { SchemaInfo } from "../../lib/db";
 
@@ -298,21 +299,27 @@ export default function ExportModal({
         <div className="grid grid-cols-[280px_minmax(0,1fr)] flex-1 min-h-0">
           {/* ── Left: configuration ── */}
           <div className="p-5 space-y-5 border-r border-border/60 bg-muted/[0.04] overflow-y-auto">
-            <Field label="Database">
-              <Select value={selectedSchema?.name ?? ""} onValueChange={setSchema}>
-                <SelectTrigger className="w-full">
-                  <Database className="w-3.5 h-3.5 text-muted-foreground mr-1.5 shrink-0" />
-                  <SelectValue placeholder="Select database" />
-                </SelectTrigger>
-                <SelectContent>
-                  {schemas.map((s) => (
-                    <SelectItem key={s.name} value={s.name}>
-                      {s.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
+            {/* Only worth a picker when there's more than one database — a
+                single-DB connection shows it as a static label instead. */}
+            {schemas.length > 1 ? (
+              <Field label="Database">
+                <SearchableSelect
+                  value={selectedSchema?.name ?? ""}
+                  onChange={setSchema}
+                  options={schemas.map((s) => ({ value: s.name, label: s.name }))}
+                  placeholder="Select database"
+                  searchPlaceholder="Search databases…"
+                  icon={<Database className="w-3.5 h-3.5 text-muted-foreground shrink-0" />}
+                />
+              </Field>
+            ) : selectedSchema ? (
+              <Field label="Database">
+                <div className="flex items-center gap-1.5 text-sm text-foreground rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+                  <Database className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                  <span className="truncate">{selectedSchema.name}</span>
+                </div>
+              </Field>
+            ) : null}
 
             <Field label="Format">
               <div
@@ -408,8 +415,10 @@ export default function ExportModal({
             </div>
 
             {/* Column header row. Horizontal padding matches the rows'
-                effective inset (container p-1.5 = 6px + row px-2 = 8px → 14px)
-                so the header checkboxes line up exactly above the row ones. */}
+                effective inset (container p-1.5 = 6px + row px-2 = 8px → 14px).
+                The scroll container below uses `scrollbar-gutter: stable` so its
+                content width never changes when the scrollbar appears — keeping
+                these header checks aligned over the row checks. */}
             <div
               className="px-3.5 py-2 border-b border-border/60 grid items-end gap-1 text-[10px] uppercase tracking-wide text-muted-foreground/80 shrink-0"
               style={{ gridTemplateColumns: gridTemplate }}
@@ -431,8 +440,10 @@ export default function ExportModal({
               ))}
             </div>
 
-            {/* Table rows — scrolls within the bounded column. */}
-            <div className="flex-1 min-h-0 overflow-auto p-1.5">
+            {/* Table rows — scrolls within the bounded column. `scrollbar-gutter:
+                stable` reserves the scrollbar space so row checks stay aligned
+                under the header checks whether or not the list overflows. */}
+            <div className="flex-1 min-h-0 overflow-auto p-1.5 [scrollbar-gutter:stable]">
               {selectableTables.length === 0 ? (
                 <div className="px-3 py-10 text-center text-sm text-muted-foreground">
                   No tables available in this database.

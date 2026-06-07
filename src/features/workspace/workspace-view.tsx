@@ -14,6 +14,7 @@ import ConnectionRail, {
 } from "../connections/connection-rail";
 import ConnectionModal from "../connections/connection-modal";
 import ImportSqlDialog from "../connections/import-sql-dialog";
+import ConnectionExportDialog from "../connections/connection-export-dialog";
 import ChatPanel from "../ai-chat/chat-panel";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -257,6 +258,7 @@ export default function WorkspaceView({
   };
   // Connection id the Import SQL dialog is bound to. `null` = dialog closed.
   const [importSqlForId, setImportSqlForId] = useState<string | null>(null);
+  const [exportForId, setExportForId] = useState<string | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatWidth, setChatWidth] = useState<number>(CHAT_DEFAULT_WIDTH);
   useEffect(() => {
@@ -402,6 +404,23 @@ export default function WorkspaceView({
           new CustomEvent("tablerelay:open-settings", { detail: { section: "data" } }),
         ),
     );
+    // Database-level import/export for the focused connection.
+    const unlistenImportDb = listen<void>("menu-connection-import_db", () => {
+      const id = menuCtxRef.current.focusedConnectionId;
+      if (!id) {
+        toast.error("Open a connection before importing");
+        return;
+      }
+      setImportSqlForId(id);
+    });
+    const unlistenExportDb = listen<void>("menu-connection-export_db", () => {
+      const id = menuCtxRef.current.focusedConnectionId;
+      if (!id) {
+        toast.error("Open a connection before exporting");
+        return;
+      }
+      setExportForId(id);
+    });
 
     return () => {
       void unlistenImport.then((fn) => fn());
@@ -409,6 +428,8 @@ export default function WorkspaceView({
       void unlistenConnectionPicker.then((fn) => fn());
       void unlistenConnectionNew.then((fn) => fn());
       void unlistenConnectionTransfer.then((fn) => fn());
+      void unlistenImportDb.then((fn) => fn());
+      void unlistenExportDb.then((fn) => fn());
       void unlistenConnectionEditCurrent.then((fn) => fn());
       void unlistenConnectionOpenDatabase.then((fn) => fn());
     };
@@ -834,18 +855,20 @@ export default function WorkspaceView({
   // and fire the same `tablerelay:menu-export` event the File menu uses. If no
   // table tab is open we can't know what to export, so tell the user.
   const handleExportForConnection = (connectionId: string) => {
+    // Prefer the in-context table export when a data tab for this connection is
+    // active (keeps the current filters/columns); otherwise open the
+    // connection-level export dialog so no open tab is required.
     const dataTabs = tabs.filter(
       (t) => t.connectionId === connectionId && t.type === "data",
     );
     const active = dataTabs.find((t) => t.id === activeTabId);
-    const target = active ?? dataTabs[0];
-    if (!target) {
-      toast.error("Open a table before exporting");
+    if (active) {
+      window.dispatchEvent(
+        new CustomEvent("tablerelay:menu-export", { detail: { tabId: active.id } }),
+      );
       return;
     }
-    window.dispatchEvent(
-      new CustomEvent("tablerelay:menu-export", { detail: { tabId: target.id } }),
-    );
+    setExportForId(connectionId);
   };
 
   const handleNewQuery = (connectionId: string, tableName?: string) => {
@@ -1847,6 +1870,32 @@ export default function WorkspaceView({
             : []
         }
         onOpenInEditor={handleImportToEditor}
+      />
+
+      <ConnectionExportDialog
+        isOpen={exportForId !== null}
+        onClose={() => setExportForId(null)}
+        connectionId={exportForId}
+        schemas={exportForId ? (connState.schemasById.get(exportForId) ?? []) : []}
+        initialSchema={
+          exportForId && focusedTile?.serverId === exportForId
+            ? focusedTile.databaseName
+            : (exportForId ? (connections.find((c) => c.id === exportForId)?.database ?? null) : null)
+        }
+        dialect={(() => {
+          if (!exportForId) return null;
+          const profile = connections.find((c) => c.id === exportForId);
+          if (profile?.driver === "MySQL") return "mysql";
+          if (profile?.driver === "SQLite") return "sqlite";
+          if (profile?.driver === "PostgreSQL") return "postgres";
+          return null;
+        })()}
+        supportsSql={(() => {
+          if (!exportForId) return true;
+          const profile = connections.find((c) => c.id === exportForId);
+          const manifest = resolveManifest(adapterManifests, profile?.driver);
+          return (manifest?.capabilities.sqlDialect ?? "generic") !== "none";
+        })()}
       />
     </div>
   );

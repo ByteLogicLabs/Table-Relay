@@ -141,6 +141,12 @@ pub fn run() {
             let connection_open_database =
                 MenuItemBuilder::with_id("connection_open_database", "Open Database…")
                     .build(handle)?;
+            let connection_import_db =
+                MenuItemBuilder::with_id("connection_import_db", "Import Data…")
+                    .build(handle)?;
+            let connection_export_db =
+                MenuItemBuilder::with_id("connection_export_db", "Export Data…")
+                    .build(handle)?;
             let connection_transfer =
                 MenuItemBuilder::with_id("connection_transfer", "Import / Export Connections…")
                     .build(handle)?;
@@ -150,6 +156,9 @@ pub fn run() {
                 .separator()
                 .item(&connection_edit_current)
                 .item(&connection_open_database)
+                .separator()
+                .item(&connection_import_db)
+                .item(&connection_export_db)
                 .separator()
                 .item(&connection_transfer)
                 .build()?;
