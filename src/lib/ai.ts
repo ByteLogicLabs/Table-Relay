@@ -7,7 +7,21 @@ export type AiProviderKind =
   | 'openai'
   | 'anthropic'
   | 'gemini'
-  | 'openai_compatible';
+  | 'openai_compatible'
+  | 'claude_cli'
+  | 'codex_cli'
+  | 'gemini_cli'
+  | 'opencode';
+
+/** The subprocess-CLI providers — authenticated via the installed binary, not
+ *  an API key, and never represented by a saved credential profile. */
+export const CLI_PROVIDER_KINDS: readonly AiProviderKind[] = [
+  'claude_cli', 'codex_cli', 'gemini_cli', 'opencode',
+];
+
+export function isCliProviderKind(kind: string | undefined): kind is AiProviderKind {
+  return !!kind && (CLI_PROVIDER_KINDS as readonly string[]).includes(kind);
+}
 
 export interface AiStatus {
   active: boolean;
@@ -92,6 +106,27 @@ export function isAiError(x: unknown): x is AiError {
     && typeof x === 'object'
     && 'kind' in (x as object)
     && 'message' in (x as object);
+}
+
+/**
+ * Best-effort human-readable message for any thrown value. Tauri command errors
+ * arrive as plain objects (`{kind, message}` or `{message}`), NOT `Error`
+ * instances — so `String(e)` yields the useless "[object Object]". Prefer the
+ * `.message`, then a JSON dump, then `String`.
+ */
+export function errorMessage(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === 'string') return e;
+  if (e && typeof e === 'object') {
+    const m = (e as { message?: unknown }).message;
+    if (typeof m === 'string' && m) return m;
+    try {
+      return JSON.stringify(e);
+    } catch {
+      /* fall through */
+    }
+  }
+  return String(e);
 }
 
 export interface ChatChunkEvent {
@@ -349,6 +384,10 @@ export const ai = {
       },
     }),
 
+  /** Resolve a CLI provider's binary. Returns its path when found, else null. */
+  cliAvailable: (kind: AiProviderKind): Promise<string | null> =>
+    invoke<string | null>('ai_cli_available', { kind }),
+
   // --- Local models (M8.1) ---
   listLocalModels: (): Promise<LocalModelInfo[]> =>
     invoke<LocalModelRaw[]>('ai_list_local_models').then(arr => arr.map(normaliseLocal)),
@@ -534,6 +573,11 @@ export const ai = {
 
   chatStop: (requestId: string) =>
     invoke<void>('ai_chat_stop', { requestId }),
+
+  /** Repopulate the backend session transcript when a saved conversation is
+   *  reopened, so continuing it keeps full context (all providers + CLIs). */
+  restoreMessages: (messages: Array<{ role: string; content: string }>) =>
+    invoke<void>('ai_restore_messages', { messages }),
 
   onChunk: (cb: (e: ChatChunkEvent) => void): Promise<UnlistenFn> =>
     listen<{ request_id: string; delta: string }>('ai://chat/chunk', (ev) => {

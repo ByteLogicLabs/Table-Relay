@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp } from 'lucide-react';
+import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp, Terminal } from 'lucide-react';
 import { ConversationHistory } from './conversation-history';
 import { Button } from '../../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
-import { useAi, start, end, sendMessage, stopStreaming, syncStatus, newChat, setFocusedConnection, currentChat, type ChatPrefill } from '../../state/ai';
+import { SearchableSelect } from '../../components/ui/searchable-select';
+import { useAi, start, end, sendMessage, stopStreaming, syncStatus, newChat, setFocusedConnection, currentChat, restoreBackendTranscript, type ChatPrefill } from '../../state/ai';
 import { ai, isAiError, type AiProviderKind, type ChatFocus } from '../../lib/ai';
 import {
   type CredentialProfile,
@@ -14,7 +15,7 @@ import {
 } from '../../lib/ai-credentials';
 import { Settings as SettingsIcon } from 'lucide-react';
 import { toast } from 'sonner';
-import { openSettings, focusLabel } from './chat-utils';
+import { openSettings, focusLabel, PROVIDERS } from './chat-utils';
 import { PermissionsButton } from './chat-permissions';
 import { AssistantOrUserBubble, ToolBubble } from './chat-bubbles';
 
@@ -68,14 +69,14 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
 
   return (
     <div className="h-full flex flex-col bg-background min-w-0 relative">
-      <div className="h-12 shrink-0 border-b border-border flex items-center justify-between px-3 bg-muted/10">
+      <div className="h-10 shrink-0 border-b border-border flex items-center justify-between px-3 bg-muted/10">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Sparkles className="w-4 h-4 text-primary shrink-0" />
           {/* Hide the static "AI Chat" label once a session is active — the
               credential + model pickers need the horizontal room, and without
               this they overflowed under the right-side action buttons. */}
           {!showActive && <span className="text-sm font-medium truncate">AI Chat</span>}
-          {showActive && <ActiveCredentialPicker />}
+          {showActive && <ActiveCredentialPicker sessionKind={s.providerKind} />}
           {showActive && <ActiveModelPicker providerKind={s.providerKind} model={s.model} />}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
@@ -140,43 +141,100 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
  * provider/key/baseUrl. The model picker still operates within the active
  * credential's provider.
  */
-function ActiveCredentialPicker() {
+// `cli:<kind>` ids tag the detected-CLI entries so the unified picker can tell
+// them apart from saved-credential ids (plain profile ids) on selection.
+const CLI_OPTION_PREFIX = 'cli:';
+
+// Small colored dot per provider so the picker reads at a glance.
+function providerDot(kind?: AiProviderKind): string {
+  switch (kind) {
+    case 'openai':            return 'bg-emerald-500';
+    case 'anthropic':
+    case 'claude_cli':        return 'bg-orange-500';
+    case 'gemini':
+    case 'gemini_cli':        return 'bg-blue-500';
+    case 'openai_compatible': return 'bg-purple-500';
+    case 'codex_cli':         return 'bg-slate-400';
+    case 'opencode':          return 'bg-amber-500';
+    case 'llama_local':       return 'bg-rose-500';
+    default:                  return 'bg-muted-foreground/50';
+  }
+}
+
+function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind }) {
   const [credentials, setCredentials] = useState<CredentialProfile[]>(() => loadCredentials());
   const [activeId, setActiveId]       = useState<string | null>(() => getActiveCredentialId());
   const [switching, setSwitching]     = useState(false);
   const [opened, setOpened]           = useState(false);
 
-  // Refresh on each open so changes from the Settings dialog are picked up
-  // without forcing a full chat-panel remount.
+  // Detected machine CLIs (claude / codex / gemini / opencode). These are
+  // switchable targets alongside saved API credentials. `null` = probing.
+  const cliProviders = PROVIDERS.filter(p => p.requiresLocalCli);
+  const [cliPaths, setCliPaths] = useState<Record<string, string | null> | null>(null);
+
+  // Re-probe both saved credentials and machine CLIs. Runs on mount and each
+  // time the dropdown opens, so Settings changes / newly-installed CLIs appear
+  // without any manual refresh.
+  const refresh = async () => {
+    await hydrateCredentials();
+    setCredentials(loadCredentials());
+    setActiveId(getActiveCredentialId());
+    const entries = await Promise.all(
+      cliProviders.map(async p => [p.kind, await ai.cliAvailable(p.kind).catch(() => null)] as const),
+    );
+    setCliPaths(Object.fromEntries(entries));
+  };
+
+  // Probe on first render + whenever the menu opens, so Settings changes and
+  // newly-installed CLIs are picked up without remounting the panel.
+  useEffect(() => { void refresh(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
   useEffect(() => {
     if (!opened) return;
-    let cancelled = false;
-    void hydrateCredentials().then(() => {
-      if (cancelled) return;
-      setCredentials(loadCredentials());
-      setActiveId(getActiveCredentialId());
-    });
-    return () => { cancelled = true; };
+    void refresh();
+    /* eslint-disable-next-line react-hooks/exhaustive-deps */
   }, [opened]);
 
-  const swap = async (id: string) => {
-    const next = credentials.find(c => c.id === id);
-    if (!next || switching || id === activeId) return;
+  const detectedClis = cliProviders.filter(p => cliPaths?.[p.kind]);
+
+  const swapCredential = async (next: CredentialProfile) => {
+    // keepTranscript: don't blank the visible chat on switch; re-seed backend.
+    await end({ awaitBackend: true, keepTranscript: true });
+    await start({ kind: next.kind, model: next.model, apiKey: next.apiKey, baseUrl: next.baseUrl });
+    await restoreBackendTranscript();
+    setActiveCredentialId(next.id);
+    setActiveId(next.id);
+    toast.success(`Switched to ${next.name}`);
+  };
+
+  const swapCli = async (kind: AiProviderKind) => {
+    const meta = PROVIDERS.find(p => p.kind === kind);
+    await end({ awaitBackend: true, keepTranscript: true });
+    await start({ kind, model: meta?.defaultModel ?? '' });
+    await restoreBackendTranscript();
+    // CLI sessions have no saved profile — clear the credential id so the chip
+    // labels the CLI provider, not a stale credential.
+    setActiveCredentialId(null);
+    setActiveId(null);
+    toast.success(`Switched to ${meta?.label ?? kind}`);
+  };
+
+  // Single onValueChange handler: `cli:<kind>` → start that CLI; otherwise
+  // treat the value as a saved-credential id.
+  const swap = async (value: string) => {
+    if (switching) return;
     setSwitching(true);
     try {
-      // Await the backend teardown before starting the new session — the slot
-      // is single-slot and a racing start() would throw SessionAlreadyActive,
-      // leaving the chat unsendable. See end({ awaitBackend }) in state/ai.ts.
-      await end({ awaitBackend: true });
-      await start({
-        kind:    next.kind,
-        model:   next.model,
-        apiKey:  next.apiKey,
-        baseUrl: next.baseUrl,
-      });
-      setActiveCredentialId(next.id);
-      setActiveId(next.id);
-      toast.success(`Switched to ${next.name}`);
+      // The slot is single-slot; await teardown before start() so a racing
+      // start can't throw SessionAlreadyActive. (Each swap helper ends first.)
+      if (value.startsWith(CLI_OPTION_PREFIX)) {
+        const kind = value.slice(CLI_OPTION_PREFIX.length) as AiProviderKind;
+        if (sessionKind === kind && !activeId) return; // already on this CLI
+        await swapCli(kind);
+      } else {
+        const next = credentials.find(c => c.id === value);
+        if (!next || value === activeId) return;
+        await swapCredential(next);
+      }
     } catch (e) {
       toast.error(isAiError(e) ? e.message : String(e));
     } finally {
@@ -185,45 +243,91 @@ function ActiveCredentialPicker() {
   };
 
   const active = credentials.find(c => c.id === activeId);
-  const label  = active ? active.name : '(unsaved)';
+  // The live session can diverge from the saved-credential selection — most
+  // notably when a CLI provider is started (from here or from the StartScreen),
+  // which sets no active credential id. When the active credential's kind
+  // doesn't match the running session, fall back to the session provider's own
+  // friendly label so the chip reflects what's actually answering.
+  const sessionMatchesActive = active && (!sessionKind || active.kind === sessionKind);
+  const sessionLabel = sessionKind
+    ? (PROVIDERS.find(p => p.kind === sessionKind)?.label ?? sessionKind)
+    : '(unsaved)';
+  const label = sessionMatchesActive ? active!.name : sessionLabel;
+  // The <Select> value: a credential id when it matches the session, else the
+  // `cli:<kind>` id when the running session is a CLI, else nothing selected.
+  const sessionIsCli = sessionKind ? cliProviders.some(p => p.kind === sessionKind) : false;
+  const selectValue = sessionMatchesActive
+    ? (activeId ?? '')
+    : (sessionIsCli ? `${CLI_OPTION_PREFIX}${sessionKind}` : '');
 
   return (
+    <div className="flex items-center gap-0.5 min-w-0">
     <Select
-      value={activeId ?? ''}
+      value={selectValue}
       onValueChange={swap}
       onOpenChange={setOpened}
       disabled={switching}
     >
       <SelectTrigger
         size="sm"
-        className="h-7 max-w-32 min-w-0 text-[11px] font-medium text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
-        title="Switch credential — keeps chat open"
+        className="h-7 max-w-44 min-w-0 gap-1.5 text-[11px] font-medium text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
+        title="Switch provider — saved credentials or installed CLI tools; keeps chat open"
       >
         {switching
           ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> switching…</>
-          : <SelectValue placeholder={label} className="truncate">{label}</SelectValue>}
+          : (
+            <span className="flex items-center gap-1.5 min-w-0">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${providerDot(sessionKind)}`} />
+              <span className="truncate">{label}</span>
+            </span>
+          )}
       </SelectTrigger>
-      <SelectContent>
-        {credentials.length === 0 && (
-          <div className="px-2 py-1 text-xs text-muted-foreground">No saved credentials</div>
+      <SelectContent className="min-w-56">
+        {credentials.length > 0 && (
+          <div className="px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
+            Saved credentials
+          </div>
         )}
         {credentials.map(c => (
-          <SelectItem key={c.id} value={c.id} className="text-xs">
-            <span className="font-medium">{c.name}</span>
-            <span className="text-muted-foreground ml-2">· {c.kind}</span>
+          <SelectItem key={c.id} value={c.id} className="text-xs py-1.5">
+            <span className="flex items-center gap-2 min-w-0">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${providerDot(c.kind)}`} />
+              <span className="font-medium truncate">{c.name}</span>
+              <span className="text-muted-foreground text-[10px] shrink-0">{c.kind}</span>
+            </span>
           </SelectItem>
         ))}
-        <div className="border-t border-border mt-1 pt-1">
+        {detectedClis.length > 0 && (
+          <div className="px-2 pt-2 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80 border-t border-border/60 mt-1 flex items-center gap-1">
+            <Terminal className="w-2.5 h-2.5" /> Installed CLI tools
+          </div>
+        )}
+        {detectedClis.map(p => (
+          <SelectItem key={p.kind} value={`${CLI_OPTION_PREFIX}${p.kind}`} className="text-xs py-1.5">
+            <span className="flex items-center gap-2 min-w-0">
+              <span className={`w-2 h-2 rounded-full shrink-0 ${providerDot(p.kind)}`} />
+              <span className="font-medium truncate">{p.label}</span>
+              <span className="text-emerald-600 dark:text-emerald-400 text-[10px] shrink-0">● ready</span>
+            </span>
+          </SelectItem>
+        ))}
+        {credentials.length === 0 && detectedClis.length === 0 && (
+          <div className="px-2 py-2 text-xs text-muted-foreground">
+            {cliPaths === null ? 'Checking…' : 'No providers found'}
+          </div>
+        )}
+        <div className="border-t border-border/60 mt-1 pt-1">
           <button
             type="button"
             onClick={openSettings}
             className="w-full text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded flex items-center gap-2"
           >
-            <SettingsIcon className="w-3 h-3" /> Manage credentials in Settings…
+            <SettingsIcon className="w-3 h-3" /> Manage API providers in Settings…
           </button>
         </div>
       </SelectContent>
     </Select>
+    </div>
   );
 }
 
@@ -267,25 +371,33 @@ function ActiveModelPicker({
     return () => { cancelled = true; };
   }, [opened, providerKind, model, models.length]);
 
+  // CLI providers (claude/codex/gemini/opencode) authenticate via the installed
+  // binary, not a stored API key — so they have no saved credentials and must
+  // be allowed to switch models without one.
+  const isCli = providerKind ? PROVIDERS.find(p => p.kind === providerKind)?.requiresLocalCli ?? false : false;
+
   const swap = async (nextModel: string) => {
     if (!providerKind || swapping || nextModel === model) return;
     setSwapping(true);
     try {
-      // Pull saved credentials so we can restart with the same auth.
+      // Pull saved credentials so we can restart with the same auth. CLI
+      // providers don't need any — they auth through the binary.
       const saved = await ai.settingsGet(providerKind);
-      if (!saved && providerKind !== 'llama_local') {
+      if (!saved && !isCli && providerKind !== 'llama_local') {
         toast.error('Saved credentials missing — use Switch/End to pick a provider first.');
         return;
       }
       // Await backend teardown before restart — same single-slot race as the
-      // credential picker (see end({ awaitBackend }) in state/ai.ts).
-      await end({ awaitBackend: true });
+      // credential picker. keepTranscript so the visible chat doesn't vanish on
+      // a model switch; we re-seed the backend session with it below.
+      await end({ awaitBackend: true, keepTranscript: true });
       await start({
         kind: providerKind,
         model: nextModel,
         apiKey: saved?.apiKey,
         baseUrl: saved?.baseUrl,
       });
+      await restoreBackendTranscript();
       toast.success(`Switched to ${nextModel}`);
     } catch (e) {
       toast.error(isAiError(e) ? e.message : String(e));
@@ -294,7 +406,9 @@ function ActiveModelPicker({
     }
   };
 
-  const label = `${providerKind ?? ''} · ${model ?? ''}`;
+  // Don't render a dangling "provider · " when no model is set (e.g. opencode
+  // started without an explicit model — it uses its own configured default).
+  const label = model ? `${providerKind ?? ''} · ${model}` : `${providerKind ?? ''} · (default)`;
   if (!providerKind || providerKind === 'llama_local') {
     // Local Llama only has one model per session — swapping means
     // respawning llama-server, which isn't a "mid-chat" operation. Fall
@@ -303,6 +417,22 @@ function ActiveModelPicker({
       <span className="text-[10px] uppercase tracking-wide text-muted-foreground bg-muted px-1.5 py-0.5 rounded">
         {label}
       </span>
+    );
+  }
+
+  // Some CLIs (notably opencode) expose hundreds of `provider/model` ids — a
+  // plain dropdown is unusable there. Lazy-load on mount for the searchable
+  // variant (it has no open-driven fetch hook) and render a filterable picker
+  // when the list is large.
+  const useSearch = isCli;
+  if (useSearch) {
+    return (
+      <CliModelSearchPicker
+        providerKind={providerKind}
+        model={model}
+        onPick={swap}
+        swapping={swapping}
+      />
     );
   }
 
@@ -341,6 +471,63 @@ function ActiveModelPicker({
   );
 }
 
+/**
+ * Searchable model picker for CLI providers. opencode alone lists hundreds of
+ * `provider/model` ids, so a filter box is essential. Fetches the catalog on
+ * mount (the underlying SearchableSelect has no open-driven fetch hook).
+ */
+function CliModelSearchPicker({
+  providerKind,
+  model,
+  onPick,
+  swapping,
+}: {
+  providerKind: AiProviderKind;
+  model?: string;
+  onPick: (m: string) => void;
+  swapping: boolean;
+}) {
+  const [models, setModels] = useState<string[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const list = await ai.listModels(providerKind, {});
+        if (cancelled) return;
+        const withCurrent = model && !list.includes(model) ? [model, ...list] : list;
+        setModels(withCurrent);
+      } catch {
+        if (!cancelled && model) setModels([model]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [providerKind, model]);
+
+  const options = models.map(m => ({ value: m, label: m }));
+  // When no model is set, the CLI uses its own configured default — say so
+  // rather than showing a blank trigger (the opencode "no active model" case).
+  const placeholder = loading
+    ? 'Loading models…'
+    : (model || `${providerKind} default — pick to change`);
+
+  return (
+    <SearchableSelect
+      value={model ?? ''}
+      options={options}
+      onChange={onPick}
+      disabled={swapping || loading}
+      placeholder={placeholder}
+      searchPlaceholder="Search or type a model id…"
+      className="h-7 max-w-44 text-[11px] font-mono"
+      allowCustom
+    />
+  );
+}
+
 function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPrefill | null; prefillTick: number }) {
   const s = useAi();
   const starting = s.status === 'starting';
@@ -360,6 +547,36 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
       window.removeEventListener('tablerelay:credentials-changed', reload);
     };
   }, []);
+
+  // Detect installed CLI tools so the user can start them in one click without
+  // first adding a credential in Settings. `null` = checking; map of kind→path.
+  const cliProviders = PROVIDERS.filter(p => p.requiresLocalCli);
+  const [cliPaths, setCliPaths] = useState<Record<string, string | null> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void Promise.all(
+      cliProviders.map(async p => [p.kind, await ai.cliAvailable(p.kind).catch(() => null)] as const),
+    ).then(entries => {
+      if (!cancelled) setCliPaths(Object.fromEntries(entries));
+    });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  const detectedClis = cliProviders.filter(p => cliPaths?.[p.kind]);
+
+  const handleStartCli = async (kind: AiProviderKind, model?: string) => {
+    try {
+      await end({ awaitBackend: true }).catch(() => {});
+      await start({ kind, model: model ?? '' });
+      // A CLI session has no saved-credential profile; clear any previously
+      // selected credential id so the header chip labels the running CLI
+      // provider instead of the stale last-used credential ("B Deepseek").
+      setActiveCredentialId(null);
+      toast.success('CLI session started');
+    } catch (e) {
+      toast.error(isAiError(e) ? e.message : String(e));
+    }
+  };
 
   const handlePick = async (cred: CredentialProfile) => {
     try {
@@ -409,11 +626,40 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
         <Sparkles className="w-8 h-8 opacity-50 mx-auto mb-2" />
         <p className="font-medium text-sm text-foreground">Start an AI chat</p>
         <p className="mt-1 opacity-80">
-          {credentials.length > 0
-            ? 'Pick a credential to begin.'
+          {credentials.length > 0 || detectedClis.length > 0
+            ? 'Pick a provider to begin.'
             : 'Add a provider credential in Settings to get started.'}
         </p>
       </div>
+
+      {/* Installed CLIs detected on this machine — start in one click, no key. */}
+      {detectedClis.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground px-1">
+            <Terminal className="w-3 h-3" /> Detected on this machine
+          </div>
+          {detectedClis.map(p => (
+            <button
+              key={p.kind}
+              onClick={() => void handleStartCli(p.kind, p.defaultModel)}
+              disabled={starting}
+              title={cliPaths?.[p.kind] ?? undefined}
+              className="w-full text-left rounded-lg border border-border hover:border-primary/50 hover:bg-muted/40 transition-colors px-3 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="flex items-center gap-2">
+                <Terminal className="w-3.5 h-3.5 text-primary shrink-0" />
+                <span className="text-sm font-medium truncate flex-1">{p.label}</span>
+                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 shrink-0">
+                  installed
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                {p.defaultModel ? `${p.sublabel} · ${p.defaultModel}` : p.sublabel}
+              </p>
+            </button>
+          ))}
+        </div>
+      )}
 
       {queuedLabel && (
         <div className="flex items-start gap-2 px-3 py-2 rounded-md border border-primary/30 bg-primary/10 text-primary text-xs">
@@ -424,12 +670,25 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
         </div>
       )}
 
-      {credentials.length === 0 ? (
+      {credentials.length === 0 && detectedClis.length === 0 ? (
         <Button onClick={openSettings} className="w-full">
           <SettingsIcon className="w-4 h-4 mr-2" /> Open Settings
         </Button>
+      ) : credentials.length === 0 ? (
+        // Only CLIs detected — offer Settings as a secondary action.
+        <button
+          onClick={openSettings}
+          className="w-full text-center text-[11px] text-muted-foreground hover:text-foreground py-2 flex items-center justify-center gap-1.5"
+        >
+          <SettingsIcon className="w-3 h-3" /> Add an API provider in Settings
+        </button>
       ) : (
         <div className="space-y-1.5">
+          {credentials.length > 0 && (
+            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground px-1">
+              Saved credentials
+            </div>
+          )}
           {credentials.map(cred => (
             <button
               key={cred.id}
@@ -464,10 +723,6 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
           <span className="wrap-break-word">{s.lastError}</span>
         </div>
       )}
-
-      <p className="text-[10px] text-muted-foreground text-center opacity-70">
-        Session-scoped · no chat history persists across restarts
-      </p>
 
       {starting && (
         <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">

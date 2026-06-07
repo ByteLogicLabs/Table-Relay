@@ -59,6 +59,15 @@ pub fn write_chat(role: &str, msg: &str) {
     let _ = (role, msg);
 }
 
+/// Frontend → log bridge. The webview calls this so its diagnostics land in the
+/// same `logs/app.log` the user already shares, interleaved with backend lines
+/// (shared timestamp clock) — invaluable for tracing where a chat turn breaks
+/// across the JS/Rust boundary. Tagged `fe:<tag>` so frontend lines are greppable.
+#[tauri::command]
+pub fn frontend_log(tag: String, msg: String) {
+    write_line(&format!("fe:{tag}"), &msg);
+}
+
 #[macro_export]
 macro_rules! log_line {
     ($tag:expr, $($arg:tt)*) => {

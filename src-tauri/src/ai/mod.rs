@@ -3,6 +3,8 @@
 //! types). Provider implementations live in sibling files.
 
 pub mod anthropic;
+pub mod cli_provider;
+pub mod cli_specs;
 pub mod context;
 pub mod download;
 pub mod echo;
@@ -10,6 +12,9 @@ pub mod gemini;
 pub mod http;
 pub mod llama;
 pub mod llama_server;
+pub mod mcp_bridge;
+pub mod mcp_server;
+pub mod mcp_stdio;
 pub mod models_catalog;
 pub mod openai;
 pub mod session;
@@ -39,6 +44,14 @@ pub enum ProviderKind {
     /// OpenAI-compatible backend with user-supplied base_url (Ollama, Groq, …).
     /// Implemented in M8.2.
     OpenaiCompatible,
+    /// Subprocess-backed providers wrapping the user's locally-installed coding
+    /// CLIs in headless mode. We only spawn the documented non-interactive
+    /// surface; the CLI owns its own auth/billing (the user logs in outside the
+    /// app). DB tools are offered to these via a stdio MCP server.
+    ClaudeCli,
+    CodexCli,
+    GeminiCli,
+    Opencode,
 }
 
 impl ProviderKind {
@@ -50,7 +63,22 @@ impl ProviderKind {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Gemini => "gemini",
             ProviderKind::OpenaiCompatible => "openai_compatible",
+            ProviderKind::ClaudeCli => "claude_cli",
+            ProviderKind::CodexCli => "codex_cli",
+            ProviderKind::GeminiCli => "gemini_cli",
+            ProviderKind::Opencode => "opencode",
         }
+    }
+
+    /// True for the subprocess CLI providers (drives shared spawn/tooling paths).
+    pub fn is_cli(self) -> bool {
+        matches!(
+            self,
+            ProviderKind::ClaudeCli
+                | ProviderKind::CodexCli
+                | ProviderKind::GeminiCli
+                | ProviderKind::Opencode
+        )
     }
 }
 

@@ -171,6 +171,7 @@ fn assemble_user_turn(input: &ChatSendInput) -> String {
 ///   `ai://chat/chunk` — `{ request_id, delta }`
 ///   `ai://chat/done`  — `{ request_id, content, finish_reason }`
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ai_chat_send(
     input: ChatSendInput,
     app: tauri::AppHandle,
@@ -178,7 +179,19 @@ pub async fn ai_chat_send(
     db_registry: State<'_, Arc<crate::db::registry::Registry>>,
     approvals: State<'_, Arc<crate::ai::tools::ApprovalRegistry>>,
     auto_approvals: State<'_, Arc<crate::ai::tools::AutoApprovals>>,
+    mcp_slot: State<'_, crate::ai::mcp_bridge::McpBridgeSlot>,
 ) -> Result<(), AiError> {
+    // Keep the MCP bridge pointed at the connection/schema the user is looking
+    // at, so any DB tool a wrapped CLI calls runs against the right database.
+    if let Some(bridge) = mcp_slot.read().await.as_ref() {
+        bridge
+            .set_context(
+                input.connection_id.clone(),
+                input.schema.clone(),
+                Some(input.request_id.clone()),
+            )
+            .await;
+    }
     let result = ai_chat_send_inner(input, app, slot, db_registry, approvals, auto_approvals).await;
     if let Err(e) = &result {
         crate::log_chat!("error", "{e}");
@@ -333,7 +346,11 @@ async fn ai_chat_send_inner(
         let Some(session) = guard.as_ref() else {
             return Err(AiError::NoActiveSession);
         };
-        with_system_prompt(&session.messages)
+        with_system_prompt(
+            &session.messages,
+            session.provider_kind.as_str(),
+            &session.model,
+        )
     };
 
     let req = CompletionRequest {
@@ -397,6 +414,59 @@ async fn ai_chat_send_inner(
 pub async fn ai_chat_stop(request_id: String, slot: State<'_, SessionSlot>) -> Result<(), AiError> {
     let provider = session::require_provider(&slot).await?;
     provider.cancel(&request_id).await;
+    Ok(())
+}
+
+/// One restored message for [`ai_restore_messages`].
+#[derive(Debug, Deserialize)]
+pub struct RestoreMessage {
+    pub role: String,
+    pub content: String,
+}
+
+/// Repopulate the backend session transcript from a saved conversation.
+///
+/// Loading a conversation in the UI only rebuilt the *frontend* bubbles — the
+/// backend `session.messages` stayed empty, so the next turn was sent with ZERO
+/// prior context. Every provider was affected, but it's most glaring on the
+/// stateless CLIs (claude/codex/gemini/opencode), which get the whole transcript
+/// flattened into one prompt: continuing a loaded chat made the model reply
+/// "I don't see a prior attempt in this conversation."
+///
+/// We restore only user/assistant TEXT turns. Tool turns are intentionally
+/// dropped: in-app tool calls carry provider-specific `tool_call_id` linkage
+/// that would need exact reconstruction to stay wire-valid, and CLI tool calls
+/// happen out-of-band over MCP (never in `session.messages` to begin with). The
+/// text transcript is what gives the model conversational memory.
+#[tauri::command]
+pub async fn ai_restore_messages(
+    messages: Vec<RestoreMessage>,
+    slot: State<'_, SessionSlot>,
+) -> Result<(), AiError> {
+    let mut guard = slot.write().await;
+    let Some(session) = guard.as_mut() else {
+        return Err(AiError::NoActiveSession);
+    };
+    let restored: Vec<ChatMessage> = messages
+        .into_iter()
+        .filter_map(|m| {
+            let role = match m.role.as_str() {
+                "user" => ChatRole::User,
+                "assistant" => ChatRole::Assistant,
+                // Skip tool/system turns — see the doc comment.
+                _ => return None,
+            };
+            if m.content.trim().is_empty() {
+                return None;
+            }
+            Some(ChatMessage::text(role, m.content))
+        })
+        .collect();
+    crate::log_line!("ai", "restored {} messages into session", restored.len());
+    session.messages = restored;
+    // Force a fresh schema-context injection on the next turn (the restored
+    // transcript has no context fingerprint).
+    session.last_context_key = None;
     Ok(())
 }
 

@@ -13,6 +13,11 @@ interface ProviderOption {
   optionalKey?: boolean;
   /** Does this provider require a base URL (OpenAI-compatible only)? */
   needsBaseUrl?: boolean;
+  /** Subprocess CLI provider: needs the binary installed + logged in locally,
+   *  not an API key. The start screen runs an availability check for these. */
+  requiresLocalCli?: boolean;
+  /** Binary name to detect (for requiresLocalCli providers). */
+  cliBinary?: string;
 }
 
 export function parseKeyFromUrlLike(value: string): string | null {
@@ -52,6 +57,10 @@ export const PROVIDERS: ProviderOption[] = [
   { kind: 'gemini', label: 'Google', sublabel: 'generativelanguage', available: true, needsKey: true, defaultModel: 'gemini-2.5-pro' },
   { kind: 'openai_compatible', label: 'OpenAI-compatible', sublabel: 'Ollama / Groq / LM Studio', available: true, needsKey: false, optionalKey: true, needsBaseUrl: true, defaultModel: 'llama3.1' },
   { kind: 'llama_local', label: 'Local Llama', sublabel: 'GGUF · on-device', available: true, needsKey: false },
+  { kind: 'claude_cli', label: 'Claude Code CLI', sublabel: 'your installed `claude`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'claude', defaultModel: 'sonnet' },
+  { kind: 'codex_cli', label: 'Codex CLI', sublabel: 'your installed `codex`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'codex', defaultModel: 'gpt-5-codex' },
+  { kind: 'gemini_cli', label: 'Gemini CLI', sublabel: 'your installed `gemini`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'gemini', defaultModel: 'gemini-2.5-pro' },
+  { kind: 'opencode', label: 'opencode', sublabel: 'your installed `opencode`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'opencode' },
 ];
 
 export function openSettings() {

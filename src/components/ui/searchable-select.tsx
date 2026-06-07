@@ -23,6 +23,7 @@ export function SearchableSelect({
   icon,
   disabled,
   className,
+  allowCustom = false,
 }: {
   value: string;
   options: SearchableSelectOption[];
@@ -32,17 +33,29 @@ export function SearchableSelect({
   icon?: ReactNode;
   disabled?: boolean;
   className?: string;
+  /** When true, an exact-match-free query can be committed verbatim (a "Use
+   *  '<query>'" row appears). Lets the user enter a value not in `options` —
+   *  e.g. a CLI model id newer than our curated list. */
+  allowCustom?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const selected = options.find((o) => o.value === value) ?? null;
+  // A selected value not present in `options` (a custom entry) still shows in
+  // the trigger.
+  const selectedLabel = selected?.label ?? (value || null);
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return options;
     return options.filter((o) => o.label.toLowerCase().includes(q));
   }, [options, query]);
+  const trimmedQuery = query.trim();
+  const showCustom =
+    allowCustom &&
+    trimmedQuery.length > 0 &&
+    !options.some((o) => o.value.toLowerCase() === trimmedQuery.toLowerCase());
 
   return (
     <Popover
@@ -65,8 +78,8 @@ export function SearchableSelect({
         )}
       >
         {icon}
-        <span className={cn('flex-1 truncate text-left', !selected && 'text-muted-foreground')}>
-          {selected ? selected.label : placeholder}
+        <span className={cn('flex-1 truncate text-left', !selectedLabel && 'text-muted-foreground')}>
+          {selectedLabel ?? placeholder}
         </span>
         <ChevronsUpDown className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
       </PopoverTrigger>
@@ -82,7 +95,7 @@ export function SearchableSelect({
           />
         </div>
         <div className="max-h-64 overflow-y-auto p-1">
-          {filtered.length === 0 ? (
+          {filtered.length === 0 && !showCustom ? (
             <div className="py-6 text-center text-xs text-muted-foreground">No matches.</div>
           ) : (
             filtered.map((o) => (
@@ -102,6 +115,21 @@ export function SearchableSelect({
                 <span className="truncate">{o.label}</span>
               </button>
             ))
+          )}
+          {showCustom && (
+            <button
+              type="button"
+              onClick={() => {
+                onChange(trimmedQuery);
+                setOpen(false);
+              }}
+              className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left transition-colors hover:bg-muted/50 border-t border-border/40 mt-1"
+            >
+              <Check className="w-3.5 h-3.5 shrink-0 opacity-0" />
+              <span className="truncate">
+                Use “<span className="font-mono">{trimmedQuery}</span>”
+              </span>
+            </button>
           )}
         </div>
       </PopoverContent>
