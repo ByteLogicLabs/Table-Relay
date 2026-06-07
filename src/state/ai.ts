@@ -1,7 +1,8 @@
 import { useSyncExternalStore } from 'react';
-import { ai, isAiError, type AiProviderKind, type ChatFocus, type ChatKind, type Conversation, type StartInput, type QueryTier } from '../lib/ai';
+import { ai, isAiError, isCliProviderKind, type AiProviderKind, type ChatFocus, type ChatKind, type Conversation, type StartInput, type QueryTier } from '../lib/ai';
 import { loadSettings } from '../lib/settings-store';
 import { loadCredentials, setActiveCredentialId } from '../lib/ai-credentials';
+import { flog } from '../lib/flog';
 
 export interface ChatMessage {
   id: string;
@@ -97,6 +98,69 @@ function mutate(fn: (s: AiState) => AiState) {
   emit();
 }
 
+// --- Stuck-turn watchdog ---------------------------------------------------
+// A turn that never receives its `done` event (a dropped Tauri event, a CLI
+// subprocess that wedged, callbacks orphaned by a reload) leaves
+// `pendingRequestId` set forever. Because the input treats a pending request as
+// "streaming", EVERY later message silently queues and nothing sends — the chat
+// looks dead until a full reload. This watchdog is the safety net: while a turn
+// is pending we keep a timer that, if no chunk/done arrives for a long but
+// bounded window, finalises the message as errored and clears the pending flag
+// so the panel un-wedges on its own. Each chunk pushes the deadline out, so a
+// legitimately slow stream never trips it.
+const WATCHDOG_IDLE_MS = 180_000; // 3 min with zero activity → assume stuck
+let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
+let watchdogKey: string | null = null;
+let watchdogRid: string | null = null;
+
+function disarmWatchdog() {
+  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
+  watchdogKey = null;
+  watchdogRid = null;
+}
+
+/** (Re)arm the watchdog for a pending turn. Called when a send starts and
+ *  bumped on every chunk so active streams stay alive. */
+function armWatchdog(key: string, rid: string) {
+  if (watchdogTimer) clearTimeout(watchdogTimer);
+  watchdogKey = key;
+  watchdogRid = rid;
+  watchdogTimer = setTimeout(() => onWatchdogFire(key, rid), WATCHDOG_IDLE_MS);
+}
+
+/** Bump the watchdog deadline for the active turn (on chunk activity). */
+function bumpWatchdog(rid: string) {
+  if (watchdogRid === rid && watchdogKey) armWatchdog(watchdogKey, rid);
+}
+
+function onWatchdogFire(key: string, rid: string) {
+  watchdogTimer = null;
+  const chat = state.byConnection[key];
+  // Only act if this exact turn is still the pending one — otherwise it already
+  // completed/cancelled and the timer is stale.
+  if (!chat || chat.pendingRequestId !== rid) return;
+  flog('watchdog', 'FIRED stuck turn rid=', rid, 'bucket=', key, '— clearing pending');
+  mutate(s => {
+    const c = chatOf(s, key);
+    if (c.pendingRequestId !== rid) return s;
+    const idx = c.messages.findIndex(m => m.id === rid);
+    const next = idx >= 0 ? [...c.messages] : c.messages;
+    if (idx >= 0) {
+      next[idx] = {
+        ...next[idx],
+        streaming: false,
+        finishReason: 'error',
+        content: next[idx].content
+          || '(no response — the request stalled and was cleared. Try again.)',
+      };
+    }
+    return setChat(s, key, { ...c, messages: next, pendingRequestId: undefined });
+  });
+  // Best-effort backend cancel so a wedged CLI subprocess gets killed.
+  void ai.chatStop(rid).catch(() => {});
+  disarmWatchdog();
+}
+
 /** Read helper so components don't have to duplicate the null coalesce. */
 function chatOf(s: AiState, connId: string): ConnectionChat {
   return s.byConnection[connId] ?? emptyChat();
@@ -150,29 +214,74 @@ export function setFocusedConnection(connId: string | undefined) {
 // this at module load because `@tauri-apps/api/event` expects the Tauri
 // runtime to be ready, and the module is imported during SSR-less dev boot
 // but that's still before the setup step.
-let wired = false;
-async function ensureWired() {
-  if (wired) return;
-  wired = true;
-  await ai.onChunk(ev => {
+// Cache the registration PROMISE, not a boolean. Concurrent callers (e.g.
+// ChatPanel's mount `syncStatus()` racing the user's first `sendMessage()`)
+// must all await the SAME completion — a boolean flag flipped before the async
+// `ai.onChunk(...)` listeners finish registering let the second caller run
+// `chatSend` before the listeners existed, so its chunk/done events were
+// dropped and the chat stayed blank. Awaiting one shared promise fixes that.
+let wiredPromise: Promise<void> | null = null;
+// Unlisten handles for every Tauri event listener we register, so a Vite HMR
+// dispose can tear them down. Without this, each hot-reload of this module left
+// the previous listeners alive — bound to STALE `mutate`/`state` closures — so
+// chunk/done events updated an orphaned store and the visible chat never moved
+// (exactly the "replies don't append" symptom during dev iteration).
+let unlisteners: import('@tauri-apps/api/event').UnlistenFn[] = [];
+
+// Survive HMR: if a previous module instance already wired listeners, tear them
+// down before this instance wires its own. Without this, hot-reload leaves TWO
+// listener sets registered — the log showed each chunk/done firing twice, with
+// the stale set mutating an orphaned `state` ("DROPPED no-bucket" despite the
+// bucket existing). A no-op in production (the window key is unset on cold load).
+interface WiredGlobal { __aiUnlisten?: Array<() => void> }
+function disposePriorWiring() {
+  const g = window as unknown as WiredGlobal;
+  if (g.__aiUnlisten) {
+    for (const off of g.__aiUnlisten) { try { off(); } catch { /* ignore */ } }
+  }
+  g.__aiUnlisten = unlisteners;
+}
+
+function ensureWired(): Promise<void> {
+  if (!wiredPromise) {
+    wiredPromise = wireListeners().catch(e => {
+      // Reset on failure so a later call can retry rather than be stuck on a
+      // rejected promise forever.
+      wiredPromise = null;
+      throw e;
+    });
+  }
+  return wiredPromise;
+}
+
+async function wireListeners() {
+  // Kill any listeners a prior module instance (HMR) left registered, then
+  // publish this instance's unlisten array globally so the NEXT instance can do
+  // the same. Guarantees exactly one live listener set bound to the current
+  // module's `mutate`/`state`.
+  disposePriorWiring();
+  unlisteners.push(await ai.onChunk(ev => {
+    bumpWatchdog(ev.requestId); // activity → push the stuck-turn deadline out
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.requestId);
-      if (!conn) return s;
+      if (!conn) { flog('chunk', 'DROPPED no-bucket rid=', ev.requestId, 'buckets=', Object.keys(s.byConnection)); return s; }
       const chat = chatOf(s, conn);
       const idx = chat.messages.findIndex(m => m.id === ev.requestId);
-      if (idx < 0) return s;
+      if (idx < 0) { flog('chunk', 'DROPPED no-msg rid=', ev.requestId, 'conn=', conn); return s; }
       const next = [...chat.messages];
       next[idx] = { ...next[idx], content: next[idx].content + ev.delta };
       return setChat(s, conn, { ...chat, messages: next });
     });
-  });
-  await ai.onDone(ev => {
+  }));
+  unlisteners.push(await ai.onDone(ev => {
+    flog('done', 'rid=', ev.requestId, 'finish=', ev.finishReason, 'len=', (ev.content ?? '').length);
+    if (watchdogRid === ev.requestId) disarmWatchdog(); // turn completed cleanly
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.requestId);
-      if (!conn) return s;
+      if (!conn) { flog('done', 'DROPPED no-bucket rid=', ev.requestId, 'buckets=', Object.keys(s.byConnection)); return s; }
       const chat = chatOf(s, conn);
       const idx = chat.messages.findIndex(m => m.id === ev.requestId);
-      if (idx < 0) return setChat(s, conn, { ...chat, pendingRequestId: undefined });
+      if (idx < 0) { flog('done', 'no-msg rid=', ev.requestId, 'conn=', conn); return setChat(s, conn, { ...chat, pendingRequestId: undefined }); }
       const next = [...chat.messages];
       next[idx] = {
         ...next[idx],
@@ -190,12 +299,12 @@ async function ensureWired() {
       }
       return setChat(s, conn, { ...chat, messages: next, pendingRequestId: undefined });
     });
-  });
+  }));
   // --- Tool-use events (M8.4 Stage 2) ---
   // When a tool call starts, insert a placeholder "tool" bubble right
   // before the streaming assistant reply so the user sees the tool call
   // in context.
-  await ai.onToolCallStarted(ev => {
+  unlisteners.push(await ai.onToolCallStarted(ev => {
     mutate(s => {
       // The tool call fires during the assistant reply — look up the
       // owning connection via the reply's id.
@@ -218,8 +327,8 @@ async function ensureWired() {
       next.splice(insertBefore, 0, toolBubble);
       return setChat(s, conn, { ...chat, messages: next });
     });
-  });
-  await ai.onToolCallFinished(ev => {
+  }));
+  unlisteners.push(await ai.onToolCallFinished(ev => {
     // Capture across the mutate boundary so we can persist after state updates.
     let convId: string | undefined;
     let toolSnapshot: { name: string; arguments: string; result?: string; denied?: boolean } | undefined;
@@ -261,8 +370,8 @@ async function ensureWired() {
         },
       ).catch(() => {});
     }
-  });
-  await ai.onApprovalRequest(ev => {
+  }));
+  unlisteners.push(await ai.onApprovalRequest(ev => {
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.toolCallId);
       if (!conn) return s;
@@ -289,7 +398,7 @@ async function ensureWired() {
       };
       return setChat(s, conn, { ...chat, messages: next });
     });
-  });
+  }));
   // Reconcile with backend state on first wire. If the Rust side has a live
   // session from a previous hot-reload (dev iteration) we show "active" so
   // the user doesn't hit SessionAlreadyActive on their next Start.
@@ -304,6 +413,22 @@ async function ensureWired() {
       }));
     }
   } catch { /* no-op */ }
+}
+
+// Vite HMR: when this module is hot-replaced, tear down the listeners the old
+// instance registered. Otherwise stale listeners (bound to the previous
+// module's `mutate`/`state`) keep firing into an orphaned store and the visible
+// chat stops updating — which reads as "replies don't append" during dev. No
+// effect in production (import.meta.hot is undefined there).
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    for (const off of unlisteners) {
+      try { off(); } catch { /* ignore */ }
+    }
+    unlisteners = [];
+    wiredPromise = null;
+    disarmWatchdog();
+  });
 }
 
 function errMsg(e: unknown): string {
@@ -393,21 +518,31 @@ export async function loadConversation(conversationId: string) {
   // picker. Pick the credential that best matches the conversation's saved
   // provider + model, falling back to the first available credential.
   if (state.status !== 'active') {
-    const creds = loadCredentials();
-    if (creds.length === 0) {
-      throw new Error('Add a provider credential in Settings to open saved chats.');
+    // CLI providers (claude/codex/gemini/opencode) have NO saved credential —
+    // they authenticate through the installed binary. Start them directly from
+    // the conversation's saved provider/model. Without this, opening a saved
+    // CLI chat fell through to `creds[0]` and silently started an unrelated API
+    // provider (e.g. an opencode chat reopening as OpenAI).
+    if (isCliProviderKind(conv.providerKind)) {
+      await start({ kind: conv.providerKind, model: conv.model ?? '' });
+      setActiveCredentialId(null);
+    } else {
+      const creds = loadCredentials();
+      if (creds.length === 0) {
+        throw new Error('Add a provider credential in Settings to open saved chats.');
+      }
+      const match =
+        creds.find(c => c.kind === conv.providerKind && c.model === conv.model) ??
+        creds.find(c => c.kind === conv.providerKind) ??
+        creds[0];
+      await start({
+        kind: match.kind,
+        model: match.model,
+        apiKey: match.apiKey,
+        baseUrl: match.baseUrl,
+      });
+      setActiveCredentialId(match.id);
     }
-    const match =
-      creds.find(c => c.kind === conv.providerKind && c.model === conv.model) ??
-      creds.find(c => c.kind === conv.providerKind) ??
-      creds[0];
-    await start({
-      kind: match.kind,
-      model: match.model,
-      apiKey: match.apiKey,
-      baseUrl: match.baseUrl,
-    });
-    setActiveCredentialId(match.id);
   }
 
   // Load into the bucket the user is CURRENTLY viewing, not the one the
@@ -459,6 +594,29 @@ export async function loadConversation(conversationId: string) {
     conversationId: conv.id,
     messages,
   }));
+  // Pin the view to the bucket we just loaded into, so a follow-up send routes
+  // to the SAME bucket. Without this, `sendMessage` later realigned focus to
+  // the message's `connectionId` bucket — a DIFFERENT, empty one — and the
+  // freshly-loaded transcript vanished from view ("old chats gone"). Loading a
+  // conversation IS focusing it.
+  if ((state.focusedConnectionId ?? GLOBAL_KEY) !== connKey) {
+    setFocusedConnection(connKey === GLOBAL_KEY ? undefined : connKey);
+  }
+
+  // Restore the BACKEND session transcript too. Loading only rebuilt the
+  // frontend bubbles; without this the backend session.messages stayed empty,
+  // so continuing a reopened chat sent the new turn with no prior context —
+  // every provider, but most visibly the stateless CLIs ("I don't see a prior
+  // attempt in this conversation"). Send the user/assistant text turns; the
+  // backend drops tool/system turns itself.
+  const restorable = messages
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({ role: m.role, content: m.content }));
+  try {
+    await ai.restoreMessages(restorable);
+  } catch (e) {
+    flog('restore', 'failed', errMsg(e));
+  }
 }
 
 /** List saved conversations. */
@@ -471,13 +629,24 @@ export async function deleteConversation(id: string) {
   return ai.conversationDelete(id);
 }
 
-export async function end(opts?: { awaitBackend?: boolean }) {
+export async function end(opts?: { awaitBackend?: boolean; keepTranscript?: boolean }) {
   // Reset UI state immediately so the StartScreen appears without waiting
   // on backend teardown. The backend unload is fire-and-forget: local llama
   // can take a few seconds to kill the subprocess, and hosted-provider
   // cleanup is near-instant but still async. Either way the user has
   // already said "end this" — they shouldn't have to stare at a spinner.
-  mutate(() => ({ status: 'inactive', byConnection: {} }));
+  //
+  // `keepTranscript`: used by credential/model SWAP, which calls end()+start()
+  // under the hood. A swap must NOT wipe the visible chat — clearing
+  // `byConnection` made the transcript vanish and the panel go blank after a
+  // model switch. So for swaps we drop to `inactive` but preserve the buckets;
+  // start() flips back to `active` and the same transcript is still there. Plain
+  // "End" (no opts) still clears everything.
+  if (opts?.keepTranscript) {
+    mutate(s => ({ ...s, status: 'inactive' }));
+  } else {
+    mutate(() => ({ status: 'inactive', byConnection: {} }));
+  }
   // When swapping credential/model we MUST await the backend teardown before
   // the follow-up start(): the backend session slot is single-slot, so a
   // start() that races ahead of end()'s `guard.take()` hits SessionAlreadyActive
@@ -491,6 +660,26 @@ export async function end(opts?: { awaitBackend?: boolean }) {
   if (opts?.awaitBackend) await teardown;
 }
 
+/**
+ * Re-seed the backend session transcript from the currently-visible chat
+ * bucket. Used after a credential/model SWAP (end+start leaves the backend
+ * session empty) so the model keeps full conversational context even though the
+ * UI transcript was preserved on the frontend. No-op if there's nothing to send.
+ */
+export async function restoreBackendTranscript() {
+  const key = state.focusedConnectionId ?? GLOBAL_KEY;
+  const msgs = state.byConnection[key]?.messages ?? [];
+  const restorable = msgs
+    .filter(m => m.role === 'user' || m.role === 'assistant')
+    .map(m => ({ role: m.role, content: m.content }));
+  if (restorable.length === 0) return;
+  try {
+    await ai.restoreMessages(restorable);
+  } catch (e) {
+    flog('restore', 'swap re-seed failed', errMsg(e));
+  }
+}
+
 export async function sendMessage(
   content: string,
   context?: {
@@ -502,6 +691,7 @@ export async function sendMessage(
     errorMessage?: string;
   },
 ): Promise<boolean> {
+  flog('send', 'enter status=', state.status, 'provider=', state.providerKind, 'focused=', state.focusedConnectionId, 'ctxConn=', context?.connectionId);
   // Wire first so status reconciles with a live backend session that
   // survived a page reload — otherwise the very first send after HMR
   // bails on the stale `inactive` default and the user sees nothing.
@@ -513,20 +703,45 @@ export async function sendMessage(
   if (state.status !== 'active') {
     try {
       const status = await ai.status();
+      flog('send', 'status-recheck active=', status.active, 'kind=', status.providerKind);
       if (status.active) {
         mutate(s => ({ ...s, status: 'active', providerKind: status.providerKind, model: status.model }));
       } else {
+        flog('send', 'ABORT backend inactive — no session');
         return false;
       }
-    } catch {
+    } catch (e) {
+      flog('send', 'ABORT status() threw', errMsg(e));
       return false;
     }
   }
   const trimmed = content.trim();
-  if (!trimmed) return false;
-  // Route the turn into the connection bucket the user is interacting
-  // with. Fall back to GLOBAL when none is set yet.
-  const connKey = context?.connectionId ?? state.focusedConnectionId ?? GLOBAL_KEY;
+  if (!trimmed) { flog('send', 'ABORT empty content'); return false; }
+  // Route the turn into the connection bucket the user is interacting with.
+  // Prefer the FOCUSED bucket when it already holds an in-progress conversation
+  // — otherwise a reopened chat (loaded into the focused/global bucket) would be
+  // split off when `context.connectionId` pointed at a different, empty bucket,
+  // making the visible transcript "disappear" on the next send. Only fall back
+  // to the explicit context connection / global when the focus bucket is fresh.
+  const focusKey = state.focusedConnectionId ?? GLOBAL_KEY;
+  const focusHasActiveChat =
+    (state.byConnection[focusKey]?.messages.length ?? 0) > 0 ||
+    !!state.byConnection[focusKey]?.conversationId;
+  const connKey = focusHasActiveChat
+    ? focusKey
+    : (context?.connectionId ?? state.focusedConnectionId ?? GLOBAL_KEY);
+  // CRITICAL: the panel RENDERS from `state.focusedConnectionId` (via
+  // currentChat), but the message is WRITTEN to `connKey`. If those diverge
+  // — which happens when ChatPanel's `setFocusedConnection` effect hasn't
+  // landed the explicit connectionId yet (race on mount / two instances) —
+  // the reply lands in a bucket the panel isn't viewing and the chat looks
+  // empty even though events arrived. Force them into agreement here: sending
+  // into a connection focuses it. This is the real fix for "no error but
+  // nothing appends" (logs showed write bucket=<conn> vs visible=__global__).
+  if (state.focusedConnectionId !== connKey && connKey !== GLOBAL_KEY) {
+    flog('send', 'aligning focus', state.focusedConnectionId, '→', connKey);
+    setFocusedConnection(connKey);
+  }
   const userId = crypto.randomUUID();
   // Use one shared id for the user turn + its assistant reply, so chunks
   // route back to the right bubble. The backend receives this as request_id
@@ -554,6 +769,7 @@ export async function sendMessage(
     } catch { /* non-fatal */ }
   }
 
+  flog('send', 'placeholder rid=', requestId, 'bucket=', connKey, 'conv=', convId);
   mutate(s => {
     const chat = chatOf(s, connKey);
     return setChat(s, connKey, {
@@ -567,6 +783,8 @@ export async function sendMessage(
       ],
     });
   });
+  flog('send', 'after-mutate visibleBucket=', (state.focusedConnectionId ?? GLOBAL_KEY), 'msgCount=', (state.byConnection[connKey]?.messages.length ?? -1));
+  armWatchdog(connKey, requestId); // self-heal if no chunk/done ever arrives
 
   // Save user message to persistent storage
   if (convId) {
@@ -578,12 +796,16 @@ export async function sendMessage(
   try {
     // Pass the user's per-turn tool-iteration cap + repeat-call guard through
     // to the backend loop.
+    flog('send', 'chatSend → backend rid=', requestId);
     await ai.chatSend(requestId, trimmed, {
       ...context,
       maxIterations: loadSettings().aiMaxToolIterations,
       maxRepeatCalls: loadSettings().aiMaxRepeatCalls,
     });
+    flog('send', 'chatSend resolved rid=', requestId);
   } catch (e) {
+    flog('send', 'chatSend THREW rid=', requestId, errMsg(e));
+    if (watchdogRid === requestId) disarmWatchdog();
     mutate(s => {
       const chat = chatOf(s, connKey);
       const idx = chat.messages.findIndex(m => m.id === requestId);
@@ -647,6 +869,7 @@ export async function stopStreaming() {
   const key = state.focusedConnectionId ?? GLOBAL_KEY;
   const rid = state.byConnection[key]?.pendingRequestId;
   if (!rid) return;
+  if (watchdogRid === rid) disarmWatchdog();
   // Finalise locally first. Otherwise, if the in-flight request was
   // started in a previous page lifecycle (HMR / reload) its callbacks
   // are dead and `done` will never arrive — the UI stays stuck on Stop

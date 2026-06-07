@@ -17,6 +17,11 @@ export interface ProviderMeta {
   needsKey: boolean;
   optionalKey?: boolean;
   needsBaseUrl?: boolean;
+  /** Subprocess CLI provider — needs the binary installed & logged in locally,
+   *  not an API key. Drives the availability check + install hint in the UI. */
+  requiresLocalCli?: boolean;
+  /** The CLI binary name to detect on PATH (for requiresLocalCli providers). */
+  cliBinary?: string;
   defaultModel: string;
 }
 
@@ -25,6 +30,10 @@ export const PROVIDERS: ProviderMeta[] = [
   { kind: 'anthropic',         label: 'Anthropic',         sublabel: 'Claude 3.5 Haiku / Sonnet…',  needsKey: true,                             defaultModel: 'claude-3-5-haiku-latest' },
   { kind: 'gemini',            label: 'Google Gemini',     sublabel: 'Gemini 2.5 Pro / Flash…',     needsKey: true,                             defaultModel: 'gemini-2.5-pro' },
   { kind: 'openai_compatible', label: 'OpenAI-compatible', sublabel: 'Ollama · Groq · LM Studio',   needsKey: false, optionalKey: true, needsBaseUrl: true, defaultModel: 'llama3.1' },
+  { kind: 'claude_cli',        label: 'Claude Code CLI',   sublabel: 'Your installed `claude` CLI',  needsKey: false, requiresLocalCli: true, cliBinary: 'claude',   defaultModel: 'sonnet' },
+  { kind: 'codex_cli',         label: 'Codex CLI',         sublabel: 'Your installed `codex` CLI',   needsKey: false, requiresLocalCli: true, cliBinary: 'codex',    defaultModel: 'gpt-5-codex' },
+  { kind: 'gemini_cli',        label: 'Gemini CLI',        sublabel: 'Your installed `gemini` CLI',  needsKey: false, requiresLocalCli: true, cliBinary: 'gemini',   defaultModel: 'gemini-2.5-pro' },
+  { kind: 'opencode',          label: 'opencode',          sublabel: 'Your installed `opencode` CLI', needsKey: false, requiresLocalCli: true, cliBinary: 'opencode', defaultModel: '' },
 ];
 
 export const PROVIDER_COLORS: Partial<Record<AiProviderKind, string>> = {
@@ -32,6 +41,10 @@ export const PROVIDER_COLORS: Partial<Record<AiProviderKind, string>> = {
   anthropic:         'bg-orange-500/15 text-orange-600 dark:text-orange-400',
   gemini:            'bg-blue-500/15 text-blue-600 dark:text-blue-400',
   openai_compatible: 'bg-purple-500/15 text-purple-600 dark:text-purple-400',
+  claude_cli:        'bg-orange-500/15 text-orange-600 dark:text-orange-400',
+  codex_cli:         'bg-slate-500/15 text-slate-600 dark:text-slate-300',
+  gemini_cli:        'bg-blue-500/15 text-blue-600 dark:text-blue-400',
+  opencode:          'bg-amber-500/15 text-amber-600 dark:text-amber-400',
 };
 
 // ── Theme data ─────────────────────────────────────────────────────────────────

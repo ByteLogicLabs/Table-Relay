@@ -99,19 +99,42 @@ fn references_other_database(
     None
 }
 
+/// Choose which statement in a (possibly multi-statement) batch is the one whose
+/// result we report to the model + UI.
+///
+/// For MySQL we auto-prepend `USE <schema>;`, so a batch is `[USE, <query>]`.
+/// The `USE` returns 0 rows / 0 columns; reporting the FIRST statement therefore
+/// made every query look empty (a `SELECT COUNT(*)` read as "0 rows", so the
+/// model declared non-empty tables empty). Rule: the first errored statement
+/// wins (surface the failure); otherwise the LAST statement is the real result.
+fn select_result_statement(
+    statements: &[adapter_api::StatementResult],
+) -> Option<&adapter_api::StatementResult> {
+    statements
+        .iter()
+        .find(|s| s.error.is_some())
+        .or_else(|| statements.last())
+}
+
 /// Result of a tool invocation. We always serialize to a string because
 /// that's what the model sees as the `tool` message content.
 pub struct ToolResult {
     pub content: String,
+    /// Whether this result represents a failure. Set explicitly by the
+    /// constructors — callers MUST read this instead of substring-scanning
+    /// `content` for `"error"`, which false-positives on legitimate result rows
+    /// that merely contain the word "error" (e.g. a status column, a log table).
+    pub is_error: bool,
 }
 
 impl ToolResult {
     fn from_value(v: Value) -> Self {
-        Self { content: v.to_string() }
+        Self { content: v.to_string(), is_error: false }
     }
     fn error(msg: impl Into<String>) -> Self {
         Self {
             content: json!({ "error": msg.into() }).to_string(),
+            is_error: true,
         }
     }
     /// A non-error result that carries a steering instruction back to the model
@@ -120,6 +143,7 @@ impl ToolResult {
     pub fn directive(msg: impl Into<String>) -> Self {
         Self {
             content: json!({ "note": msg.into() }).to_string(),
+            is_error: false,
         }
     }
 }
@@ -488,14 +512,29 @@ pub async fn dispatch(
             }
             match adapter.execute_raw(&final_sql, None).await {
                 Ok(res) => {
-                    // Emit a query-log event so the frontend can record this
-                    let first = res.statements.first();
-                    let (status, message, duration_ms) = match first {
+                    // Pick the statement whose result we report to the model.
+                    //
+                    // CRITICAL: for MySQL we auto-prepend `USE <schema>;` (see
+                    // above), so the batch is `[USE, <real query>]`. The `USE`
+                    // statement returns 0 rows / 0 columns. Reporting
+                    // `statements.first()` therefore handed the model an EMPTY
+                    // result for EVERY query — e.g. `SELECT COUNT(*)` looked like
+                    // "0 rows", so the model said the table was empty even though
+                    // it has thousands of rows.
+                    //
+                    // The meaningful result is the LAST statement (the user's
+                    // query). But if ANY statement errored, surface that error
+                    // (the `USE` could fail, or the query could). So: first error
+                    // wins; otherwise the last statement is the result.
+                    let result_stmt = select_result_statement(&res.statements);
+
+                    // Emit a query-log event so the frontend can record this.
+                    use tauri::Emitter;
+                    let (status, message, duration_ms) = match result_stmt {
                         Some(stmt) if stmt.error.is_none() => ("ok", None, stmt.duration_ms),
                         Some(stmt) => ("error", stmt.error.clone(), stmt.duration_ms),
                         None => ("error", Some("no statements".to_string()), 0.0),
                     };
-                    use tauri::Emitter;
                     let _ = app.emit("ai://query_log", json!({
                         "connection_id": ctx.connection_id,
                         "statement": sql,
@@ -505,26 +544,26 @@ pub async fn dispatch(
                         "message": message,
                     }));
 
-                    // Compact representation — first statement's first 25 rows.
-                    // Keeps the feedback to the model under a few KB even on
+                    // Compact representation — the result statement's first 25
+                    // rows. Keeps the feedback to the model under a few KB even on
                     // wide tables.
-                    let first = res.statements.first();
-                    let summary = match first {
+                    match result_stmt {
                         Some(stmt) if stmt.error.is_none() => {
                             let rows_shown = stmt.rows.iter().take(25).collect::<Vec<_>>();
                             let column_names: Vec<&str> = stmt.columns.iter().map(|c| c.name.as_str()).collect();
-                            json!({
+                            ToolResult::from_value(json!({
                                 "columns": column_names,
                                 "row_count_shown": rows_shown.len(),
                                 "rows": rows_shown,
                                 "truncated": stmt.rows.len() > rows_shown.len(),
                                 "duration_ms": stmt.duration_ms,
-                            })
+                            }))
                         }
-                        Some(stmt) => json!({ "error": stmt.error.clone().unwrap_or_default() }),
-                        None => json!({ "error": "no statements returned" }),
-                    };
-                    ToolResult::from_value(summary)
+                        // A statement-level error IS an error — use the error
+                        // constructor so is_error is set (not substring-guessed).
+                        Some(stmt) => ToolResult::error(stmt.error.clone().unwrap_or_default()),
+                        None => ToolResult::error("no statements returned"),
+                    }
                 }
                 Err(e) => ToolResult::error(format!("call_query failed: {e}")),
             }
@@ -848,5 +887,63 @@ pub async fn dispatch(
             }))
         }
         other => ToolResult::error(format!("unknown tool: {other}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adapter_api::StatementResult;
+
+    fn stmt(sql: &str, rows: usize, cols: usize, error: Option<&str>) -> StatementResult {
+        StatementResult {
+            sql: sql.into(),
+            duration_ms: 1.0,
+            columns: (0..cols)
+                .map(|i| adapter_api::ColumnMeta {
+                    name: format!("c{i}"),
+                    type_hint: "int".into(),
+                })
+                .collect(),
+            rows: (0..rows).map(|_| vec![json!(1)]).collect(),
+            rows_affected: None,
+            error: error.map(String::from),
+        }
+    }
+
+    #[test]
+    fn picks_last_statement_skipping_use_prefix() {
+        // The exact MySQL bug: `[USE (0 rows), SELECT COUNT(*) (1 row)]`.
+        // Reporting the first statement made COUNT look empty.
+        let batch = vec![
+            stmt("USE `db`", 0, 0, None),
+            stmt("SELECT COUNT(*) FROM actors", 1, 1, None),
+        ];
+        let chosen = select_result_statement(&batch).unwrap();
+        assert_eq!(chosen.sql, "SELECT COUNT(*) FROM actors");
+        assert_eq!(chosen.rows.len(), 1);
+    }
+
+    #[test]
+    fn errored_statement_wins_over_last() {
+        // If the USE fails, surface that error rather than the (empty) last stmt.
+        let batch = vec![
+            stmt("USE `nope`", 0, 0, Some("Unknown database 'nope'")),
+            stmt("SELECT 1", 0, 0, None),
+        ];
+        let chosen = select_result_statement(&batch).unwrap();
+        assert_eq!(chosen.error.as_deref(), Some("Unknown database 'nope'"));
+    }
+
+    #[test]
+    fn single_statement_is_returned_as_is() {
+        let batch = vec![stmt("SELECT * FROM actors LIMIT 5", 5, 6, None)];
+        let chosen = select_result_statement(&batch).unwrap();
+        assert_eq!(chosen.rows.len(), 5);
+    }
+
+    #[test]
+    fn empty_batch_is_none() {
+        assert!(select_result_statement(&[]).is_none());
     }
 }

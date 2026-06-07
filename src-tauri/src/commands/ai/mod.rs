@@ -25,6 +25,8 @@ use serde::{Deserialize, Serialize};
 use tauri::State;
 
 use crate::ai::anthropic::AnthropicProvider;
+use crate::ai::cli_provider::{resolve_binary, CliProvider, CliSpec};
+use crate::ai::cli_specs::{ClaudeCliSpec, CodexCliSpec, GeminiCliSpec, OpencodeSpec};
 use crate::ai::download::{self, DownloadRegistry, LocalModelInfo};
 use crate::ai::echo::EchoProvider;
 use crate::ai::gemini::GeminiProvider;
@@ -95,10 +97,16 @@ pub async fn ai_status(slot: State<'_, SessionSlot>) -> Result<AiStatus, AiError
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn ai_start(
     input: StartInput,
+    app: tauri::AppHandle,
     slot: State<'_, SessionSlot>,
     store: State<'_, Arc<crate::store::Store>>,
+    db_registry: State<'_, Arc<crate::db::registry::Registry>>,
+    approvals: State<'_, Arc<crate::ai::tools::ApprovalRegistry>>,
+    auto_approvals: State<'_, Arc<crate::ai::tools::AutoApprovals>>,
+    mcp_slot: State<'_, crate::ai::mcp_bridge::McpBridgeSlot>,
 ) -> Result<AiStatus, AiError> {
     // Build + probe the provider. On failure we drop the provider here, which
     // in turn zeroes the API key via the `Zeroizing<String>` wrapper — the
@@ -145,6 +153,27 @@ pub async fn ai_start(
             let p = OpenAiProvider::compatible(base, key, input.model.clone());
             p.probe().await?;
             Arc::new(p)
+        }
+        ProviderKind::ClaudeCli
+        | ProviderKind::CodexCli
+        | ProviderKind::GeminiCli
+        | ProviderKind::Opencode => {
+            // Lazily bind the MCP bridge so the CLI can call our DB tools, then
+            // register it with this CLI. Bridge/registration failures are
+            // non-fatal — the CLI still runs as a chat provider without tools.
+            let bridge = ensure_bridge(
+                &mcp_slot,
+                db_registry.inner().clone(),
+                approvals.inner().clone(),
+                auto_approvals.inner().clone(),
+                app.clone(),
+            )
+            .await;
+            let mcp_config_path = match &bridge {
+                Some(b) => register_cli_mcp(input.kind, b),
+                None => None,
+            };
+            build_cli_provider(input.kind, input.model.clone(), mcp_config_path)?
         }
     };
 
@@ -257,7 +286,113 @@ pub async fn ai_list_models(input: ListModelsInput) -> Result<Vec<String>, AiErr
                 .ok_or_else(|| AiError::InvalidModel("base_url is required".into()))?;
             OpenAiProvider::list_models(base, input.api_key.as_deref()).await
         }
+        // CLI providers: no network model listing. Return a small curated list
+        // so the picker isn't empty. The UI's picker also accepts a typed custom
+        // id (allowCustom), so a model newer than this list is still reachable.
+        // Claude takes aliases (`sonnet`/`opus`/`haiku`) or full ids.
+        ProviderKind::ClaudeCli => Ok(vec![
+            "sonnet".into(),
+            "opus".into(),
+            "haiku".into(),
+        ]),
+        ProviderKind::CodexCli => Ok(vec![
+            "gpt-5-codex".into(),
+            "gpt-5".into(),
+            "o4-mini".into(),
+        ]),
+        ProviderKind::GeminiCli => Ok(vec![
+            "gemini-2.5-pro".into(),
+            "gemini-2.5-flash".into(),
+        ]),
+        // opencode knows its own catalog (`opencode models`, provider/model
+        // strings). Ask the binary so the picker reflects what's actually
+        // configured/authed; fall back to empty (= let opencode pick) on error.
+        ProviderKind::Opencode => Ok(opencode_models().await.unwrap_or_default()),
     }
+}
+
+/// Run `opencode models` and return its `provider/model` lines. Best-effort:
+/// returns `None` if the binary can't be found or run. Logs the reason on
+/// failure so an empty picker isn't a silent mystery.
+async fn opencode_models() -> Option<Vec<String>> {
+    let spec = cli_spec_for(ProviderKind::Opencode);
+    let Some(bin) = resolve_binary(spec.as_ref()) else {
+        crate::log_line!("cli", "opencode_models: binary not resolved");
+        return None;
+    };
+    // Route through the cross-platform builder so a Windows `.cmd` shim runs via
+    // `cmd /C` instead of failing with ERROR_BAD_EXE_FORMAT. A GUI app launched
+    // from Finder/Dock has a minimal PATH, so we give the child an augmented PATH
+    // (binary's own dir + the same fallback dirs we probe) — otherwise opencode
+    // can fail to locate its own runtime/helpers.
+    let mut cmd = crate::ai::cli_provider::build_command(&bin, &["models".to_string()]);
+    cmd.stdin(std::process::Stdio::null());
+    augment_path_env(&mut cmd, &bin);
+    let output = match cmd.output().await {
+        Ok(o) => o,
+        Err(e) => {
+            crate::log_line!("cli", "opencode_models: spawn failed: {e}");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        let err = String::from_utf8_lossy(&output.stderr);
+        crate::log_line!(
+            "cli",
+            "opencode_models: exit {} stderr: {}",
+            output.status,
+            err.chars().take(300).collect::<String>()
+        );
+        return None;
+    }
+    // Keep only lines shaped like `provider/model` (skip any banner/footer the
+    // CLI might print). This is the only validation — we never hardcode the list.
+    let list: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty() && l.contains('/') && !l.contains(' '))
+        .collect();
+    crate::log_line!("cli", "opencode_models: {} models parsed", list.len());
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
+}
+
+/// Augment a child command's `PATH` with the resolved binary's own directory plus
+/// the common install dirs, so a Finder/Dock-launched app (minimal inherited
+/// PATH) can still run CLIs that shell out to sibling tools.
+fn augment_path_env(cmd: &mut tokio::process::Command, bin: &std::path::Path) {
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(parent) = bin.parent() {
+        dirs.push(parent.to_path_buf());
+    }
+    if let Some(home) = crate::ai::cli_specs::home() {
+        dirs.push(home.join(".opencode/bin"));
+        dirs.push(home.join(".bun/bin"));
+        dirs.push(home.join(".local/bin"));
+    }
+    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
+        dirs.push(std::path::PathBuf::from(p));
+    }
+    let existing = std::env::var_os("PATH").unwrap_or_default();
+    let mut all: Vec<std::path::PathBuf> = dirs;
+    all.extend(std::env::split_paths(&existing));
+    if let Ok(joined) = std::env::join_paths(all) {
+        cmd.env("PATH", joined);
+    }
+}
+
+/// Availability check for a CLI provider: is the binary resolvable, and where?
+/// Used by the start screen to show "✓ found at …" / "✗ not installed".
+#[tauri::command]
+pub async fn ai_cli_available(kind: ProviderKind) -> Result<Option<String>, AiError> {
+    if !kind.is_cli() {
+        return Ok(None);
+    }
+    let spec = cli_spec_for(kind);
+    Ok(resolve_binary(spec.as_ref()).map(|p| p.display().to_string()))
 }
 
 /// List every model in the local catalog, flagged with whether it's already
@@ -349,5 +484,119 @@ fn require_key(key: &Option<String>) -> Result<String, AiError> {
     match key {
         Some(k) if !k.trim().is_empty() => Ok(k.clone()),
         _ => Err(AiError::Unauthorized("API key is required".into())),
+    }
+}
+
+/// Build the right [`CliSpec`] for a CLI provider kind.
+fn cli_spec_for(kind: ProviderKind) -> Arc<dyn CliSpec> {
+    match kind {
+        ProviderKind::ClaudeCli => Arc::new(ClaudeCliSpec),
+        ProviderKind::CodexCli => Arc::new(CodexCliSpec),
+        ProviderKind::GeminiCli => Arc::new(GeminiCliSpec { system_md: None }),
+        ProviderKind::Opencode => Arc::new(OpencodeSpec),
+        _ => unreachable!("cli_spec_for called with non-CLI kind"),
+    }
+}
+
+/// Resolve + construct a subprocess CLI provider, or a clear "not installed"
+/// error pointing the user at the install/login step. `mcp_config_path` is the
+/// Claude `--mcp-config` file path when MCP is wired (the other CLIs register
+/// out-of-band and ignore it).
+fn build_cli_provider(
+    kind: ProviderKind,
+    model: String,
+    mcp_config_path: Option<String>,
+) -> Result<Arc<dyn AiProvider>, AiError> {
+    let spec = cli_spec_for(kind);
+    let bin = resolve_binary(spec.as_ref()).ok_or_else(|| {
+        AiError::InvalidModel(format!(
+            "{} not found on PATH. Install it and run it once to log in, then try again.",
+            spec.binary_name()
+        ))
+    })?;
+    Ok(Arc::new(CliProvider::new(spec, bin, model, mcp_config_path)))
+}
+
+/// Get the already-bound MCP bridge or lazily bind it. Returns `None` if binding
+/// fails (loopback unavailable) — the caller then runs the CLI tool-less.
+async fn ensure_bridge(
+    mcp_slot: &crate::ai::mcp_bridge::McpBridgeSlot,
+    db_registry: Arc<crate::db::registry::Registry>,
+    approvals: Arc<crate::ai::tools::ApprovalRegistry>,
+    auto_approvals: Arc<crate::ai::tools::AutoApprovals>,
+    app: tauri::AppHandle,
+) -> Option<Arc<crate::ai::mcp_bridge::McpBridge>> {
+    {
+        let guard = mcp_slot.read().await;
+        if let Some(b) = guard.as_ref() {
+            return Some(b.clone());
+        }
+    }
+    match crate::ai::mcp_bridge::McpBridge::start(db_registry, approvals, auto_approvals, app).await {
+        Ok(b) => {
+            *mcp_slot.write().await = Some(b.clone());
+            Some(b)
+        }
+        Err(e) => {
+            crate::log_line!("mcp", "bridge bind failed: {e}");
+            None
+        }
+    }
+}
+
+/// Register the bridge with one CLI so it can call our DB tools. Claude takes a
+/// per-invocation `--mcp-config` file (returned here); the others register via
+/// their config files (side effects, returns `None`). All failures are logged
+/// and swallowed — MCP is best-effort on top of plain chat.
+fn register_cli_mcp(
+    kind: ProviderKind,
+    bridge: &crate::ai::mcp_bridge::McpBridge,
+) -> Option<String> {
+    use crate::ai::mcp_server;
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.display().to_string(),
+        Err(e) => {
+            crate::log_line!("mcp", "current_exe failed: {e}");
+            return None;
+        }
+    };
+    let (port, token) = (bridge.port, bridge.token.as_str());
+    // Cross-platform home (USERPROFILE on Windows, HOME elsewhere).
+    let home = crate::ai::cli_specs::home();
+    match kind {
+        ProviderKind::ClaudeCli => {
+            match mcp_server::write_claude_mcp_config(&exe, port, token) {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    crate::log_line!("mcp", "claude config write failed: {e}");
+                    None
+                }
+            }
+        }
+        ProviderKind::GeminiCli => {
+            if let Some(h) = &home {
+                if let Err(e) = mcp_server::register_gemini(h, &exe, port, token) {
+                    crate::log_line!("mcp", "gemini register failed: {e}");
+                }
+            }
+            None
+        }
+        ProviderKind::Opencode => {
+            if let Some(h) = &home {
+                if let Err(e) = mcp_server::register_opencode(h, &exe, port, token) {
+                    crate::log_line!("mcp", "opencode register failed: {e}");
+                }
+            }
+            None
+        }
+        ProviderKind::CodexCli => {
+            if let Some(h) = &home {
+                if let Err(e) = mcp_server::register_codex(h, &exe, port, token) {
+                    crate::log_line!("mcp", "codex register failed: {e}");
+                }
+            }
+            None
+        }
+        _ => None,
     }
 }

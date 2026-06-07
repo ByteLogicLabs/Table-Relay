@@ -37,7 +37,19 @@ const MAX_CONTEXT_BYTES: usize = 6_000;
 ///      treating the tool as something the user invokes. Wording here
 ///      carefully says "the tool is the deliverable" and "never preview SQL".
 ///   2. Model infers country/language from email domains. Explicit ban.
-pub fn system_prompt() -> &'static str {
+pub fn system_prompt(provider: &str, model: &str) -> String {
+    // Identity line: tells the model who it is and what's driving it. Falls back
+    // gracefully when model is empty (e.g. opencode using its configured default).
+    let model_part = if model.trim().is_empty() { "its default model" } else { model };
+    let identity = format!(
+        "You are Table Relay Agent with provider {provider} and model {model_part}.\n\n"
+    );
+    identity + SYSTEM_PROMPT_BODY
+}
+
+/// The static rules body, identity-independent. Prefixed with the dynamic
+/// identity line in [`system_prompt`].
+const SYSTEM_PROMPT_BODY: &str =
     "You are a SQL assistant embedded in a live database client.\n\n\
      Always respond in English by default, regardless of the language the user's \
      greeting or message appears to be in. Only switch languages if the user \
@@ -96,8 +108,7 @@ pub fn system_prompt() -> &'static str {
      (country, locale, phone, address, language), and if unsure, sample a few rows with \
      `call_sql` (SELECT ... LIMIT 10) before writing a filter.\n\
      - If no obvious column exists for the user's question, tell them what columns you \
-     see and ask which one to filter on — don't make up a heuristic."
-}
+     see and ask which one to filter on — don't make up a heuristic.";
 /// Max tables we try to fully describe when the schema is large. Every
 /// table beyond this is listed by name only; the model can ask for more
 /// via `describe_table` once tool use is wired.

@@ -82,7 +82,11 @@ pub(super) async fn run_tool_loop(
             let Some(session) = guard.as_ref() else {
                 return Err(AiError::NoActiveSession);
             };
-            with_system_prompt(&session.messages)
+            with_system_prompt(
+                &session.messages,
+                session.provider_kind.as_str(),
+                &session.model,
+            )
         };
 
         let turn = provider
@@ -182,7 +186,7 @@ pub(super) async fn run_tool_loop(
                 // Remember successful shape calls so the next identical one is
                 // short-circuited above. Errors aren't cached — a retry might
                 // legitimately succeed.
-                if is_shape_tool(&tc.name) && !r.content.contains("\"error\"") {
+                if is_shape_tool(&tc.name) && !r.is_error {
                     shape_calls_seen.insert(sig.clone());
                 }
                 r
@@ -224,7 +228,7 @@ pub(super) async fn run_tool_loop(
             // MAX_REPEAT_CALLS, stop and emit a readable message so the UI's
             // "Thinking…" bubble resolves instead of spinning to the cap.
             // (`sig` was computed above for the shape-tool short-circuit.)
-            let errored = result.content.contains("\"error\"");
+            let errored = result.is_error;
             if last_call_sig.as_deref() == Some(sig.as_str()) {
                 repeat_calls += 1;
             } else {
@@ -329,11 +333,15 @@ pub(super) async fn run_tool_loop(
 /// re-injecting it on every turn via this helper keeps the stored
 /// transcript clean (no ~1KB of rules per user turn in the chat log) and
 /// always ships the latest rules to the model even if we tweak them.
-pub(super) fn with_system_prompt(history: &[ChatMessage]) -> Vec<ChatMessage> {
+pub(super) fn with_system_prompt(
+    history: &[ChatMessage],
+    provider: &str,
+    model: &str,
+) -> Vec<ChatMessage> {
     let mut out = Vec::with_capacity(history.len() + 2);
     out.push(ChatMessage::text(
         ChatRole::System,
-        crate::ai::context::system_prompt().to_string(),
+        crate::ai::context::system_prompt(provider, model),
     ));
     out.extend(repair_orphan_tool_calls(history));
     out

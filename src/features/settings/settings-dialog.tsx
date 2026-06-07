@@ -104,6 +104,9 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
   const [modelCache,  setModelCache]    = useState<Record<string, string[]>>({});
   const [modelLoading, setModelLoading] = useState(false);
   const [modelError,  setModelError]    = useState<string | null>(null);
+  // CLI-provider availability: resolved binary path, or null when not found,
+  // or undefined while checking. Keyed implicitly by the current form.kind.
+  const [cliPath, setCliPath] = useState<string | null | undefined>(undefined);
 
   // Load credentials when dialog opens
   useEffect(() => {
@@ -438,6 +441,20 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
     return () => clearTimeout(handle);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [canValidate, form.kind, form.apiKey, form.baseUrl]);
+
+  // CLI providers: check the binary is installed when this provider is selected.
+  useEffect(() => {
+    if (aiMode !== 'form' || !formMeta.requiresLocalCli) {
+      setCliPath(undefined);
+      return;
+    }
+    let cancelled = false;
+    setCliPath(undefined);
+    void ai.cliAvailable(form.kind).then((path) => {
+      if (!cancelled) setCliPath(path);
+    }).catch(() => { if (!cancelled) setCliPath(null); });
+    return () => { cancelled = true; };
+  }, [aiMode, form.kind, formMeta.requiresLocalCli]);
 
   const validationStatus: 'idle' | 'validating' | 'valid' | 'invalid' = (() => {
     if (!canValidate) return 'idle';
@@ -792,6 +809,30 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                         className="h-8 text-xs"
                       />
                     </div>
+
+                    {/* CLI provider availability check */}
+                    {meta.requiresLocalCli && (
+                      <div className="space-y-1.5">
+                        <Label className="text-xs">Local CLI</Label>
+                        {cliPath === undefined ? (
+                          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground rounded-md border border-border/60 bg-muted/20 px-2.5 py-2">
+                            <Loader2 className="w-3 h-3 animate-spin" /> Checking for <code className="font-mono">{meta.cliBinary}</code>…
+                          </div>
+                        ) : cliPath ? (
+                          <div className="flex items-start gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400 rounded-md border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-2">
+                            <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-px" />
+                            <span className="min-w-0">Found <code className="font-mono break-all">{cliPath}</code></span>
+                          </div>
+                        ) : (
+                          <div className="flex items-start gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-2">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                            <span className="min-w-0">
+                              <code className="font-mono">{meta.cliBinary}</code> not found on PATH. Install it and run it once to log in — billing/auth stays under your own CLI account.
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* Base URL (openai_compatible only) */}
                     {meta.needsBaseUrl && (

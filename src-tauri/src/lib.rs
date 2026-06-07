@@ -19,6 +19,18 @@ use crate::db::registry::Registry;
 use crate::db::subscriptions::SubscriptionRegistry;
 use crate::store::Store;
 
+/// Whether this process was launched as the MCP-server subcommand by one of the
+/// wrapped CLIs. Checked in `main` before Tauri starts.
+pub fn is_mcp_subcommand(args: &[String]) -> bool {
+    crate::ai::mcp_stdio::is_mcp_subcommand(args)
+}
+
+/// Run the stdio↔TCP MCP relay to completion (no GUI). See
+/// [`crate::ai::mcp_stdio`].
+pub fn run_mcp_server(args: &[String]) -> std::process::ExitCode {
+    crate::ai::mcp_stdio::run(args)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Forward adapter-api log lines into the host log pipeline so adapter
@@ -63,6 +75,11 @@ pub fn run() {
             app.manage(Arc::new(DownloadRegistry::default()));
             app.manage(Arc::new(ApprovalRegistry::default()));
             app.manage(Arc::new(AutoApprovals::default()));
+            // MCP bridge slot — None until the first CLI session lazily binds the
+            // loopback server that exposes DB tools to the wrapped coding CLIs.
+            let mcp_slot: crate::ai::mcp_bridge::McpBridgeSlot =
+                Arc::new(RwLock::new(None));
+            app.manage(mcp_slot);
 
             // Native menu bar. The File submenu adds Import SQL + Export
             // entries that emit webview events the frontend listens to.
@@ -225,6 +242,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            // Frontend → log bridge (writes fe:<tag> lines into logs/app.log)
+            crate::log::frontend_log,
             // Security / encrypted app store
             commands::security::security_status,
             commands::security::security_remove_backup,
@@ -299,6 +318,7 @@ pub fn run() {
             commands::ai::ai_end,
             commands::ai::ai_new_chat,
             commands::ai::ai_list_models,
+            commands::ai::ai_cli_available,
             commands::ai::ai_list_local_models,
             commands::ai::ai_download_model,
             commands::ai::ai_cancel_download,
@@ -306,6 +326,7 @@ pub fn run() {
             commands::ai::ai_check_llama_server,
             commands::ai::ai_chat_send,
             commands::ai::ai_chat_stop,
+            commands::ai::ai_restore_messages,
             commands::ai::ai_approve_tool_call,
             commands::ai::ai_get_auto_approvals,
             commands::ai::ai_set_auto_approvals,

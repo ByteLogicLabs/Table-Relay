@@ -34,7 +34,7 @@ rusqlite = { version = "0.31", features = ["bundled", "serialize"] }
 rusqlite_migration = "1"
 
 # Async runtime + errors (used by M0 auto-lock + every milestone after)
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "net", "fs"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "process", "io-util", "io-std", "net", "fs"] }
 thiserror = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }

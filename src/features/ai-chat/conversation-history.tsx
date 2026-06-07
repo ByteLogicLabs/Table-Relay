@@ -13,7 +13,7 @@ import {
 import { DestructiveConfirmDialog } from '../../components/destructive-confirm-dialog';
 import { useMultiSelection } from '../../hooks/use-multi-selection';
 import { getClickIntent, getKeyIntent } from '../../lib/click-intent';
-import { type Conversation } from '../../lib/ai';
+import { type Conversation, errorMessage } from '../../lib/ai';
 import { listConversations, loadConversation, deleteConversation } from '../../state/ai';
 
 interface Props {
@@ -59,7 +59,7 @@ export function ConversationHistory({ onSelect }: Props) {
     } catch (e) {
       // e.g. no credentials to start a session with. Keep the overlay open and
       // surface why instead of silently doing nothing.
-      toast.error(e instanceof Error ? e.message : String(e));
+      toast.error(errorMessage(e));
     }
   }, [onSelect]);
 
