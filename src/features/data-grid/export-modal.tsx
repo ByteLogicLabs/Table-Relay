@@ -414,36 +414,34 @@ export default function ExportModal({
               </div>
             </div>
 
-            {/* Column header row. Horizontal padding matches the rows'
-                effective inset (container p-1.5 = 6px + row px-2 = 8px → 14px).
-                The scroll container below uses `scrollbar-gutter: stable` so its
-                content width never changes when the scrollbar appears — keeping
-                these header checks aligned over the row checks. */}
-            <div
-              className="px-3.5 py-2 border-b border-border/60 grid items-end gap-1 text-[10px] uppercase tracking-wide text-muted-foreground/80 shrink-0"
-              style={{ gridTemplateColumns: gridTemplate }}
-            >
-              <span className="min-w-0 pb-1.5">Name</span>
-              {visibleColumns.map((col) => (
-                <HeaderCheck
-                  key={col}
-                  label={columnMeta[col]}
-                  checked={columnChecked(col)}
-                  onChange={(checked) => toggleColumn(col, checked)}
-                  disabled={col === "update" && !supportsUpdateIfExists}
-                  title={
-                    col === "update" && !supportsUpdateIfExists
-                      ? "Update if exists is not supported by this adapter."
-                      : `Toggle ${columnMeta[col]} for all tables — ${OPTION_HELP[col]}`
-                  }
-                />
-              ))}
-            </div>
+            {/* Header + rows share ONE scroll container so they sit in the exact
+                same content box — the only reliable way to keep the column
+                checkboxes aligned (a separate, non-scrolling header drifts by the
+                scrollbar width). The header is sticky so it stays visible. Both
+                use the same `gridTemplate` and the same `px-3.5` inset. */}
+            <div className="flex-1 min-h-0 overflow-auto">
+              <div
+                className="sticky top-0 z-10 bg-popover px-3.5 py-2 border-b border-border/60 grid items-end gap-1 text-[10px] uppercase tracking-wide text-muted-foreground/80"
+                style={{ gridTemplateColumns: gridTemplate }}
+              >
+                <span className="min-w-0 pb-1.5">Name</span>
+                {visibleColumns.map((col) => (
+                  <HeaderCheck
+                    key={col}
+                    label={columnMeta[col]}
+                    checked={columnChecked(col)}
+                    onChange={(checked) => toggleColumn(col, checked)}
+                    disabled={col === "update" && !supportsUpdateIfExists}
+                    title={
+                      col === "update" && !supportsUpdateIfExists
+                        ? "Update if exists is not supported by this adapter."
+                        : `Toggle ${columnMeta[col]} for all tables — ${OPTION_HELP[col]}`
+                    }
+                  />
+                ))}
+              </div>
 
-            {/* Table rows — scrolls within the bounded column. `scrollbar-gutter:
-                stable` reserves the scrollbar space so row checks stay aligned
-                under the header checks whether or not the list overflows. */}
-            <div className="flex-1 min-h-0 overflow-auto p-1.5 [scrollbar-gutter:stable]">
+              <div className="p-1.5">
               {selectableTables.length === 0 ? (
                 <div className="px-3 py-10 text-center text-sm text-muted-foreground">
                   No tables available in this database.
@@ -495,6 +493,7 @@ export default function ExportModal({
                   );
                 })
               )}
+              </div>
             </div>
           </div>
         </div>
