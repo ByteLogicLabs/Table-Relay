@@ -699,8 +699,10 @@ export default function ImportSqlDialog({
       open={progress !== null}
       title="Import Data"
       state={progress}
+      // SQL runs as a single server-side call — there's nothing to interrupt, so
+      // don't show a Cancel that would do nothing. Row imports cancel cleanly.
+      cancellable={isRowImport}
       onCancel={() => {
-        // Only the row-insert loop checks this; SQL runs server-side as one call.
         cancelRef.current = true;
       }}
       onClose={() => {

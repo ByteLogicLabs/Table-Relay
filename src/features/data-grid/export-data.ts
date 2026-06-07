@@ -138,6 +138,7 @@ export async function runExport(args: RunExportArgs): Promise<number> {
       await onPage(cols, batch, pageNumber === 1);
       fetched += batch.length;
       onProgress?.({ rows: fetched, total, table: targetTable });
+      if (cancelRef.current) return; // stop before fetching the next page
       if (batch.length < pageSize) break;
       if (total !== null && fetched >= total) break;
       pageNumber += 1;
@@ -160,6 +161,7 @@ export async function runExport(args: RunExportArgs): Promise<number> {
           if (config.includeHeader) await writer.write(header + "\n");
         }
         for (const row of rows) {
+          if (cancelRef.current) return;
           await writer.write(cols.map((c) => csvCell(row[c])).join(",") + "\n");
           await writer.maybeRollover();
         }
@@ -196,6 +198,7 @@ export async function runExport(args: RunExportArgs): Promise<number> {
         await openArray();
         await streamRowsForExport(target.schema, target.table, async (cols, rows) => {
           for (const row of rows) {
+            if (cancelRef.current) return;
             const obj: Record<string, unknown> = {};
             cols.forEach((c) => {
               obj[c] = row[c] ?? null;
@@ -243,6 +246,7 @@ export async function runExport(args: RunExportArgs): Promise<number> {
           ? await ensureTableStructure(connectionId, target.schema, target.table)
           : null;
         await streamRowsForExport(target.schema, target.table, async (cols, rows) => {
+          if (cancelRef.current) return;
           const sql = buildInsertSql(qualified, cols, rows, target.updateIfExists ? structure : null);
           if (sql) await writer.write(sql + "\n");
           await writer.maybeRollover();

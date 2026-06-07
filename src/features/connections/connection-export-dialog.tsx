@@ -90,7 +90,11 @@ export default function ConnectionExportDialog({
           const tableFrac = tableTotal ? Math.min(1, rows / tableTotal) : 0;
           const fraction = Math.min(1, (tableIndex - 1 + tableFrac) / total);
           update({
-            step: `Exporting ${table} (${tableIndex}/${total})`,
+            // Once cancel is requested, keep the "Cancelling…" message instead of
+            // overwriting it with ongoing per-page progress.
+            step: cancelRef.current
+              ? 'Cancelling… (finishing current page)'
+              : `Exporting ${table} (${tableIndex}/${total})`,
             fraction,
             detail: tableTotal
               ? `${rows.toLocaleString()} / ${tableTotal.toLocaleString()} rows`
@@ -138,6 +142,13 @@ export default function ConnectionExportDialog({
         state={progress}
         onCancel={() => {
           cancelRef.current = true;
+          // Immediate feedback — the loop stops at the next row/page boundary,
+          // which can lag a moment behind a slow in-flight query.
+          setProgress((p) =>
+            p && p.phase === 'running'
+              ? { ...p, step: 'Cancelling… (finishing current page)' }
+              : p,
+          );
         }}
         onClose={() => {
           if (progressRunning) return;

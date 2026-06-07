@@ -35,12 +35,16 @@ export default function ProgressDialog({
   state,
   onCancel,
   onClose,
+  /** When false, the running phase shows no Cancel button (e.g. a single
+   *  server-side call that can't be interrupted). Defaults to true. */
+  cancellable = true,
 }: {
   open: boolean;
   title: string;
   state: ProgressState | null;
   onCancel: () => void;
   onClose: () => void;
+  cancellable?: boolean;
 }) {
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -125,9 +129,15 @@ export default function ProgressDialog({
 
           <div className="flex justify-end gap-2 pt-1">
             {running ? (
-              <Button variant="outline" size="sm" onClick={onCancel}>
-                <Ban className="w-3.5 h-3.5 mr-1.5" /> Cancel
-              </Button>
+              cancellable ? (
+                <Button variant="outline" size="sm" onClick={onCancel}>
+                  <Ban className="w-3.5 h-3.5 mr-1.5" /> Cancel
+                </Button>
+              ) : (
+                <span className="text-[11px] text-muted-foreground self-center">
+                  This step can’t be cancelled once started.
+                </span>
+              )
             ) : (
               <Button size="sm" onClick={onClose}>
                 Close
