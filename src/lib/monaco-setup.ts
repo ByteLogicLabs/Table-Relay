@@ -19,6 +19,43 @@ self.MonacoEnvironment = {
 // Use the locally bundled monaco rather than the default CDN loader.
 loader.config({ monaco });
 
+// Eagerly register the SQL Monarch tokenizer.
+//
+// Monaco's basic-languages register SQL lazily: the tokenizer chunk
+// (`basic-languages/sql/sql.js`) is only fetched via a dynamic `import()` when
+// the language is first "encountered". In the Tauri webview that lazy load
+// raced/failed inconsistently — the result was partial highlighting (some
+// keywords coloured, others like JOIN left as plain identifiers). Importing the
+// tokenizer eagerly and registering it ourselves makes SQL highlighting
+// deterministic from first paint. We register against `sql` (the language the
+// SQL adapters use) so every keyword colours correctly.
+import { conf as sqlConf, language as sqlLanguage } from 'monaco-editor/esm/vs/basic-languages/sql/sql.js';
+
+if (!monaco.languages.getLanguages().some(l => l.id === 'sql')) {
+  monaco.languages.register({ id: 'sql', extensions: ['.sql'], aliases: ['SQL'] });
+}
+monaco.languages.setLanguageConfiguration('sql', sqlConf);
+
+// Monaco's SQL grammar puts word-operators (JOIN, AND, OR, IN, LIKE, NOT, IS,
+// UNION, INNER, LEFT, …) in the `operators` list, which the tokenizer checks
+// BEFORE `keywords` — so they render as `operator` (grey in our themes) instead
+// of `keyword` (pink), the cause of "JOIN isn't highlighted like FROM". Users
+// expect these to look like keywords, so we move every word-operator (the
+// all-letters entries) out of `operators` and into `keywords`. Symbol operators
+// (=, +, <, …) stay in `operators` so they keep their distinct colour.
+const sqlLang = sqlLanguage as unknown as {
+  operators?: string[];
+  keywords?: string[];
+};
+if (Array.isArray(sqlLang.operators) && Array.isArray(sqlLang.keywords)) {
+  const wordOps = sqlLang.operators.filter(op => /^[A-Za-z][A-Za-z ]*$/.test(op));
+  const symbolOps = sqlLang.operators.filter(op => !/^[A-Za-z][A-Za-z ]*$/.test(op));
+  sqlLang.operators = symbolOps;
+  // Dedupe — some words already appear in keywords.
+  sqlLang.keywords = Array.from(new Set([...sqlLang.keywords, ...wordOps]));
+}
+monaco.languages.setMonarchTokensProvider('sql', sqlLanguage);
+
 // Query editor Mongo mode: dedicated language id to avoid JavaScript/DOM
 // global suggestions leaking into DB command autocomplete.
 if (!monaco.languages.getLanguages().some(l => l.id === 'mongo')) {

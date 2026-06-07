@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
 import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Zap, Radio, Loader2 } from 'lucide-react';
-import { toast } from 'sonner';
+import { copyText } from '../../lib/clipboard';
 import { Button } from '../../components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '../../components/ui/context-menu';
 import DataGrid from '../data-grid/data-grid';
@@ -320,8 +320,7 @@ export default function TabsShell({
                 <ContextMenuSeparator />
                 <ContextMenuItem
                   onClick={() => {
-                    void navigator.clipboard.writeText(tab.title);
-                    toast.success('Title copied');
+                    void copyText(tab.title, 'Title copied');
                   }}
                 >
                   Copy Title
@@ -388,37 +387,60 @@ export default function TabsShell({
               </div>
             );
           })}
-          {activeTab?.type === 'structure' && connection && (
-            <SchemaView
-              tableName={activeTab.table!}
-              connection={connection}
-              schema={activeTab.schema}
-              isNew={activeTab.isNew}
-              onDirtyChange={(d) => onTabDirtyChange?.(activeTab.id, d)}
-              onTableCreated={(savedName) => onTableCreated?.(activeTab.id, savedName)}
-            />
-          )}
-          {activeTab?.type === 'query' && connection && (
-            <SqlEditor
-              tabId={activeTab.id}
-              // Keyed by tab id only — switching tabs still remounts, but
-              // same-tab AI writes update the Monaco model in place via an
-              // internal effect (no flicker, undo stack preserved).
-              key={activeTab.id}
-              initialQuery={activeTab.query}
-              connection={connection}
-              defaultSchema={tabDefaultSchema}
-              onQueryChange={(q) => onTabQueryChange?.(activeTab.id, q)}
-              onLogQuery={(statement, opts) => onAppendQueryLog({
-                connectionId: connection.id,
-                statement,
-                source: opts?.source ?? 'editor',
-                durationMs: opts?.durationMs,
-                status: opts?.status ?? 'ok',
-                message: opts?.message,
-              })}
-            />
-          )}
+          {/*
+            Query / structure / routine / trigger editor tabs stay mounted
+            across switches — only the active one is visible. Monaco editors are
+            expensive to build (worker setup + tokenizer), so unmounting on every
+            switch caused tab-switch lag and dropped cursor/scroll/undo state.
+            Keeping them mounted (hidden) makes switching instant. Each renders
+            against its own tab's connection so a tab on another connection still
+            shows correctly. ERD stays conditional below (heavy graph, not Monaco).
+          */}
+          {tabs.filter(t => t.type === 'structure').map(tab => {
+            const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
+            if (!tabConnection) return null;
+            const isActive = tab.id === activeTabId;
+            return (
+              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+                <SchemaView
+                  tableName={tab.table!}
+                  connection={tabConnection}
+                  schema={tab.schema}
+                  isNew={tab.isNew}
+                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
+                  onTableCreated={(savedName) => onTableCreated?.(tab.id, savedName)}
+                />
+              </div>
+            );
+          })}
+          {tabs.filter(t => t.type === 'query').map(tab => {
+            const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
+            if (!tabConnection) return null;
+            const isActive = tab.id === activeTabId;
+            const tabSchema = tab.schema
+              ?? rail.tiles.find(t2 => t2.serverId === tab.connectionId)?.databaseName
+              ?? tabConnection.database
+              ?? undefined;
+            return (
+              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+                <SqlEditor
+                  tabId={tab.id}
+                  initialQuery={tab.query}
+                  connection={tabConnection}
+                  defaultSchema={tabSchema}
+                  onQueryChange={(q) => onTabQueryChange?.(tab.id, q)}
+                  onLogQuery={(statement, opts) => onAppendQueryLog({
+                    connectionId: tabConnection.id,
+                    statement,
+                    source: opts?.source ?? 'editor',
+                    durationMs: opts?.durationMs,
+                    status: opts?.status ?? 'ok',
+                    message: opts?.message,
+                  })}
+                />
+              </div>
+            );
+          })}
           {activeTab?.type === 'erd' && connection && (
             <DiagramView
               scope={activeTab.table ? 'table' : 'schema'}
@@ -427,44 +449,58 @@ export default function TabsShell({
               tableName={activeTab.table}
             />
           )}
-          {activeTab?.type === 'routine' && connection && activeTab.routine && (
-            <RoutineView
-              connection={connection}
-              schema={activeTab.routine.schema}
-              name={activeTab.routine.name}
-              kind={activeTab.routine.kind}
-              isNew={activeTab.isNew}
-              onDirtyChange={(d) => onTabDirtyChange?.(activeTab.id, d)}
-              onLogQuery={(statement, opts) => onAppendQueryLog({
-                connectionId: connection.id,
-                statement,
-                source: opts?.source ?? 'system',
-                durationMs: opts?.durationMs,
-                status: opts?.status ?? 'ok',
-                message: opts?.message,
-              })}
-            />
-          )}
-          {activeTab?.type === 'trigger' && connection && activeTab.trigger && (
-            <TriggerView
-              connection={connection}
-              schema={activeTab.trigger.schema}
-              name={activeTab.trigger.name}
-              isNew={activeTab.trigger.isNew}
-              initialSql={activeTab.trigger.initialSql}
-              draft={activeTab.trigger.draft}
-              onDraftChange={(d) => onTabTriggerDraftChange?.(activeTab.id, d)}
-              onDirtyChange={(d) => onTabDirtyChange?.(activeTab.id, d)}
-              onLogQuery={(statement, opts) => onAppendQueryLog({
-                connectionId: connection.id,
-                statement,
-                source: opts?.source ?? 'system',
-                durationMs: opts?.durationMs,
-                status: opts?.status ?? 'ok',
-                message: opts?.message,
-              })}
-            />
-          )}
+          {tabs.filter(t => t.type === 'routine' && t.routine).map(tab => {
+            const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
+            if (!tabConnection || !tab.routine) return null;
+            const isActive = tab.id === activeTabId;
+            return (
+              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+                <RoutineView
+                  connection={tabConnection}
+                  schema={tab.routine.schema}
+                  name={tab.routine.name}
+                  kind={tab.routine.kind}
+                  isNew={tab.isNew}
+                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
+                  onLogQuery={(statement, opts) => onAppendQueryLog({
+                    connectionId: tabConnection.id,
+                    statement,
+                    source: opts?.source ?? 'system',
+                    durationMs: opts?.durationMs,
+                    status: opts?.status ?? 'ok',
+                    message: opts?.message,
+                  })}
+                />
+              </div>
+            );
+          })}
+          {tabs.filter(t => t.type === 'trigger' && t.trigger).map(tab => {
+            const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
+            if (!tabConnection || !tab.trigger) return null;
+            const isActive = tab.id === activeTabId;
+            return (
+              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+                <TriggerView
+                  connection={tabConnection}
+                  schema={tab.trigger.schema}
+                  name={tab.trigger.name}
+                  isNew={tab.trigger.isNew}
+                  initialSql={tab.trigger.initialSql}
+                  draft={tab.trigger.draft}
+                  onDraftChange={(d) => onTabTriggerDraftChange?.(tab.id, d)}
+                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
+                  onLogQuery={(statement, opts) => onAppendQueryLog({
+                    connectionId: tabConnection.id,
+                    statement,
+                    source: opts?.source ?? 'system',
+                    durationMs: opts?.durationMs,
+                    status: opts?.status ?? 'ok',
+                    message: opts?.message,
+                  })}
+                />
+              </div>
+            );
+          })}
           {/*
             Realtime tabs stay mounted across tab switches (same rationale
             as data tabs above): unmounting would cancel the subscription

@@ -5,18 +5,17 @@ import { approveToolCall, type ChatMessage as StoreChatMessage } from '../../sta
 import { type QueryTier } from '../../lib/ai';
 import { markdownClass, renderMarkdown } from '../../lib/markdown';
 import { highlight, tokenClass } from '../../lib/highlight';
-import { toast } from 'sonner';
+import { copyText } from '../../lib/clipboard';
 import { formatMessageTime, prettyToolName, extractErrorString, truncate } from './chat-utils';
 
 export function CopyButton({ text, className = '' }: { text: string; className?: string }) {
   const [copied, setCopied] = useState(false);
   const onCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(text);
+    // copyText surfaces its own error toast on failure; only flip the button to
+    // "Copied" when the write actually succeeded.
+    if (await copyText(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    } catch {
-      toast.error('Copy failed');
     }
   };
   return (
@@ -90,12 +89,11 @@ export function AssistantOrUserBubble({ message: m }: { message: StoreChatMessag
               const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-md-copy]');
               if (!btn) return;
               const text = btn.dataset.mdCopy ?? '';
-              try {
-                await navigator.clipboard.writeText(text);
+              if (await copyText(text)) {
                 const orig = btn.textContent;
                 btn.textContent = 'Copied';
                 setTimeout(() => { btn.textContent = orig; }, 1500);
-              } catch { toast.error('Copy failed'); }
+              }
             }}
             dangerouslySetInnerHTML={{ __html: html }}
           />

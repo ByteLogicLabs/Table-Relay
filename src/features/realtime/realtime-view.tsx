@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Play, Square, Trash2, Copy, Radio, Send, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
+import { copyText } from '../../lib/clipboard';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Checkbox } from '../../components/ui/checkbox';
@@ -236,8 +237,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
     const text = typeof event.payload === 'string'
       ? event.payload
       : JSON.stringify(event.payload);
-    void navigator.clipboard.writeText(text);
-    toast.success('Payload copied');
+    void copyText(text, 'Payload copied');
   };
 
   const countLabel = useMemo(

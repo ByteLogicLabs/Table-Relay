@@ -1,6 +1,7 @@
 import { memo, useEffect } from "react";
 import { validateEditorValue, type EditorKind } from "./editor-kinds";
 import { type NullDisplay } from "../../lib/settings-store";
+import { copyText } from "../../lib/clipboard";
 import { CellEditor } from "./cell-editors";
 import {
   type GridRow,
@@ -298,7 +299,7 @@ export function SharedContextMenu({
             className={itemCls}
             onClick={() =>
               act(() => {
-                void navigator.clipboard.writeText(cellValue);
+                void copyText(cellValue, "Value copied");
               })
             }
           >
@@ -315,9 +316,7 @@ export function SharedContextMenu({
             className={itemCls}
             onClick={() =>
               act(() => {
-                void navigator.clipboard.writeText(
-                  JSON.stringify(row, null, 2),
-                );
+                void copyText(JSON.stringify(row, null, 2), "Row copied as JSON");
               })
             }
           >
@@ -350,9 +349,7 @@ export function SharedContextMenu({
             className={itemCls}
             onClick={() =>
               act(() => {
-                void navigator.clipboard.writeText(
-                  JSON.stringify(row, null, 2),
-                );
+                void copyText(JSON.stringify(row, null, 2), "Row copied as JSON");
               })
             }
           >

@@ -66,7 +66,7 @@ export function formFromProfile(p: CredentialProfile): ProfileForm {
   return { name: p.name, kind: p.kind, apiKey: p.apiKey ?? '', model: p.model, baseUrl: p.baseUrl ?? '', showKey: false };
 }
 
-export type Section = 'appearance' | 'general' | 'editor' | 'ai';
+export type Section = 'appearance' | 'general' | 'editor' | 'ai' | 'data';
 export type AiMode  = 'list' | 'form';
 
 export const ROW_LIMIT_OPTIONS = [50, 100, 250, 500, 1000];

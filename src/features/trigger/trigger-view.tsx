@@ -8,6 +8,8 @@ import { db, isDbError, type TriggerDefinition } from '../../lib/db';
 import { formatSql, languageForDialect } from '../../lib/format-sql';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { dialectFromManifest } from '../data-grid/editor-kinds';
+import { useSettings } from '../../lib/settings-store';
+import { pickMonacoTheme, ddlEditorOptions } from '../sql-editor/sql-editor-utils';
 
 interface LogQueryOptions {
   source?: 'editor' | 'grid' | 'system';
@@ -130,9 +132,22 @@ export default function TriggerView({
   connection, schema, name, isNew, initialSql, draft: persistedDraft, onDraftChange, onDirtyChange, onLogQuery,
 }: TriggerViewProps) {
   const manifests = useAdapterManifests();
-  const dialect = dialectFromManifest(
-    resolveManifest(manifests, connection.driver)?.capabilities ?? null,
-  );
+  const settings = useSettings();
+  const activeManifest = resolveManifest(manifests, connection.driver);
+  const dialect = dialectFromManifest(activeManifest?.capabilities ?? null);
+  // Use the manifest's Monaco language id (pgsql / mysql / …) for accurate
+  // highlighting, matching the query editor; fall back to generic SQL.
+  const editorLanguage = activeManifest?.queryEditor?.language?.trim() || 'sql';
+
+  // Follow the app's active Monaco theme (same as the query editor) instead of
+  // hardcoding vs-dark — keeps the DDL editor consistent in light/dark/monokai.
+  const [theme, setTheme] = useState<string>(pickMonacoTheme);
+  useEffect(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => setTheme(pickMonacoTheme()));
+    observer.observe(root, { attributes: true, attributeFilter: ['class', 'data-theme'] });
+    return () => observer.disconnect();
+  }, []);
 
   // An AI-supplied DDL prefill means we don't fetch/scaffold — the buffer is
   // seeded from `initialSql` and the user reviews + saves.
@@ -384,17 +399,16 @@ export default function TriggerView({
       {/* Body editor — the entire CREATE TRIGGER statement lives here. */}
       <div className="flex-1 min-h-0">
         <Editor
-          defaultLanguage="sql"
+          language={editorLanguage}
           value={draft}
           onChange={v => setDraft(v ?? '')}
-          theme="vs-dark"
-          options={{
-            fontSize: 13,
-            minimap: { enabled: false },
-            scrollBeyondLastLine: false,
-            wordWrap: 'on',
-            automaticLayout: true,
-          }}
+          theme={theme}
+          options={ddlEditorOptions({
+            fontSize: settings.editorFontSize,
+            wordWrap: settings.editorWordWrap,
+            minimap: settings.editorMinimap,
+            tabSize: settings.editorTabSize,
+          })}
         />
       </div>
     </div>

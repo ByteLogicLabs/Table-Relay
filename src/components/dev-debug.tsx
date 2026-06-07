@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Bug, X, RefreshCw, Copy } from 'lucide-react';
 import { ScrollArea } from './ui/scroll-area';
-import { toast } from 'sonner';
+import { copyText } from '../lib/clipboard';
 import { useConnections } from '../state/connections';
 import { useRail } from '../state/rail';
 import { useDebugPage } from '../state/debug';
@@ -92,8 +92,7 @@ export default function DevDebug() {
             <button
               title="Copy all"
               onClick={() => {
-                void navigator.clipboard.writeText(debugText);
-                toast.success('Debug info copied');
+                void copyText(debugText, 'Debug info copied');
               }}
               className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
             >

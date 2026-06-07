@@ -1,8 +1,24 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X } from 'lucide-react';
+import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, FileDown, FileUp, Download } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
+import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
+import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { Button } from '../../components/ui/button';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '../../components/ui/dropdown-menu';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../../components/ui/select';
+import { serializeResult, defaultFileName, type ResultExportFormat } from './export-result';
 import { ConnectionProfile } from '../../types';
 import { db, isDbError, type StatementResult, type TableStructure } from '../../lib/db';
 import { analyzeSelect } from './analyze-select';
@@ -30,8 +46,13 @@ import {
   RUN_ALL_SHORTCUT,
   statementAtCursor,
   stripCodeComments,
+  EDITOR_FONT_FAMILY,
 } from './sql-editor-utils';
 import { VerticalResizeHandle } from './sql-editor-resize-handle';
+import { lintSql } from './sql-lint';
+import { pageableSelect, buildPagedSql } from './query-paging';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { copyText } from '../../lib/clipboard';
 
 interface LogQueryOptions {
   source?: 'editor' | 'grid' | 'system';
@@ -141,6 +162,20 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   // Results pane height — user-resizable via the drag handle on its top edge.
   const [resultsHeight, setResultsHeight] = useState(() => seededSnapshot?.resultsHeight ?? 260);
   const [theme, setTheme] = useState<string>(pickMonacoTheme);
+
+  // ── Auto-paging state ──────────────────────────────────────────────────────
+  // When the user runs a plain SELECT (no LIMIT of its own), we transparently
+  // wrap it with LIMIT/OFFSET and expose pager controls. `pagedStmt` holds the
+  // bare SELECT we're paging (null when the last run wasn't pageable, e.g. a
+  // non-SELECT, multi-statement run, or a query with its own LIMIT).
+  const [pagedStmt, setPagedStmt] = useState<string | null>(null);
+  const [page, setPage] = useState(0); // 0-based
+  // Page size seeds from the app's default row limit; the user can change it in
+  // the pager and it sticks for this editor session.
+  const [pageSize, setPageSize] = useState<number>(() => settings.defaultRowLimit || 100);
+  // Whether a next page likely exists — derived from the +1 sentinel row trick
+  // (we fetch pageSize+1 and trim the extra). Reset each run.
+  const [hasNextPage, setHasNextPage] = useState(false);
   const jsonResultEditorRef = useRef<MonacoEditorNs.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<Monaco | null>(null);
   const completionDisposerRef = useRef<IDisposable | null>(null);
@@ -261,6 +296,38 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     // new buffer without waiting for Monaco's change event round-trip.
     setQuery(next);
   }, [initialQuery]);
+
+  // Live offline syntax lint — squiggle obvious mistakes (misspelled keywords,
+  // unclosed quotes/parens) as the user types, without a DB round-trip. Runs on
+  // a short debounce so it doesn't fire on every keystroke, and writes Monaco
+  // markers onto the model (the source 'sql-lint' lets us own/replace them).
+  // Document stores are skipped inside lintSql (mongo grammar differs).
+  useEffect(() => {
+    const monaco = monacoRef.current;
+    const editor = editorRef.current;
+    if (!monaco || !editor) return;
+    const model = editor.getModel();
+    if (!model) return;
+    const t = setTimeout(() => {
+      const found = lintSql(query, language);
+      monaco.editor.setModelMarkers(
+        model,
+        'sql-lint',
+        found.map(mk => ({
+          startLineNumber: mk.startLineNumber,
+          startColumn: mk.startColumn,
+          endLineNumber: mk.endLineNumber,
+          endColumn: mk.endColumn,
+          message: mk.message,
+          severity: mk.severity === 'error'
+            ? monaco.MarkerSeverity.Error
+            : monaco.MarkerSeverity.Warning,
+        })),
+      );
+    }, 250);
+    return () => clearTimeout(t);
+    // editorReadyTick ensures we (re)lint once the editor finishes mounting.
+  }, [query, language, editorReadyTick]);
 
   useEffect(() => {
     if (activeResultIndex >= resultStatements.length) {
@@ -632,7 +699,15 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     collapseJsonSubtrees(jsonResultEditorRef.current);
   }, [resultViewMode, supportsJsonResultView, activeResultIndex, activeRowsAsJsonText, collapseJsonSubtrees]);
 
-  const executePayload = async (payload: string) => {
+  // Low-level run: executes exactly `sqlToRun` and streams results into state.
+  // When `pagedFetchSize` is given (the page's LIMIT, i.e. pageSize+1), the
+  // single result is trimmed to `pageSize` and `hasNextPage` is set from whether
+  // the sentinel row came back. `logSql` is what we surface in the query log
+  // (the user's original SQL, not the LIMIT-wrapped form).
+  const runSql = async (
+    sqlToRun: string,
+    opts: { pagedFetchSize?: number } = {},
+  ) => {
     runStartRef.current = performance.now();
     setRunElapsedMs(0);
     setIsExecuting(true);
@@ -641,14 +716,28 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     setActiveResultIndex(0);
     userPickedResultRef.current = false;
 
+    const paging = opts.pagedFetchSize != null;
     const collected: StatementResult[] = [];
+
+    // For a paged run, trim the +1 sentinel row off a result before it reaches
+    // the UI, and record whether it existed (→ there's a next page).
+    const finalizePaged = (s: StatementResult): StatementResult => {
+      if (!paging || s.error) return s;
+      const fetchSize = opts.pagedFetchSize!;
+      const over = s.rows.length >= fetchSize; // got the sentinel → more rows
+      setHasNextPage(over);
+      if (over) return { ...s, rows: s.rows.slice(0, fetchSize - 1) };
+      return s;
+    };
 
     try {
       const finalResult = await db.runQueryStream(
         connection.id,
-        payload,
+        sqlToRun,
         (s) => {
-          collected.push(s);
+          collected.push(finalizePaged(s));
+          // Log the ACTUAL executed SQL (including any auto-added LIMIT/OFFSET)
+          // so the query log is truthful — the user can see paging is applied.
           onLogQuery?.(s.sql, {
             source: 'editor',
             durationMs: s.durationMs,
@@ -656,8 +745,6 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             message: s.error ?? undefined,
           });
           setResultStatements([...collected]);
-          // Follow the newest result as it streams — unless the user has
-          // clicked a specific Execution tab, in which case respect their pick.
           if (!userPickedResultRef.current) {
             setActiveResultIndex(collected.length - 1);
           }
@@ -665,11 +752,9 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
         undefined,
         effectiveSchema,
       );
-      // Compatibility fallback for adapters that returned a final batch
-      // without streaming any intermediate rows.
       if (collected.length === 0 && finalResult.statements.length > 0) {
         for (const s of finalResult.statements) {
-          collected.push(s);
+          collected.push(finalizePaged(s));
           onLogQuery?.(s.sql, {
             source: 'editor',
             durationMs: s.durationMs,
@@ -683,15 +768,41 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
       setRunError(null);
     } catch (err) {
       const message = isDbError(err) ? err.message : String(err);
-      onLogQuery?.(payload, {
-        source: 'editor',
-        status: 'error',
-        message,
-      });
+      onLogQuery?.(sqlToRun, { source: 'editor', status: 'error', message });
       setRunError(message);
     } finally {
       setIsExecuting(false);
     }
+  };
+
+  // Run a specific page of the currently-paged statement.
+  const runPage = async (stmt: string, targetPage: number, size: number) => {
+    setPage(targetPage);
+    // size === 0 → "Unlimited": run the bare statement with no LIMIT/OFFSET and
+    // no sentinel-row trimming (fetch the whole result set).
+    if (size <= 0) {
+      setHasNextPage(false);
+      await runSql(stmt);
+      return;
+    }
+    await runSql(buildPagedSql(stmt, targetPage, size), {
+      pagedFetchSize: size + 1,
+    });
+  };
+
+  const executePayload = async (payload: string) => {
+    // Auto-paging: a plain SELECT with no LIMIT of its own gets wrapped with
+    // LIMIT/OFFSET and pager controls. Anything else (non-SELECT, multi-
+    // statement, user-supplied LIMIT) runs verbatim with paging off.
+    const pageable = pageableSelect(payload);
+    if (pageable) {
+      setPagedStmt(pageable);
+      await runPage(pageable, 0, pageSize);
+      return;
+    }
+    setPagedStmt(null);
+    setHasNextPage(false);
+    await runSql(payload);
   };
 
   const handleRun = async (statementOverride?: string) => {
@@ -743,6 +854,98 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   // Cmd/Ctrl+Shift+Enter runs everything.
   handleRunRef.current = () => { handleRunCurrent(); };
   handleRunAllRef.current = () => { void handleRun(); };
+
+  // Export the current editor buffer to a .sql file on disk. Mongo's editor
+  // holds JS-shaped queries, so we offer a .js default there. The native save
+  // dialog lets the user pick the location/name.
+  const handleExportQuery = async () => {
+    const body = query;
+    if (!body.trim()) {
+      toast.error('Nothing to export — the editor is empty');
+      return;
+    }
+    try {
+      const ext = isDocumentStore ? 'js' : 'sql';
+      const path = await saveDialog({
+        defaultPath: `query.${ext}`,
+        filters: isDocumentStore
+          ? [{ name: 'JavaScript', extensions: ['js'] }, { name: 'All files', extensions: ['*'] }]
+          : [{ name: 'SQL', extensions: ['sql'] }, { name: 'All files', extensions: ['*'] }],
+      });
+      if (!path) return; // user cancelled
+      await writeTextFile(path, body);
+      toast.success('Query exported');
+    } catch (err) {
+      toast.error(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // Import a query from a file into the editor. If the buffer already has
+  // content we append (separated by a blank line) rather than clobber the
+  // user's work; an empty buffer is replaced outright.
+  const handleImportQuery = async () => {
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: isDocumentStore
+          ? [{ name: 'Query', extensions: ['js', 'txt'] }, { name: 'All files', extensions: ['*'] }]
+          : [{ name: 'SQL', extensions: ['sql', 'txt'] }, { name: 'All files', extensions: ['*'] }],
+      });
+      if (!picked || Array.isArray(picked)) return; // cancelled
+      const text = await readTextFile(picked);
+      const editor = editorRef.current;
+      const model = editor?.getModel();
+      const current = model?.getValue() ?? query;
+      const next = current.trim() ? `${current.replace(/\s*$/, '')}\n\n${text}` : text;
+      if (editor && model) {
+        // executeEdits keeps the undo stack intact (vs setValue which wipes it).
+        editor.executeEdits('import-query', [
+          { range: model.getFullModelRange(), text: next, forceMoveMarkers: true },
+        ]);
+      }
+      setQuery(next);
+      toast.success('Query imported');
+    } catch (err) {
+      toast.error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  // Export the ACTIVE result (the currently-shown Execution tab) to a file in
+  // the chosen format. The result is already in memory, so we serialize the
+  // whole thing in one pass. SQL export targets the analysed single-table name
+  // when available; otherwise it falls back to a placeholder table name.
+  const handleExportResult = async (format: ResultExportFormat) => {
+    const res = activeResult;
+    if (!res || res.error || res.columns.length === 0) {
+      toast.error('No result rows to export');
+      return;
+    }
+    const tableName = queryAnalysis.editable ? queryAnalysis.table : undefined;
+    try {
+      const text = serializeResult(format, {
+        columns: res.columns.map(c => ({ name: c.name })),
+        rows: res.rows,
+        tableName,
+        dialect: activeManifest?.capabilities.sqlDialect,
+      });
+      const filterMap: Record<ResultExportFormat, { name: string; ext: string }> = {
+        csv: { name: 'CSV', ext: 'csv' },
+        json: { name: 'JSON', ext: 'json' },
+        sql: { name: 'SQL', ext: 'sql' },
+      };
+      const f = filterMap[format];
+      const path = await saveDialog({
+        defaultPath: defaultFileName(format, tableName),
+        filters: [{ name: f.name, extensions: [f.ext] }, { name: 'All files', extensions: ['*'] }],
+      });
+      if (!path) return; // cancelled
+      await writeTextFile(path, text);
+      toast.success(`Exported ${res.rows.length} row${res.rows.length === 1 ? '' : 's'} as ${format.toUpperCase()}`);
+    } catch (err) {
+      toast.error(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
 
   const handleFormat = () => {
     if (isDocumentStore) {
@@ -796,6 +999,26 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
           <AlignLeft className="w-4 h-4 mr-2" />
           {isDocumentStore ? 'Format JSON' : 'Format SQL'}
         </Button>
+        <div className="w-px h-4 bg-border mx-1" />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void handleImportQuery()}
+          title="Import a query from a file"
+        >
+          <FileUp className="w-4 h-4 mr-2" />
+          Import
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void handleExportQuery()}
+          disabled={!query.trim()}
+          title="Export the current query to a file"
+        >
+          <FileDown className="w-4 h-4 mr-2" />
+          Export
+        </Button>
         <div className="ml-auto" />
         <Button
           variant="ghost"
@@ -835,7 +1058,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
           onMount={handleEditorMount}
           options={{
             minimap: { enabled: settings.editorMinimap },
-            fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+            fontFamily: EDITOR_FONT_FAMILY,
             fontSize: settings.editorFontSize,
             lineHeight: 20,
             scrollBeyondLastLine: false,
@@ -845,7 +1068,13 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             automaticLayout: true,
             wordWrap: settings.editorWordWrap ? 'on' : 'off',
             padding: { top: 12, bottom: 12 },
-            fixedOverflowWidgets: true,
+            // fixedOverflowWidgets renders the suggest widget into document.body
+            // so it can overflow the editor. In the Tauri webview that detached
+            // node falls outside the editor's focus subtree, so Arrow Up/Down
+            // never reach the suggest list (you can't navigate it). Keeping the
+            // widget inside the editor's own overflow guard restores keyboard
+            // navigation; the editor fills its pane, so clipping isn't an issue.
+            fixedOverflowWidgets: false,
             scrollbar: {
               verticalScrollbarSize: 10,
               horizontalScrollbarSize: 10,
@@ -905,28 +1134,67 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                 </span>
               )}
             </div>
-            {!isExecuting && !runError && resultStatements.length > 0 && supportsJsonResultView && (
+            {/* View toggle + export only make sense when the active result has
+                actual tabular data. Statements that return no columns (UPDATE,
+                "executed successfully", errors) get no toolbar. */}
+            {!isExecuting && !runError && activeResult && !activeResult.error && activeResult.columns.length > 0 && (
               <div className="inline-flex items-center gap-1 shrink-0">
-                <Button
-                  variant={resultViewMode === 'table' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-6 px-2 text-[11px]"
-                  onClick={() => setResultViewMode('table')}
-                  title="Table view"
-                >
-                  <Table2 className="w-3.5 h-3.5 mr-1" />
-                  Table
-                </Button>
-                <Button
-                  variant={resultViewMode === 'json' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-6 px-2 text-[11px]"
-                  onClick={() => setResultViewMode('json')}
-                  title="JSON view"
-                >
-                  <Braces className="w-3.5 h-3.5 mr-1" />
-                  JSON
-                </Button>
+                {supportsJsonResultView && (
+                  <>
+                    <Button
+                      variant={resultViewMode === 'table' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-6 px-2 text-[11px]"
+                      onClick={() => setResultViewMode('table')}
+                      title="Table view"
+                    >
+                      <Table2 className="w-3.5 h-3.5 mr-1" />
+                      Table
+                    </Button>
+                    <Button
+                      variant={resultViewMode === 'json' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-6 px-2 text-[11px]"
+                      onClick={() => setResultViewMode('json')}
+                      title="JSON view"
+                    >
+                      <Braces className="w-3.5 h-3.5 mr-1" />
+                      JSON
+                    </Button>
+                    <span className="w-px h-4 bg-border mx-0.5" />
+                  </>
+                )}
+                {/* Export the active result to a file. SQL is offered only for
+                    SQL adapters — INSERTs into a document store make no sense. */}
+                <DropdownMenu>
+                  <DropdownMenuTrigger
+                    render={(props) => (
+                      <Button
+                        {...props}
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 px-2 text-[11px]"
+                        title="Export result to a file"
+                      >
+                        <Download className="w-3.5 h-3.5 mr-1" />
+                        Export
+                      </Button>
+                    )}
+                  />
+                  <DropdownMenuContent align="end" className="min-w-40">
+                    <DropdownMenuItem onClick={() => void handleExportResult('csv')}>
+                      Export as CSV
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => void handleExportResult('json')}>
+                      Export as JSON
+                    </DropdownMenuItem>
+                    {!isDocumentStore && (
+                      <DropdownMenuItem onClick={() => void handleExportResult('sql')}>
+                        Export as SQL (INSERT)
+                      </DropdownMenuItem>
+                    )}
+                  </DropdownMenuContent>
+                </DropdownMenu>
               </div>
             )}
           </div>
@@ -1100,7 +1368,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                         // tooltip explanation in the action bar.
                         readOnly: !resultIsEditable || jsonResultSaving,
                         minimap: { enabled: settings.editorMinimap },
-                        fontFamily: '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                        fontFamily: EDITOR_FONT_FAMILY,
                         fontSize: settings.editorFontSize,
                         lineHeight: 20,
                         scrollBeyondLastLine: false,
@@ -1120,13 +1388,8 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                     variant="secondary"
                     size="icon"
                     className="absolute bottom-3 right-3 z-10 h-8 w-8 rounded-full shadow-sm"
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(jsonResultEditorRef.current?.getValue() ?? activeRowsAsJsonText);
-                        toast.success('JSON copied');
-                      } catch (e) {
-                        toast.error(`Copy failed: ${e instanceof Error ? e.message : String(e)}`);
-                      }
+                    onClick={() => {
+                      void copyText(jsonResultEditorRef.current?.getValue() ?? activeRowsAsJsonText, 'JSON copied');
                     }}
                     title="Copy JSON"
                     aria-label="Copy JSON"
@@ -1138,9 +1401,24 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             }
             return (
               <div className="flex-1 min-h-0 flex flex-col">
+                {/* Read-only notice — a prominent banner explaining WHY the
+                    result can't be edited (no primary key, missing PK column in
+                    the SELECT list, expression columns, etc.). Without this the
+                    user just finds that double-click does nothing, with no clue
+                    why. Only shown when the query analysed as a single-table
+                    SELECT (so a hint is actionable) and there are no pending
+                    edits competing for the row. */}
+                {!resultIsEditable && editableReason && queryAnalysis.editable && pendingEditCount === 0 && (
+                  <div className="shrink-0 flex items-start gap-2 px-3 py-2 border-b border-amber-500/30 bg-amber-500/10 text-xs text-amber-700 dark:text-amber-400">
+                    <Lock className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="font-medium">Read-only result.</span>{' '}
+                      <span className="text-amber-700/90 dark:text-amber-400/90">{editableReason}</span>
+                    </div>
+                  </div>
+                )}
                 {/* Pending-edits action bar — surfaces only when there are
-                    unsaved cell edits to flush. The read-only reason now lives
-                    inline in the results header to save this vertical space. */}
+                    unsaved cell edits to flush. */}
                 {pendingEditCount > 0 && (
                   <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-border bg-background/40 text-xs">
                     <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -1231,9 +1509,13 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                             return (
                               <td
                                 key={ci}
-                                className={`p-0 border-r border-border font-mono text-[11px] align-top min-w-24 max-w-80 ${cellClass} ${cellEditable ? 'cursor-text' : ''}`}
+                                className={`relative p-0 border-r border-border font-mono text-[11px] align-top min-w-24 max-w-80 ${cellClass} cursor-text`}
                                 onDoubleClick={() => {
-                                  if (!cellEditable) return;
+                                  // Always open an input on double-click so the
+                                  // user can select + copy the value manually.
+                                  // Editable cells commit on Enter/blur;
+                                  // read-only cells open a read-only input (no
+                                  // commit, not marked edited) — see below.
                                   setActiveResultEdit({ rowIdx: ri, col: col.name, value: isEdited ? pendingValue : (v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)) });
                                 }}
                                 title={
@@ -1243,13 +1525,43 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                                   : isEdited ? `Was: ${baseText}` : displayText
                                 }
                               >
-                                {isCurrentlyEditing ? (
+                                {/* Always render the text div so the cell keeps
+                                    its natural width; the edit input overlays it
+                                    absolutely so opening it never re-lays-out the
+                                    column (the cause of the "cell moves" jump). */}
+                                <div className="block box-border px-2 py-1.5 leading-normal truncate selectable cursor-text">
+                                  {displayText}
+                                </div>
+                                {isCurrentlyEditing && (
                                   <input
                                     autoFocus
-                                    className={`w-full px-2 py-1.5 bg-background outline-none ring-1 ring-inset ${validationError ? 'ring-destructive' : 'ring-primary'} font-mono text-[11px]`}
+                                    readOnly={!cellEditable}
+                                    // Overlay the cell exactly. Absolute inset-0 so
+                                    // it covers the text without affecting layout.
+                                    // Read-only → neutral ring; editable →
+                                    // primary/destructive ring.
+                                    className={`absolute inset-0 block box-border w-full h-full m-0 px-2 py-1.5 bg-background outline-none ring-1 ring-inset font-mono text-[11px] leading-normal ${
+                                      !cellEditable ? 'ring-border' : validationError ? 'ring-destructive' : 'ring-primary'
+                                    }`}
                                     value={activeResultEdit.value}
-                                    onChange={(e) => setActiveResultEdit({ ...activeResultEdit, value: e.target.value })}
+                                    // Select the whole value on open so Cmd/Ctrl+C
+                                    // copies it immediately.
+                                    onFocus={(e) => e.currentTarget.select()}
+                                    onChange={(e) => {
+                                      // Ignore edits on read-only cells.
+                                      if (!cellEditable) return;
+                                      setActiveResultEdit({ ...activeResultEdit, value: e.target.value });
+                                    }}
                                     onKeyDown={(e) => {
+                                      // Read-only: Enter/Escape just close; let
+                                      // Cmd/Ctrl+C and selection keys work normally.
+                                      if (!cellEditable) {
+                                        if (e.key === 'Enter' || e.key === 'Escape') {
+                                          e.preventDefault();
+                                          setActiveResultEdit(null);
+                                        }
+                                        return;
+                                      }
                                       if (e.key === 'Enter') {
                                         e.preventDefault();
                                         if (validationError) return;
@@ -1270,6 +1582,11 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                                       }
                                     }}
                                     onBlur={() => {
+                                      // Read-only: nothing to commit, just close.
+                                      if (!cellEditable) {
+                                        setActiveResultEdit(null);
+                                        return;
+                                      }
                                       if (validationError) {
                                         setActiveResultEdit(null);
                                         return;
@@ -1287,10 +1604,6 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                                       setActiveResultEdit(null);
                                     }}
                                   />
-                                ) : (
-                                  <div className="px-2 py-1.5 truncate selectable cursor-text">
-                                    {displayText}
-                                  </div>
                                 )}
                               </td>
                             );
@@ -1310,6 +1623,74 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
               </div>
             );
           })()}
+
+          {/* Auto-paging footer — mirrors the data-grid table footer's look:
+              rows + execution on the left, Limit selector + chevron pager on the
+              right. We intentionally don't run a COUNT query for a grand total
+              (would be a second query on potentially huge results), so the pager
+              shows "Page N" rather than "1 of N". Next is enabled only when the
+              +1 sentinel row came back (there's more). */}
+          {pagedStmt && !runError && activeResult && !activeResult.error && (
+            <div className="h-10 shrink-0 border-t border-border flex items-center justify-between px-4 bg-muted/10 text-xs text-muted-foreground">
+              <div className="flex items-center gap-4">
+                <span>
+                  {activeResult.rows.length.toLocaleString()} row{activeResult.rows.length === 1 ? '' : 's'}
+                  {pageSize > 0 && ` on page ${page + 1}`}
+                </span>
+                <span>Execution: {activeResult.durationMs.toFixed(1)}ms</span>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <span>Limit:</span>
+                  <Select
+                    value={String(pageSize)}
+                    onValueChange={(v) => {
+                      const next = Number(v);
+                      setPageSize(next);
+                      void runPage(pagedStmt, 0, next); // re-run page 1 (0 = unlimited)
+                    }}
+                  >
+                    <SelectTrigger size="sm" className="h-7! w-24 py-0 text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {['50', '100', '200', '500', '1000'].map((opt) => (
+                        <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                      ))}
+                      <SelectItem value="0">Unlimited</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                {pageSize > 0 && (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-6 w-6"
+                      disabled={isExecuting || page === 0}
+                      onClick={() => void runPage(pagedStmt, Math.max(0, page - 1), pageSize)}
+                      title="Previous page"
+                    >
+                      <ChevronLeft className="w-3 h-3" />
+                    </Button>
+                    <span className="px-2">Page {page + 1}</span>
+                    <Button
+                      variant="outline"
+                      size="icon"
+                      className="h-6 w-6"
+                      disabled={isExecuting || !hasNextPage}
+                      onClick={() => void runPage(pagedStmt, page + 1, pageSize)}
+                      title="Next page"
+                    >
+                      <ChevronRight className="w-3 h-3" />
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

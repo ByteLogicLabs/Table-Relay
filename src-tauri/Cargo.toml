@@ -25,6 +25,7 @@ tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-fs = "2"
+tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -77,6 +78,11 @@ cbc = "0.1"
 pbkdf2 = { version = "0.11", default-features = false }
 hmac = "0.12"
 sha1 = "0.10"
+# Navicat .ncx password decryption: V1 (≤11) is Blowfish in a custom CFB-like
+# chaining; V2 (12+) is AES-128-CBC. DBeaver credentials-config.json is also
+# AES-128-CBC. `hex` decodes the ciphertext hex strings both formats use.
+blowfish = "0.9"
+hex = "0.4"
 # Locate the `llama-server` binary on PATH / known install dirs (M8.1 local).
 which = "6"
 
