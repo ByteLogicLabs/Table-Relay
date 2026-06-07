@@ -1,7 +1,50 @@
+import type { editor as MonacoEditorNs } from 'monaco-editor';
 import { getMonacoThemeId } from '../../lib/monaco-setup';
 
 export function pickMonacoTheme(): string {
   return getMonacoThemeId(document.documentElement.dataset.theme ?? 'monokai');
+}
+
+/** Shared monospace stack — keeps every Monaco surface (query editor, routine,
+ *  trigger, JSON result, data grid) on the same font as the rest of the app.
+ *  Must match `--font-mono` in index.css so editors and HTML mono text (error
+ *  boxes, result cells) render identically. The bundled font is
+ *  "Geist Mono Variable" (loaded via @fontsource-variable/geist-mono). */
+export const EDITOR_FONT_FAMILY =
+  '"Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace';
+
+/**
+ * Baseline Monaco options for the DDL editors (routine / trigger / view).
+ * Mirrors the query editor's look so all code surfaces are visually identical:
+ * same font, theme-following, and chrome. Callers pass the user's font-size /
+ * word-wrap settings so the DDL editors honor Settings just like the main one.
+ */
+export function ddlEditorOptions(opts: {
+  fontSize?: number;
+  wordWrap?: boolean;
+  minimap?: boolean;
+  tabSize?: number;
+}): MonacoEditorNs.IStandaloneEditorConstructionOptions {
+  return {
+    fontFamily: EDITOR_FONT_FAMILY,
+    fontSize: opts.fontSize ?? 13,
+    lineHeight: 20,
+    minimap: { enabled: opts.minimap ?? false },
+    scrollBeyondLastLine: false,
+    smoothScrolling: true,
+    renderLineHighlight: 'line',
+    tabSize: opts.tabSize ?? 2,
+    wordWrap: (opts.wordWrap ?? true) ? 'on' : 'off',
+    automaticLayout: true,
+    padding: { top: 12, bottom: 12 },
+    // Keep overflow widgets (suggest list, hovers) inside the editor — see the
+    // query editor for why: with fixedOverflowWidgets the widget mounts on
+    // document.body, outside the focus subtree, and Arrow Up/Down can't
+    // navigate the suggestion list in the Tauri webview.
+    fixedOverflowWidgets: false,
+    scrollbar: { verticalScrollbarSize: 10, horizontalScrollbarSize: 10 },
+    guides: { indentation: false },
+  };
 }
 
 /** Format elapsed run time: ms under a second, then seconds with one decimal. */

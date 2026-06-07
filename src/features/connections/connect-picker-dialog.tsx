@@ -153,6 +153,7 @@ export default function ConnectPickerDialog({
             </div>
           )}
         </div>
+
       </DialogContent>
     </Dialog>
   );

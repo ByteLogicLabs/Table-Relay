@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { copyText } from '../../lib/clipboard';
 import { History, Loader2, MessageSquare, Trash2, X } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import {
@@ -299,7 +300,7 @@ export function ConversationHistory({ onSelect }: Props) {
                       </ContextMenuItem>
                       <ContextMenuItem
                         onClick={() => {
-                          void navigator.clipboard.writeText(conv.title);
+                          void copyText(conv.title, 'Title copied');
                         }}
                       >
                         Copy title

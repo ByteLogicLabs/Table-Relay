@@ -44,7 +44,10 @@
   --radius-sm: calc(var(--radius) - 4px);
   
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
-  --font-mono: "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
+  /* Single bundled mono font used everywhere (editors, error boxes, result
+     grids) so monospace text is visually consistent app-wide. Loaded via
+     @fontsource-variable/geist-mono below. */
+  --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", "Menlo", "Monaco", "Courier New", monospace;
 }
 
 /*
@@ -175,6 +178,7 @@
 @import "tw-animate-css";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
+@import "@fontsource-variable/geist-mono";
 
 @custom-variant dark (&:is(.dark *));
 

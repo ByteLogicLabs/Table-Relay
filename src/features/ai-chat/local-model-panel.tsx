@@ -5,6 +5,7 @@ import { RadioGroup, RadioGroupItem } from '../../components/ui/radio-group';
 import { ai, isAiError, type LocalModelInfo, type DownloadDoneEvent, type LlamaRuntimeStatus } from '../../lib/ai';
 import { Trash2, Download as DownloadIcon, StopCircle, Copy, CheckCircle2, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
+import { copyText } from '../../lib/clipboard';
 import { fmtBytes, fmtRate } from './chat-utils';
 
 // -----------------------------------------------------------------------------
@@ -297,12 +298,7 @@ function LlamaRuntimeCard({
   }
 
   const copyInstall = async () => {
-    try {
-      await navigator.clipboard.writeText(runtime.installCommand);
-      toast.success('Install command copied');
-    } catch {
-      toast.error('Failed to copy');
-    }
+    await copyText(runtime.installCommand, 'Install command copied');
   };
 
   const openReleases = () => {

@@ -57,6 +57,7 @@ import { DestructiveConfirmDialog } from "../../components/destructive-confirm-d
 import { useMultiSelection } from "../../hooks/use-multi-selection";
 import { getClickIntent, getKeyIntent } from "../../lib/click-intent";
 import { dialectFromManifest } from "../data-grid/editor-kinds";
+import { copyText } from "../../lib/clipboard";
 import { Section } from "./sidebar-section";
 import {
   pickDdlColumn,
@@ -837,8 +838,8 @@ export default function Sidebar({
             const names = orderedTableIds().filter((id) =>
               tableSelection.selectedIds.has(id),
             );
-            void navigator.clipboard.writeText(names.join("\n"));
-            toast.success(
+            void copyText(
+              names.join("\n"),
               `Copied ${names.length} ${names.length === 1 ? "name" : "names"}`,
             );
           }
@@ -1417,10 +1418,17 @@ export default function Sidebar({
                               tabIndex={-1}
                               className={
                                 rowCls(active) +
-                                (isSelected && !active
+                                // Only the ACTIVE table (the open data tab) gets a
+                                // highlight in normal use. A single
+                                // selected/focused row shows nothing extra, so we
+                                // never have two "active-looking" rows at once.
+                                // Multi-selection (2+ rows, for bulk drop/copy)
+                                // still highlights every selected row + the
+                                // keyboard cursor so the bulk target is visible.
+                                (inMultiSelection && !active
                                   ? " bg-primary/10"
                                   : "") +
-                                (isFocused
+                                (inMultiSelection && isFocused
                                   ? " ring-1 ring-inset ring-primary/40"
                                   : "")
                               }
@@ -1475,10 +1483,8 @@ export default function Sidebar({
                                 const names = inMultiSelection
                                   ? [...tableSelection.selectedIds]
                                   : [t.name];
-                                void navigator.clipboard.writeText(
+                                void copyText(
                                   names.join("\n"),
-                                );
-                                toast.success(
                                   names.length === 1
                                     ? "Name copied"
                                     : `Copied ${names.length} names`,
@@ -1722,16 +1728,14 @@ export default function Sidebar({
                                   ? `SELECT ${qual}(${params});`
                                   : `CALL ${qual}(${params});`;
                               onNewQuery(conn.id, r.name);
-                              void navigator.clipboard.writeText(call);
-                              toast.success("Call copied to clipboard");
+                              void copyText(call, "Call copied to clipboard");
                             }}
                           >
                             New query + copy call
                           </ContextMenuItem>
                           <ContextMenuItem
                             onClick={() => {
-                              void navigator.clipboard.writeText(r.name);
-                              toast.success("Name copied");
+                              void copyText(r.name, "Name copied");
                             }}
                           >
                             Copy name
@@ -1801,8 +1805,7 @@ export default function Sidebar({
                           </ContextMenuItem>
                           <ContextMenuItem
                             onClick={() => {
-                              void navigator.clipboard.writeText(t.name);
-                              toast.success("Name copied");
+                              void copyText(t.name, "Name copied");
                             }}
                           >
                             Copy name

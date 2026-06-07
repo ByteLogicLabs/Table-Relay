@@ -28,6 +28,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir unavailable");
             // The bundle identifier (and thus the app-data directory) has
@@ -140,12 +141,17 @@ pub fn run() {
             let connection_open_database =
                 MenuItemBuilder::with_id("connection_open_database", "Open Database…")
                     .build(handle)?;
+            let connection_transfer =
+                MenuItemBuilder::with_id("connection_transfer", "Import / Export Connections…")
+                    .build(handle)?;
             let connection_menu = SubmenuBuilder::new(handle, "Connection")
                 .item(&connection_picker)
                 .item(&connection_new)
                 .separator()
                 .item(&connection_edit_current)
                 .item(&connection_open_database)
+                .separator()
+                .item(&connection_transfer)
                 .build()?;
 
             let mut menu_builder = MenuBuilder::new(handle);
@@ -226,6 +232,13 @@ pub fn run() {
             commands::store::ai_settings_forget,
             // TablePlus import (decrypt + map a .tableplusconnection export)
             commands::tableplus::tableplus_import,
+            // Foreign-client import password decryption (Navicat / DBeaver)
+            commands::foreign_import::navicat_decrypt_passwords,
+            commands::foreign_import::dbeaver_decrypt_credentials,
+            // Encrypted backup export/import (settings, connections, etc.)
+            commands::secure_transfer::secure_export,
+            commands::secure_transfer::secure_import,
+            commands::secure_transfer::secure_is_encrypted,
             // DB
             commands::db::db_connect,
             commands::db::db_test_connection,

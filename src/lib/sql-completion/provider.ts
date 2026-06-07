@@ -1,6 +1,6 @@
 import type { Monaco } from '@monaco-editor/react';
 import type { editor as MonacoEditor, languages, IDisposable, IRange } from 'monaco-editor';
-import { MYSQL_KEYWORDS, matchKeywordCasing, maybeQuoteIdent } from './keywords';
+import { MYSQL_KEYWORDS, maybeQuoteIdent } from './keywords';
 import { snippetsForDialect, type SnippetDialect } from './snippets';
 import { analyzeContext, type SqlClause, type SqlReferencedTable } from './context';
 import type { SchemaInfo, TableStructure } from '../db';
@@ -40,13 +40,32 @@ export function registerSqlCompletion(
   const snippets = snippetsForDialect(options.dialect);
 
   const provider: languages.CompletionItemProvider = {
-    triggerCharacters: ['.', '`'],
+    // '.'/'`' open the qualified-name flow; ' ' (space) opens the list right
+    // after a clause keyword like `FROM `/`JOIN ` so the user sees table
+    // suggestions without having to type a letter first.
+    triggerCharacters: ['.', '`', ' '],
 
-    provideCompletionItems(model, position) {
+    provideCompletionItems(model, position, context) {
       try {
         const buffer = model.getValue();
         const cursorOffset = model.getOffsetAt(position);
         const ctx = analyzeContext(buffer, cursorOffset);
+
+        // When the popup was triggered by a SPACE, only proceed if the word
+        // right before the cursor is a clause keyword that introduces a name
+        // (FROM/JOIN/INTO/UPDATE) or a comma — i.e. somewhere a suggestion is
+        // genuinely wanted. Otherwise return nothing so we don't flash the
+        // popup on every space inside an expression or string.
+        if (context?.triggerCharacter === ' ') {
+          const head = buffer.slice(0, cursorOffset);
+          // Last non-space run before the cursor.
+          const m = head.match(/([A-Za-z_][A-Za-z0-9_]*)\s*$/);
+          const prevWord = m?.[1]?.toUpperCase();
+          const wantsName = prevWord
+            ? ['FROM', 'JOIN', 'INTO', 'UPDATE'].includes(prevWord)
+            : /,\s*$/.test(head); // after a comma in a list
+          if (!wantsName) return { suggestions: [] };
+        }
 
         // Effective default schema — priority:
         //   1. A schema the current statement already targets (e.g. `FROM bee_book.books`
@@ -85,8 +104,19 @@ export function registerSqlCompletion(
 
         // Resolve referenced-table structures we don't have yet. Fire-and-forget;
         // when they land, retrigger the popup so the late columns appear.
+        //
+        // CRITICAL: skip the identifier the user is *currently typing*. In a
+        // `FROM a` context the parser reports `a` as a referenced table, but
+        // it's just an in-progress prefix — fetching its (nonexistent) structure
+        // resolves a moment later and fires the retrigger below, which rebuilds
+        // the suggest list and snaps the highlighted row back to the top. That
+        // was the "flicker → jumps to top, can't arrow-navigate" bug. We only
+        // prefetch tables that are NOT the active prefix word.
+        const typingWord = ctx.prefix?.trim().toLowerCase();
         const pending: Array<Promise<unknown>> = [];
         for (const t of ctx.referencedTables) {
+          // The word being typed isn't a real reference yet — don't fetch it.
+          if (typingWord && !t.schema && t.name.toLowerCase() === typingWord) continue;
           const schema = t.schema ?? effectiveDefaultSchema ?? '';
           if (!schema) continue;
           if (!options.getCachedStructure(schema, t.name)) {
@@ -95,7 +125,13 @@ export function registerSqlCompletion(
             );
           }
         }
-        if (pending.length > 0 && editor) {
+        // Only the retrigger when freshly-fetched columns would actually change
+        // the list — i.e. a column context (SELECT/WHERE/…) or a qualified
+        // `alias.`/`table.` lookup. In a FROM/table-name context the structures
+        // don't add suggestions, so retriggering there just rebuilds the popup
+        // and resets the user's arrow selection to the top for no benefit.
+        const retriggerHelps = !!ctx.qualifier || isColumnClause(ctx.clause);
+        if (pending.length > 0 && editor && retriggerHelps) {
           // When every fetch has settled, retrigger the popup so the late
           // columns appear. Hide-then-trigger forces Monaco to re-ask us
           // instead of serving its cached list.
@@ -199,11 +235,15 @@ export function registerSqlCompletion(
 
         function pushKeywords() {
           for (const kw of MYSQL_KEYWORDS) {
-            const insert = matchKeywordCasing(ctx.prefix, kw);
+            // Keywords are always inserted UPPERCASE (canonical SQL style),
+            // regardless of how the user typed the prefix. Label === insertText
+            // so the list shows exactly what gets written. `filterText` lets a
+            // lowercase prefix (`fr`) still match the uppercase item (`FROM`).
             suggestions.push({
               label: kw,
               kind: Kind.Keyword,
-              insertText: insert,
+              insertText: kw,
+              filterText: kw,
               sortText: `5_${kw}`,
               range,
             });

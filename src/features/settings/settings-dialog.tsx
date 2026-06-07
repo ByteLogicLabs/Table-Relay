@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Upload, Zap } from 'lucide-react';
+import { AlertCircle, ArrowDownUp, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Zap } from 'lucide-react';
+import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import PasswordPromptDialog from './password-prompt-dialog';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '../../components/ui/dialog';
@@ -25,8 +27,7 @@ import {
   type AppSettings, type AppTheme, type NullDisplay,
   applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
 } from '../../lib/settings-store';
-import { connectionsStore } from '../../lib/connections-store';
-import TablePlusImportDialog from './tableplus-import-dialog';
+import ConnectionTransferDialog from '../connections/connection-transfer-dialog';
 import { Row, Toggle, DataRow } from './settings-controls';
 import { AppearanceSettings, EditorSettings } from './settings-sections';
 import {
@@ -41,7 +42,6 @@ import {
   ROW_LIMIT_OPTIONS,
   NULL_DISPLAY_OPTIONS,
   isObject,
-  connectionInputFromUnknown,
 } from './settings-utils';
 import { toast } from 'sonner';
 
@@ -50,11 +50,34 @@ import { toast } from 'sonner';
 interface SettingsDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  /** Section to land on when opened (e.g. 'general' for the connections rows). */
+  initialSection?: string;
 }
 
-export default function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
+export default function SettingsDialog({ open, onOpenChange, initialSection }: SettingsDialogProps) {
   const [section, setSection] = useState<Section>('appearance');
-  const [tablePlusOpen, setTablePlusOpen] = useState(false);
+  // Per-connection import/export dialog (replaces the old all-or-nothing flow).
+  const [connTransfer, setConnTransfer] = useState<'export' | 'import' | null>(null);
+
+  // Password prompt for encrypted export/import. We open it and await the
+  // user's password via a stashed resolver, so the export/import helpers can
+  // simply `const pw = await askPassword(...)`.
+  const [pwPrompt, setPwPrompt] = useState<{
+    mode: 'set' | 'enter';
+    title: string;
+    description?: string;
+  } | null>(null);
+  const [pwResolver, setPwResolver] = useState<((pw: string | null) => void) | null>(null);
+  const askPassword = (opts: { mode: 'set' | 'enter'; title: string; description?: string }) =>
+    new Promise<string | null>((resolve) => {
+      setPwResolver(() => resolve);
+      setPwPrompt(opts);
+    });
+  const resolvePassword = (pw: string | null) => {
+    pwResolver?.(pw);
+    setPwResolver(null);
+    setPwPrompt(null);
+  };
 
   // ── Appearance
   const [theme, setTheme] = useState<AppTheme>(() => loadSettings().theme);
@@ -93,8 +116,10 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     });
     setAiMode('list');
     setEditingId(null);
+    // Land on the requested section (e.g. 'general' for connection transfer).
+    if (initialSection) setSection(initialSection as Section);
     return () => { cancelled = true; };
-  }, [open]);
+  }, [open, initialSection]);
 
   // ── Appearance handlers
   const handleTheme = (t: AppTheme) => {
@@ -110,23 +135,76 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     toast.success('Settings reset to defaults');
   };
 
-  const exportJson = async (defaultPath: string, payload: unknown, label: string) => {
+  const exportJson = async (
+    defaultPath: string,
+    payload: unknown,
+    label: string,
+    encrypt = true,
+  ) => {
+    // Sensitive exports (settings, connections, credentials) are encrypted with
+    // a user-chosen password (RNCryptor v3); `.dtab` = Table Relay encrypted
+    // export. Non-sensitive ones (conversations) stay plain `.json`.
+    if (!encrypt) {
+      const path = await saveDialog({
+        defaultPath,
+        filters: [{ name: 'JSON', extensions: ['json'] }],
+      });
+      if (!path) return;
+      await writeTextFile(path, JSON.stringify(payload, null, 2));
+      toast.success(`${label} exported`);
+      return;
+    }
+    const encName = defaultPath.replace(/\.json$/, '.dtab');
     const path = await saveDialog({
-      defaultPath,
-      filters: [{ name: 'JSON', extensions: ['json'] }],
+      defaultPath: encName,
+      filters: [{ name: 'Table Relay export', extensions: ['dtab'] }],
     });
     if (!path) return;
-    await writeTextFile(path, JSON.stringify(payload, null, 2));
-    toast.success(`${label} exported`);
+    const password = await askPassword({
+      mode: 'set',
+      title: `Encrypt ${label.toLowerCase()} export`,
+      description: 'Set a password to protect this file. You’ll need it to import the file later.',
+    });
+    if (!password) return; // cancelled
+    await invoke('secure_export', { path, json: JSON.stringify(payload, null, 2), password });
+    toast.success(`${label} exported (encrypted)`);
   };
 
   const importJson = async (): Promise<unknown | null> => {
     const path = await openDialog({
       multiple: false,
-      filters: [{ name: 'JSON', extensions: ['json'] }],
+      filters: [
+        { name: 'Table Relay export', extensions: ['dtab', 'json'] },
+        { name: 'All files', extensions: ['*'] },
+      ],
     });
     if (!path || Array.isArray(path)) return null;
-    return JSON.parse(await readTextFile(path));
+
+    const encrypted = await invoke<boolean>('secure_is_encrypted', { path });
+    if (!encrypted) {
+      // Back-compat: older exports are plaintext JSON.
+      return JSON.parse(await readTextFile(path));
+    }
+    // Encrypted: prompt for the password and retry until correct or cancelled.
+    for (;;) {
+      const password = await askPassword({
+        mode: 'enter',
+        title: 'Import encrypted file',
+        description: 'Enter the password used when this file was exported.',
+      });
+      if (!password) return null; // cancelled
+      try {
+        const json = await invoke<string>('secure_import', { path, password });
+        return JSON.parse(json);
+      } catch (err) {
+        const kind = (err as { kind?: string })?.kind;
+        if (kind === 'BadPassword') {
+          toast.error('Wrong password — try again.');
+          continue;
+        }
+        throw err;
+      }
+    }
   };
 
   const handleExportSettings = async () => {
@@ -161,51 +239,8 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     }
   };
 
-  const handleExportConnections = async () => {
-    const ok = window.confirm('Export saved connections as plaintext JSON? This includes database passwords and SSH secrets.');
-    if (!ok) return;
-    try {
-      const connections = await connectionsStore.list();
-      await exportJson('table-relay-connections.json', {
-        version: 1,
-        exportedAt: new Date().toISOString(),
-        connections,
-      }, 'Connections');
-    } catch (err) {
-      toast.error(`Connections export failed: ${String(err)}`);
-    }
-  };
-
-  const handleImportConnections = async () => {
-    const ok = window.confirm('Import connections from JSON? Existing records with the same id will be updated.');
-    if (!ok) return;
-    try {
-      const payload = await importJson();
-      if (!payload) return;
-      const rawConnections = isObject(payload) && Array.isArray(payload.connections)
-        ? payload.connections
-        : Array.isArray(payload) ? payload : null;
-      if (!rawConnections) {
-        toast.error('Connections import failed: invalid JSON shape');
-        return;
-      }
-      let imported = 0;
-      let skipped = 0;
-      for (const item of rawConnections) {
-        const input = connectionInputFromUnknown(item);
-        if (!input) {
-          skipped += 1;
-          continue;
-        }
-        await connectionsStore.save(input);
-        imported += 1;
-      }
-      window.dispatchEvent(new CustomEvent('tablerelay:connections-changed'));
-      toast.success(`Imported ${imported} connection${imported === 1 ? '' : 's'}${skipped ? `, skipped ${skipped}` : ''}`);
-    } catch (err) {
-      toast.error(`Connections import failed: ${String(err)}`);
-    }
-  };
+  // Connection import/export now lives in ConnectionTransferDialog (a
+  // per-connection picker), opened via setConnTransfer below.
 
   const handleExportCredentials = async () => {
     const ok = window.confirm('Export AI credentials as plaintext JSON? This includes provider API keys.');
@@ -273,7 +308,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
         version: 1,
         exportedAt: new Date().toISOString(),
         conversations: conversations.filter(Boolean),
-      }, 'Conversations');
+      }, 'Conversations', false); // chat history isn't sensitive — keep it plain
     } catch (err) {
       toast.error(`Conversations export failed: ${String(err)}`);
     }
@@ -502,7 +537,7 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent showCloseButton className="sm:max-w-225 p-0 gap-0 overflow-hidden">
-        <div className="flex h-150">
+        <div className="flex h-150 min-w-0 w-full">
 
           {/* Left nav */}
           <div className="w-48 shrink-0 border-r border-border bg-muted/30 flex flex-col pt-4 pb-3 gap-0.5 px-2">
@@ -514,13 +549,14 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
               ['general', Settings2, 'General'],
               ['editor', SquarePen, 'Editor'],
               ['ai', Sparkles, 'AI Providers'],
+              ['data', ArrowDownUp, 'Import / Export'],
             ] as const).map(
               ([id, Icon, label]) => (
                 <button
                   key={id}
                   onClick={() => setSection(id)}
                   className={`flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm text-left transition-colors
-                    ${section === id ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'}`}
+                    ${section === id ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'}`}
                 >
                   <Icon className="w-4 h-4 shrink-0" />
                   {label}
@@ -581,31 +617,26 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
                   <Toggle checked={settings.restoreOnStartup} onChange={(v) => saveSettings({ restoreOnStartup: v })} />
                 </Row>
 
-                <div className="pt-4 mt-2 border-t border-border">
-                  <h4 className="text-xs font-medium text-muted-foreground mb-2">Backup &amp; transfer</h4>
-                  <div className="rounded-md border border-border divide-y divide-border">
-                    <DataRow label="Settings" desc="Appearance, editor and behaviour preferences" onExport={handleExportSettings} onImport={handleImportSettings} />
-                    <DataRow label="Connections" desc="Saved databases — includes passwords &amp; SSH secrets" onExport={handleExportConnections} onImport={handleImportConnections} />
-                    <div className="flex items-center justify-between gap-4 px-4 py-3">
-                      <div className="min-w-0">
-                        <div className="text-sm">TablePlus</div>
-                        <div className="text-[11px] text-muted-foreground mt-0.5 truncate">Import connections from a .tableplusconnection export</div>
-                      </div>
-                      <div className="shrink-0">
-                        <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5" onClick={() => setTablePlusOpen(true)}>
-                          <Upload className="w-3.5 h-3.5" /> Import
-                        </Button>
-                      </div>
-                    </div>
-                    <DataRow label="AI credentials" desc="Provider profiles — includes API keys" onExport={handleExportCredentials} onImport={handleImportCredentials} />
-                    <DataRow label="Conversations" desc="Full AI chat history" onExport={handleExportConversations} onImport={handleImportConversations} />
-                  </div>
+                <div className="flex justify-end pt-4 mt-2 border-t border-border">
+                  <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={handleReset}>
+                    <RotateCcw className="w-3.5 h-3.5" /> Reset all settings to defaults
+                  </Button>
+                </div>
+              </div>
+            )}
 
-                  <div className="flex justify-end mt-3">
-                    <Button size="sm" variant="outline" className="h-7 text-xs gap-1.5 text-destructive hover:text-destructive" onClick={handleReset}>
-                      <RotateCcw className="w-3.5 h-3.5" /> Reset all settings to defaults
-                    </Button>
-                  </div>
+            {/* ── Import / Export ── */}
+            {section === 'data' && (
+              <div className="space-y-1">
+                <div className="mb-3">
+                  <h3 className="text-sm font-medium mb-0.5">Import / Export</h3>
+                  <p className="text-xs text-muted-foreground">Back up your data or move it between machines.</p>
+                </div>
+                <div className="rounded-md border border-border divide-y divide-border">
+                  <DataRow label="Settings" desc="Appearance, editor and behaviour preferences" onExport={handleExportSettings} onImport={handleImportSettings} />
+                  <DataRow label="Connections" desc="Saved databases — pick which to export/import, or bring in from TablePlus, DBeaver, Navicat, HeidiSQL" onExport={() => setConnTransfer('export')} onImport={() => setConnTransfer('import')} />
+                  <DataRow label="AI credentials" desc="Provider profiles — includes API keys" onExport={handleExportCredentials} onImport={handleImportCredentials} />
+                  <DataRow label="Conversations" desc="Full AI chat history" onExport={handleExportConversations} onImport={handleImportConversations} />
                 </div>
               </div>
             )}
@@ -953,7 +984,23 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
         </div>
       </DialogContent>
     </Dialog>
-    <TablePlusImportDialog open={tablePlusOpen} onOpenChange={setTablePlusOpen} />
+    {connTransfer && (
+      <ConnectionTransferDialog
+        open={connTransfer !== null}
+        mode={connTransfer}
+        onOpenChange={(v) => { if (!v) setConnTransfer(null); }}
+      />
+    )}
+    {pwPrompt && (
+      <PasswordPromptDialog
+        open={pwPrompt !== null}
+        mode={pwPrompt.mode}
+        title={pwPrompt.title}
+        description={pwPrompt.description}
+        onSubmit={(pw) => resolvePassword(pw)}
+        onOpenChange={(v) => { if (!v) resolvePassword(null); }}
+      />
+    )}
     </>
   );
 }

@@ -8,6 +8,8 @@ import { db, isDbError, type RoutineDefinition } from '../../lib/db';
 import { formatSql, languageForDialect } from '../../lib/format-sql';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { dialectFromManifest } from '../data-grid/editor-kinds';
+import { useSettings } from '../../lib/settings-store';
+import { pickMonacoTheme, ddlEditorOptions } from '../sql-editor/sql-editor-utils';
 
 interface LogQueryOptions {
   source?: 'editor' | 'grid' | 'system';
@@ -131,11 +133,24 @@ export default function RoutineView({
   connection, schema, name, kind, isNew, onDirtyChange, onLogQuery,
 }: RoutineViewProps) {
   const manifests = useAdapterManifests();
-  const dialect = dialectFromManifest(
-    resolveManifest(manifests, connection.driver)?.capabilities ?? null,
-  );
+  const settings = useSettings();
+  const activeManifest = resolveManifest(manifests, connection.driver);
+  const dialect = dialectFromManifest(activeManifest?.capabilities ?? null);
   const isPg = dialect === "postgres";
   const isSqlite = dialect === "sqlite";
+  // Manifest Monaco language id for accurate highlighting, matching the query
+  // editor; generic SQL fallback.
+  const editorLanguage = activeManifest?.queryEditor?.language?.trim() || 'sql';
+
+  // Follow the app's active Monaco theme (same as the query editor) rather than
+  // hardcoding vs-dark, so the routine editor matches light/dark/monokai.
+  const [theme, setTheme] = useState<string>(pickMonacoTheme);
+  useEffect(() => {
+    const root = document.documentElement;
+    const observer = new MutationObserver(() => setTheme(pickMonacoTheme()));
+    observer.observe(root, { attributes: true, attributeFilter: ['class', 'data-theme'] });
+    return () => observer.disconnect();
+  }, []);
 
   const [def, setDef] = useState<RoutineDefinition | null>(null);
   const [loading, setLoading] = useState(!isNew);
@@ -363,17 +378,16 @@ export default function RoutineView({
       {/* Body editor — the entire CREATE statement lives here. */}
       <div className="flex-1 min-h-0">
         <Editor
-          defaultLanguage="sql"
+          language={editorLanguage}
           value={draft}
           onChange={v => { setUserEdited(true); setDraftState(v ?? ''); }}
-          theme="vs-dark"
-          options={{
-            fontSize: 13,
-            minimap: { enabled: false },
-            scrollBeyondLastLine: false,
-            wordWrap: 'on',
-            automaticLayout: true,
-          }}
+          theme={theme}
+          options={ddlEditorOptions({
+            fontSize: settings.editorFontSize,
+            wordWrap: settings.editorWordWrap,
+            minimap: settings.editorMinimap,
+            tabSize: settings.editorTabSize,
+          })}
         />
       </div>
     </div>

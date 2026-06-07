@@ -19,6 +19,8 @@
     "fs:allow-write-text-file",
     "fs:allow-open",
     "fs:allow-write",
+    "clipboard-manager:allow-write-text",
+    "clipboard-manager:allow-read-text",
     {
       "identifier": "fs:scope",
       "allow": [{ "path": "**" }]

@@ -101,6 +101,7 @@ import {
   pad,
 } from "./data-grid-utils";
 import { ExportWriter } from "./export-writer";
+import { copyText } from "../../lib/clipboard";
 import { DataRow, SharedContextMenu } from "./data-row";
 
 interface LogQueryOptions {
@@ -822,11 +823,14 @@ export default function DataGrid({
   useEffect(() => {
     isActiveRef.current = isActive;
     if (!isActive) {
-      // Always mark stale when hidden so the next activation refetches.
-      // The cache still provides instant display (showRefresh path) while the
-      // fresh data loads in the background — this prevents stale/empty results
-      // from persisting after switching connections and back.
-      isStaleRef.current = true;
+      // Do NOT blanket-mark stale on hide. A plain tab switch doesn't make the
+      // data stale, and re-fetching on every reactivation was the cause of
+      // tab-switch lag (a DB round-trip each time). Genuine staleness — an
+      // external mutation or a reconnect — is already handled by the
+      // `tablerelay:reload` listener, which nulls loadedTargetRef + sets
+      // isStaleRef for hidden tabs so they refetch on next show. When nothing
+      // changed, the key check below short-circuits and we show cached rows
+      // instantly with no fetch.
       return;
     }
     const key = loadTargetKey();
@@ -1088,14 +1092,10 @@ export default function DataGrid({
       lines.push(cols.map((c) => escapeCell(cellOf(row, c))).join("\t"));
     }
 
-    try {
-      await navigator.clipboard.writeText(lines.join("\n"));
-      toast.success(
-        `Copied ${picked.length} row${picked.length === 1 ? "" : "s"}`,
-      );
-    } catch (e) {
-      toast.error(`Copy failed: ${String(e)}`);
-    }
+    await copyText(
+      lines.join("\n"),
+      `Copied ${picked.length} row${picked.length === 1 ? "" : "s"}`,
+    );
   }, [selectedRows, displayCols, rowsForView, editedCells]);
 
   // Keyboard shortcuts: Delete/Backspace queues selected rows for deletion,
@@ -3182,8 +3182,10 @@ export default function DataGrid({
                 options={{
                   readOnly: jsonSaving,
                   minimap: { enabled: false },
+                  // Keep in sync with --font-mono (index.css) and the SQL
+                  // editor's EDITOR_FONT_FAMILY so all mono surfaces match.
                   fontFamily:
-                    '"Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+                    '"Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
                   fontSize: 13,
                   lineHeight: 20,
                   scrollBeyondLastLine: false,
@@ -3203,17 +3205,11 @@ export default function DataGrid({
               variant="secondary"
               size="icon"
               className="absolute bottom-3 right-3 z-10 h-8 w-8 rounded-full shadow-sm"
-              onClick={async () => {
-                try {
-                  await navigator.clipboard.writeText(
-                    jsonEditorRef.current?.getValue() ?? jsonRowsText,
-                  );
-                  toast.success("JSON copied");
-                } catch (e) {
-                  toast.error(
-                    `Copy failed: ${e instanceof Error ? e.message : String(e)}`,
-                  );
-                }
+              onClick={() => {
+                void copyText(
+                  jsonEditorRef.current?.getValue() ?? jsonRowsText,
+                  "JSON copied",
+                );
               }}
               title="Copy JSON"
               aria-label="Copy JSON"
@@ -3268,7 +3264,7 @@ export default function DataGrid({
           <div className="flex items-center gap-2">
             <span>Limit:</span>
             <Select value={limit} onValueChange={setLimit}>
-              <SelectTrigger className="h-6 w-20 text-xs">
+              <SelectTrigger size="sm" className="h-7! w-20 py-0 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

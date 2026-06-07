@@ -394,12 +394,21 @@ export default function WorkspaceView({
         window.dispatchEvent(new CustomEvent("tablerelay:menu-open-database"));
       },
     );
+    // Import / Export connections live in Settings → Import / Export.
+    const unlistenConnectionTransfer = listen<void>(
+      "menu-connection-transfer",
+      () =>
+        window.dispatchEvent(
+          new CustomEvent("tablerelay:open-settings", { detail: { section: "data" } }),
+        ),
+    );
 
     return () => {
       void unlistenImport.then((fn) => fn());
       void unlistenExport.then((fn) => fn());
       void unlistenConnectionPicker.then((fn) => fn());
       void unlistenConnectionNew.then((fn) => fn());
+      void unlistenConnectionTransfer.then((fn) => fn());
       void unlistenConnectionEditCurrent.then((fn) => fn());
       void unlistenConnectionOpenDatabase.then((fn) => fn());
     };

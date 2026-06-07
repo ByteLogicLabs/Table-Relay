@@ -13,7 +13,7 @@ import {
 import { refreshRail, unpinTile, useRail, unpinManyTiles, reorderTiles } from '../../state/rail';
 import { useConnections } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
-import { toast } from 'sonner';
+import { copyText } from '../../lib/clipboard';
 import type { RailTile } from '../../lib/rail';
 import DbIcon from '../../components/db-icon';
 
@@ -60,8 +60,13 @@ export default function ConnectionRail({
   useEffect(() => { void refreshRail(); }, []);
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
   useEffect(() => {
-    const handler = () => setSettingsOpen(true);
+    const handler = (e: Event) => {
+      const section = (e as CustomEvent<{ section?: string }>).detail?.section;
+      setSettingsSection(section);
+      setSettingsOpen(true);
+    };
     window.addEventListener('tablerelay:open-settings', handler);
     return () => window.removeEventListener('tablerelay:open-settings', handler);
   }, []);
@@ -301,8 +306,7 @@ export default function ConnectionRail({
                 <ContextMenuItem
                   onClick={() => {
                     const text = [primary, secondary].join('\n');
-                    void navigator.clipboard.writeText(text);
-                    toast.success('Copied pin info');
+                    void copyText(text, 'Copied pin info');
                   }}
                 >
                   Copy info
@@ -372,7 +376,7 @@ export default function ConnectionRail({
         </button>
       </div>
 
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialSection={settingsSection} />
     </div>
   );
 }
