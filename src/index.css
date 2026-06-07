@@ -546,3 +546,7 @@
   --syntax-success:     #7ee787;
   --editor-bg:          #010409;
 }
+@keyframes progress-indeterminate {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(300%); }
+}

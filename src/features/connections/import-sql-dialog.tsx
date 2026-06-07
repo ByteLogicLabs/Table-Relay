@@ -31,6 +31,7 @@ import {
 } from '../../components/ui/select';
 import { db, type SchemaInfo } from '../../lib/db';
 import { refreshSchemas } from '../../state/connections';
+import ProgressDialog, { type ProgressState, type ProgressLogLine } from '../../components/ui/progress-dialog';
 
 /**
  * "Import" dialog — pick a file (SQL / CSV / JSON), preview it when it's small
@@ -131,8 +132,8 @@ export default function ImportSqlDialog({
   // CSV/JSON target.
   const [targetSchema, setTargetSchema] = useState<string>('');
   const [targetTable, setTargetTable] = useState<string>('');
-  // Row-insert progress (CSV/JSON). `null` when not running.
-  const [rowProgress, setRowProgress] = useState<{ done: number; total: number } | null>(null);
+  // Rich progress popup (bar + step + log + cancel) for the actual run.
+  const [progress, setProgress] = useState<ProgressState | null>(null);
   const cancelRef = useRef(false);
   // Per-statement / per-row outcome tally after a run.
   const [report, setReport] = useState<{
@@ -160,7 +161,7 @@ export default function ImportSqlDialog({
       setExecuting(false);
       setTargetSchema('');
       setTargetTable('');
-      setRowProgress(null);
+      setProgress(null);
       cancelRef.current = false;
       setReport(null);
     }
@@ -283,6 +284,11 @@ export default function ImportSqlDialog({
     }
     setExecuting(true);
     setReport(null);
+    // SQL runs as a single adapter call (the splitter lives server-side), so we
+    // can't show per-statement progress or cancel mid-run — use an indeterminate
+    // bar and disable cancel while it executes.
+    const log: ProgressLogLine[] = [{ text: `→ Executing ${fileName || 'SQL file'}…` }];
+    setProgress({ step: 'Running SQL import…', fraction: null, phase: 'running', log: [...log] });
     try {
       const sqlToRun = buildPayload(contents, targetDatabase, dialect ?? null);
       const result = await db.runQuery(connectionId, sqlToRun);
@@ -304,20 +310,22 @@ export default function ImportSqlDialog({
         new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
       );
       if (failed === 0) {
+        log.push({ text: `Done — ${ok.toLocaleString()} statement${ok === 1 ? '' : 's'} executed`, kind: 'success' });
+        setProgress({ step: 'Import complete', fraction: 1, phase: 'done', log: [...log] });
         toast.success(
-          statements.length === 1
-            ? 'Import complete (1 statement)'
-            : `Import complete (${ok} statements)`,
+          statements.length === 1 ? 'Import complete (1 statement)' : `Import complete (${ok} statements)`,
         );
-        onClose();
       } else {
-        toast.error(
-          `Import finished with ${failed} failing statement${failed === 1 ? '' : 's'}`,
-        );
+        log.push({ text: `${failed} statement${failed === 1 ? '' : 's'} failed`, kind: 'error' });
+        if (firstError) log.push({ text: `First error: ${firstError}`, kind: 'error' });
+        setProgress({ step: 'Import finished with errors', fraction: 1, phase: 'error', log: [...log] });
+        toast.error(`Import finished with ${failed} failing statement${failed === 1 ? '' : 's'}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       setReport({ ok: 0, failed: 1, firstError: msg });
+      log.push({ text: `Error: ${msg}`, kind: 'error' });
+      setProgress({ step: 'Import failed', fraction: null, phase: 'error', log: [...log] });
       toast.error(`Import failed: ${msg}`);
     } finally {
       setExecuting(false);
@@ -334,7 +342,16 @@ export default function ImportSqlDialog({
     setExecuting(true);
     setReport(null);
     cancelRef.current = false;
-    setRowProgress({ done: 0, total: rows.length });
+    const log: ProgressLogLine[] = [
+      { text: `→ Inserting ${rows.length.toLocaleString()} row${rows.length === 1 ? '' : 's'} into ${targetTable}…` },
+    ];
+    setProgress({
+      step: `Importing into ${targetTable}`,
+      fraction: 0,
+      detail: `0 / ${rows.length.toLocaleString()} rows`,
+      phase: 'running',
+      log: [...log],
+    });
     let ok = 0;
     let failed = 0;
     let firstError: string | null = null;
@@ -354,7 +371,14 @@ export default function ImportSqlDialog({
         }
         // Throttle progress paints to keep large imports smooth.
         if (i % 25 === 0 || i === rows.length - 1) {
-          setRowProgress({ done: i + 1, total: rows.length });
+          const done = i + 1;
+          setProgress({
+            step: `Importing into ${targetTable}`,
+            fraction: rows.length ? done / rows.length : 1,
+            detail: `${done.toLocaleString()} / ${rows.length.toLocaleString()} rows${failed ? ` · ${failed.toLocaleString()} failed` : ''}`,
+            phase: 'running',
+            log: [...log],
+          });
         }
       }
       setReport({ ok, failed, firstError });
@@ -363,19 +387,22 @@ export default function ImportSqlDialog({
         new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
       );
       const cancelled = cancelRef.current;
-      if (failed === 0 && !cancelled) {
-        toast.success(`Imported ${ok.toLocaleString()} row${ok === 1 ? '' : 's'} into ${targetTable}`);
-        onClose();
-      } else if (cancelled) {
+      if (cancelled) {
+        log.push({ text: `Cancelled — ${ok.toLocaleString()} row${ok === 1 ? '' : 's'} inserted`, kind: 'error' });
+        setProgress({ step: 'Cancelled', fraction: null, phase: 'cancelled', log: [...log] });
         toast.message(`Import cancelled — ${ok.toLocaleString()} row${ok === 1 ? '' : 's'} inserted`);
+      } else if (failed === 0) {
+        log.push({ text: `Done — ${ok.toLocaleString()} row${ok === 1 ? '' : 's'} imported`, kind: 'success' });
+        setProgress({ step: 'Import complete', fraction: 1, phase: 'done', log: [...log] });
+        toast.success(`Imported ${ok.toLocaleString()} row${ok === 1 ? '' : 's'} into ${targetTable}`);
       } else {
-        toast.error(
-          `Imported ${ok.toLocaleString()} row${ok === 1 ? '' : 's'}, ${failed.toLocaleString()} failed`,
-        );
+        log.push({ text: `${ok.toLocaleString()} imported, ${failed.toLocaleString()} failed`, kind: 'error' });
+        if (firstError) log.push({ text: `First error: ${firstError}`, kind: 'error' });
+        setProgress({ step: 'Import finished with errors', fraction: 1, phase: 'error', log: [...log] });
+        toast.error(`Imported ${ok.toLocaleString()} row${ok === 1 ? '' : 's'}, ${failed.toLocaleString()} failed`);
       }
     } finally {
       setExecuting(false);
-      setRowProgress(null);
     }
   };
 
@@ -405,15 +432,16 @@ export default function ImportSqlDialog({
       : `Import ${rowCount > 0 ? rowCount.toLocaleString() + ' ' : ''}row${rowCount === 1 ? '' : 's'}`;
 
   return (
-    <Dialog open={isOpen} onOpenChange={(o) => !o && onClose()}>
+    <>
+    <Dialog open={isOpen && !progress} onOpenChange={(o) => !o && onClose()}>
       <DialogContent className="sm:max-w-2xl w-[92vw] max-h-[85vh] overflow-hidden flex flex-col gap-0 p-0">
         <DialogHeader className="px-5 pt-5 pb-4 border-b border-border/60">
           <DialogTitle className="flex items-center gap-2">
             <FileText className="w-4 h-4 text-primary" />
-            Import · {connectionName}
+            Import Data
           </DialogTitle>
           <DialogDescription>
-            Pick a file and format, then run it against this connection.
+            Pick a file and format, then run it against {connectionName}.
           </DialogDescription>
         </DialogHeader>
 
@@ -450,39 +478,42 @@ export default function ImportSqlDialog({
             </p>
           </Field>
 
-          {/* File picker row */}
+          {/* File picker — drop-zone card, matching the connection-import UI. */}
           <Field label="File">
-            <div className="flex gap-2 items-center flex-wrap">
+            <div className="rounded-lg border border-dashed border-border py-10 flex flex-col items-center gap-3 text-center">
+              {loadingFile ? (
+                <Loader2 className="w-8 h-8 text-muted-foreground/40 animate-spin" />
+              ) : (
+                <FileText className="w-8 h-8 text-muted-foreground/40" />
+              )}
+              <div>
+                <p className="text-sm text-muted-foreground">
+                  {fileName && !loadingFile
+                    ? fileName
+                    : loadingFile
+                      ? 'Reading file…'
+                      : 'No file selected'}
+                </p>
+                <p className="text-xs text-muted-foreground/60 mt-0.5 max-w-xs">
+                  {fileName && !loadingFile && stats
+                    ? `${
+                        stats.kind === 'sql'
+                          ? `~${stats.approxStatements.toLocaleString()} statements`
+                          : `${stats.rows.toLocaleString()} rows`
+                      } · ${formatBytes(stats.bytes)}`
+                    : 'SQL, CSV, or JSON'}
+                </p>
+              </div>
               <Button
-                type="button"
-                variant="outline"
                 size="sm"
+                variant="outline"
+                className="h-7 text-xs gap-1.5"
                 onClick={pickFile}
                 disabled={loadingFile || executing}
               >
-                <FileText className="w-3.5 h-3.5 mr-1.5" />
-                {filePath ? 'Replace file…' : 'Choose file…'}
+                <FileText className="w-3.5 h-3.5" />
+                {filePath ? 'Choose a different file' : 'Choose file'}
               </Button>
-              {loadingFile && (
-                <span className="text-xs text-muted-foreground flex items-center gap-1">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Reading file…
-                </span>
-              )}
-              {fileName && !loadingFile && (
-                <span className="text-xs text-muted-foreground truncate min-w-0" title={filePath ?? ''}>
-                  <span className="font-mono text-foreground">{fileName}</span>
-                  {stats && (
-                    <>
-                      {' '}·{' '}
-                      {stats.kind === 'sql'
-                        ? `~${stats.approxStatements.toLocaleString()} statements`
-                        : `${stats.rows.toLocaleString()} rows`}
-                      {' '}·{' '}
-                      {formatBytes(stats.bytes)}
-                    </>
-                  )}
-                </span>
-              )}
             </div>
           </Field>
 
@@ -527,6 +558,19 @@ export default function ImportSqlDialog({
                   </SelectContent>
                 </Select>
               </Field>
+            </div>
+          )}
+
+          {/* No-table guidance — replaces the old hard error popup. */}
+          {isRowImport && contents && !parsed?.error && targetTables.length === 0 && (
+            <div className="rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400 px-3 py-2 text-xs flex items-start gap-1.5">
+              <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+              <span className="min-w-0">
+                There are no {isDocumentTarget(dialect) ? 'collections' : 'tables'} in this database yet.{' '}
+                {supportsSql
+                  ? 'Create one first (or import a .sql file that creates it), then re-run this row import.'
+                  : 'Create one first, then re-run this row import.'}
+              </span>
             </div>
           )}
 
@@ -593,35 +637,8 @@ export default function ImportSqlDialog({
             </Field>
           )}
 
-          {/* Row-insert progress (CSV/JSON) */}
-          {rowProgress && (
-            <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2.5 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex items-center gap-1.5 text-muted-foreground">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                  Inserting {rowProgress.done.toLocaleString()} of{' '}
-                  {rowProgress.total.toLocaleString()} rows…
-                </span>
-                <button
-                  type="button"
-                  className="text-destructive hover:underline"
-                  onClick={() => {
-                    cancelRef.current = true;
-                  }}
-                >
-                  Cancel
-                </button>
-              </div>
-              <div className="mt-2 h-1.5 rounded-full bg-muted overflow-hidden">
-                <div
-                  className="h-full bg-primary transition-[width] duration-150"
-                  style={{
-                    width: `${rowProgress.total ? (rowProgress.done / rowProgress.total) * 100 : 0}%`,
-                  }}
-                />
-              </div>
-            </div>
-          )}
+          {/* Run progress (bar + log + cancel) is shown in a dedicated
+              ProgressDialog popup while executing — see below. */}
 
           {/* Post-run summary */}
           {report && (
@@ -658,7 +675,9 @@ export default function ImportSqlDialog({
               : isRowImport && !supportsRowInsert
                 ? 'This connection can’t accept row imports.'
                 : isRowImport && targetTables.length === 0
-                  ? 'No table available to import into.'
+                  ? (supportsSql
+                      ? 'No table here yet — create one first, or import a .sql file instead.'
+                      : 'No table here yet — create a table before importing rows.')
                   : isRowImport && rowCount === 0 && !parsed?.error
                     ? 'No rows found in this file.'
                     : ''}
@@ -675,6 +694,23 @@ export default function ImportSqlDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    <ProgressDialog
+      open={progress !== null}
+      title="Import Data"
+      state={progress}
+      onCancel={() => {
+        // Only the row-insert loop checks this; SQL runs server-side as one call.
+        cancelRef.current = true;
+      }}
+      onClose={() => {
+        if (progress?.phase === 'running') return;
+        setProgress(null);
+        // Close the whole import flow once the run settled successfully.
+        if (progress?.phase === 'done') onClose();
+      }}
+    />
+    </>
   );
 }
 
