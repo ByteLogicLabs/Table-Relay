@@ -63,8 +63,12 @@ export const PROVIDERS: ProviderOption[] = [
   { kind: 'opencode', label: 'opencode', sublabel: 'your installed `opencode`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'opencode' },
 ];
 
-export function openSettings() {
-  window.dispatchEvent(new CustomEvent('tablerelay:open-settings'));
+/** Open the Settings dialog, optionally landing on a specific section
+ *  (e.g. 'ai' for AI providers + local-model downloads). */
+export function openSettings(section?: string) {
+  window.dispatchEvent(
+    new CustomEvent('tablerelay:open-settings', { detail: { section } }),
+  );
 }
 
 // Per-message timestamp shown under each chat bubble. Shows just the time for

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp, Terminal } from 'lucide-react';
+import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp, Terminal, RefreshCw } from 'lucide-react';
 import { ConversationHistory } from './conversation-history';
 import { Button } from '../../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
@@ -97,7 +97,7 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
               <Button
                 variant="ghost"
                 size="sm"
-                className="h-7 text-[10px] uppercase tracking-wide text-muted-foreground"
+                className="h-7 text-[10px] uppercase tracking-wide text-destructive hover:text-destructive hover:bg-destructive/10"
                 title="End the session — closes the current chat and returns to credential picker. Conversations remain saved."
                 onClick={() => void end()}
               >
@@ -171,18 +171,24 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
   // switchable targets alongside saved API credentials. `null` = probing.
   const cliProviders = PROVIDERS.filter(p => p.requiresLocalCli);
   const [cliPaths, setCliPaths] = useState<Record<string, string | null> | null>(null);
+  const [reloading, setReloading] = useState(false);
 
-  // Re-probe both saved credentials and machine CLIs. Runs on mount and each
-  // time the dropdown opens, so Settings changes / newly-installed CLIs appear
-  // without any manual refresh.
+  // Re-probe both saved credentials and machine CLIs. Runs on mount, each time
+  // the dropdown opens, and via the manual reload button — so Settings changes
+  // and newly-installed CLIs are picked up.
   const refresh = async () => {
-    await hydrateCredentials();
-    setCredentials(loadCredentials());
-    setActiveId(getActiveCredentialId());
-    const entries = await Promise.all(
-      cliProviders.map(async p => [p.kind, await ai.cliAvailable(p.kind).catch(() => null)] as const),
-    );
-    setCliPaths(Object.fromEntries(entries));
+    setReloading(true);
+    try {
+      await hydrateCredentials();
+      setCredentials(loadCredentials());
+      setActiveId(getActiveCredentialId());
+      const entries = await Promise.all(
+        cliProviders.map(async p => [p.kind, await ai.cliAvailable(p.kind).catch(() => null)] as const),
+      );
+      setCliPaths(Object.fromEntries(entries));
+    } finally {
+      setReloading(false);
+    }
   };
 
   // Probe on first render + whenever the menu opens, so Settings changes and
@@ -316,13 +322,25 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
             {cliPaths === null ? 'Checking…' : 'No providers found'}
           </div>
         )}
-        <div className="border-t border-border/60 mt-1 pt-1">
+        <div className="border-t border-border/60 mt-1 pt-1 flex items-center gap-1">
           <button
             type="button"
-            onClick={openSettings}
-            className="w-full text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded flex items-center gap-2"
+            onClick={() => openSettings('ai')}
+            className="flex-1 text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded flex items-center gap-2"
           >
             <SettingsIcon className="w-3 h-3" /> Manage API providers in Settings…
+          </button>
+          <button
+            type="button"
+            // Stop the Select from closing/selecting; just re-probe in place.
+            onPointerDown={(e) => e.preventDefault()}
+            onClick={(e) => { e.preventDefault(); e.stopPropagation(); void refresh(); }}
+            disabled={reloading}
+            title="Reload credentials and installed CLI tools"
+            aria-label="Reload providers"
+            className="shrink-0 p-1.5 rounded text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50"
+          >
+            <RefreshCw className={`w-3 h-3 ${reloading ? 'animate-spin' : ''}`} />
           </button>
         </div>
       </SelectContent>
@@ -535,8 +553,31 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
   // Reload credentials when the user returns from Settings. The credential
   // module keeps a decrypted in-memory copy after the app unlocks.
   const [credentials, setCredentials] = useState<CredentialProfile[]>(() => loadCredentials());
+  const [reloading, setReloading] = useState(false);
   const reload = () => {
     void hydrateCredentials().then(() => setCredentials(loadCredentials()));
+  };
+  // Re-probe EVERYTHING (credentials + CLIs + llama) for the manual reload
+  // button, so a just-installed CLI / downloaded model / added key appears
+  // without restarting the app.
+  const reloadAll = async () => {
+    setReloading(true);
+    try {
+      await hydrateCredentials();
+      setCredentials(loadCredentials());
+      const entries = await Promise.all(
+        cliProviders.map(async p => [p.kind, await ai.cliAvailable(p.kind).catch(() => null)] as const),
+      );
+      setCliPaths(Object.fromEntries(entries));
+      const status = await ai.checkLlamaServer().catch(() => null);
+      setLlamaReady(!!status?.installed);
+      if (status?.installed) {
+        const models = await ai.listLocalModels().catch(() => []);
+        setLlamaModel(models.find(m => m.downloaded)?.id ?? null);
+      }
+    } finally {
+      setReloading(false);
+    }
   };
   useEffect(() => {
     reload();
@@ -563,6 +604,47 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const detectedClis = cliProviders.filter(p => cliPaths?.[p.kind]);
+
+  // Detect a local llama.cpp install (the `llama-server` binary) + any
+  // downloaded GGUF model, so on-device Llama can be started in one click like
+  // the CLIs. `llamaReady`: binary found. `llamaModel`: first downloaded model id
+  // (null = installed but no model yet → point the user at Settings to download).
+  const [llamaReady, setLlamaReady] = useState(false);
+  const [llamaModel, setLlamaModel] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const status = await ai.checkLlamaServer();
+        if (cancelled) return;
+        setLlamaReady(status.installed);
+        if (status.installed) {
+          const models = await ai.listLocalModels().catch(() => []);
+          if (cancelled) return;
+          const dl = models.find(m => m.downloaded);
+          setLlamaModel(dl?.id ?? null);
+        }
+      } catch { /* leave llamaReady false */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleStartLlama = async () => {
+    if (!llamaModel) {
+      // Binary present but no model — open Settings → AI where downloads live.
+      toast.info('Download a GGUF model in Settings → AI to use on-device Llama.');
+      openSettings('ai');
+      return;
+    }
+    try {
+      await end({ awaitBackend: true }).catch(() => {});
+      await start({ kind: 'llama_local', model: llamaModel });
+      setActiveCredentialId(null);
+      toast.success('Local Llama session started');
+    } catch (e) {
+      toast.error(isAiError(e) ? e.message : String(e));
+    }
+  };
 
   const handleStartCli = async (kind: AiProviderKind, model?: string) => {
     try {
@@ -625,15 +707,19 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
       <div className="text-center text-muted-foreground text-xs">
         <Sparkles className="w-8 h-8 opacity-50 mx-auto mb-2" />
         <p className="font-medium text-sm text-foreground">Start an AI chat</p>
-        <p className="mt-1 opacity-80">
-          {credentials.length > 0 || detectedClis.length > 0
+        <p className="mt-1 opacity-80 leading-relaxed max-w-xs mx-auto">
+          Chat with your database — runs on Claude Code, Codex, Gemini, opencode,
+          a local model, or your API key.
+        </p>
+        <p className="mt-1.5 opacity-70 max-w-xs mx-auto">
+          {credentials.length > 0 || detectedClis.length > 0 || llamaReady
             ? 'Pick a provider to begin.'
-            : 'Add a provider credential in Settings to get started.'}
+            : 'Add one in Settings, or install a CLI to see it here.'}
         </p>
       </div>
 
-      {/* Installed CLIs detected on this machine — start in one click, no key. */}
-      {detectedClis.length > 0 && (
+      {/* Installed runtimes detected on this machine — start in one click, no key. */}
+      {(detectedClis.length > 0 || llamaReady) && (
         <div className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground px-1">
             <Terminal className="w-3 h-3" /> Detected on this machine
@@ -658,6 +744,29 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
               </p>
             </button>
           ))}
+          {llamaReady && (
+            <button
+              onClick={() => void handleStartLlama()}
+              disabled={starting}
+              title="llama-server detected"
+              className="w-full text-left rounded-lg border border-border hover:border-primary/50 hover:bg-muted/40 transition-colors px-3 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                <span className="text-sm font-medium truncate flex-1">Local Llama</span>
+                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-full shrink-0 ${
+                  llamaModel
+                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                    : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                }`}>
+                  {llamaModel ? 'installed' : 'needs model'}
+                </span>
+              </div>
+              <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+                {llamaModel ? `GGUF · on-device · ${llamaModel}` : 'llama.cpp ready — download a model in Settings'}
+              </p>
+            </button>
+          )}
         </div>
       )}
 
@@ -670,14 +779,14 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
         </div>
       )}
 
-      {credentials.length === 0 && detectedClis.length === 0 ? (
-        <Button onClick={openSettings} className="w-full">
+      {credentials.length === 0 && detectedClis.length === 0 && !llamaReady ? (
+        <Button onClick={() => openSettings('ai')} className="w-full">
           <SettingsIcon className="w-4 h-4 mr-2" /> Open Settings
         </Button>
       ) : credentials.length === 0 ? (
-        // Only CLIs detected — offer Settings as a secondary action.
+        // Only local runtimes detected — offer Settings as a secondary action.
         <button
-          onClick={openSettings}
+          onClick={() => openSettings('ai')}
           className="w-full text-center text-[11px] text-muted-foreground hover:text-foreground py-2 flex items-center justify-center gap-1.5"
         >
           <SettingsIcon className="w-3 h-3" /> Add an API provider in Settings
@@ -708,12 +817,24 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
               </p>
             </button>
           ))}
-          <button
-            onClick={openSettings}
-            className="w-full text-center text-[11px] text-muted-foreground hover:text-foreground py-2 flex items-center justify-center gap-1.5"
-          >
-            <SettingsIcon className="w-3 h-3" /> Manage credentials in Settings
-          </button>
+          <div className="pt-2 flex items-center justify-center gap-1 text-[11px] text-muted-foreground whitespace-nowrap">
+            <span>Don't see your provider?</span>
+            <button
+              onClick={() => void reloadAll()}
+              disabled={reloading}
+              className="text-primary hover:underline disabled:opacity-50 inline-flex items-center gap-1"
+            >
+              <RefreshCw className={`w-3 h-3 ${reloading ? 'animate-spin' : ''}`} />
+              {reloading ? 'Reloading…' : 'Reload'}
+            </button>
+            <span>or</span>
+            <button
+              onClick={() => openSettings('ai')}
+              className="text-primary hover:underline"
+            >
+              manage in Settings
+            </button>
+          </div>
         </div>
       )}
 
@@ -728,6 +849,17 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
         <div className="flex items-center justify-center gap-2 text-xs text-muted-foreground">
           <Loader2 className="w-3 h-3 animate-spin" /> Starting session…
         </div>
+      )}
+
+      {/* Auto-detect hint — only when nothing was detected yet, so the user
+          knows installed CLI tools show up here on their own (no setup). */}
+      {cliPaths !== null && detectedClis.length === 0 && !llamaReady && (
+        <p className="mt-auto pt-3 text-[11px] text-muted-foreground/70 text-center leading-relaxed">
+          <Terminal className="w-3 h-3 inline mr-1 -mt-0.5" />
+          Install a coding CLI like <span className="font-medium">Claude Code</span>,{' '}
+          <span className="font-medium">Codex</span>, <span className="font-medium">Gemini</span>, or{' '}
+          <span className="font-medium">opencode</span> and it'll appear here automatically — no API key needed.
+        </p>
       )}
     </div>
   );
