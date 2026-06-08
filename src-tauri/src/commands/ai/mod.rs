@@ -415,6 +415,27 @@ pub async fn ai_download_model(
     download::download(id, app, registry.inner().clone()).await
 }
 
+/// Download a user-supplied GGUF model by URL (not in the built-in catalog).
+/// `id` is the chosen on-disk/model id; `url` is a direct .gguf download link.
+#[tauri::command]
+pub async fn ai_download_model_url(
+    id: String,
+    url: String,
+    app: tauri::AppHandle,
+    registry: State<'_, Arc<DownloadRegistry>>,
+) -> Result<(), AiError> {
+    // Sanitize the id into a safe filename stem (no path separators / spaces).
+    let safe_id: String = id
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '-' })
+        .collect();
+    if safe_id.is_empty() {
+        return Err(AiError::InvalidModel("model id cannot be empty".into()));
+    }
+    download::download_url(safe_id, url, app, registry.inner().clone()).await
+}
+
 #[tauri::command]
 pub async fn ai_cancel_download(
     id: String,

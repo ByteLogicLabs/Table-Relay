@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import { Button } from '../../components/ui/button';
-import { RadioGroup, RadioGroupItem } from '../../components/ui/radio-group';
+import { Input } from '../../components/ui/input';
 import { ai, isAiError, type LocalModelInfo, type DownloadDoneEvent, type LlamaRuntimeStatus } from '../../lib/ai';
 import { Trash2, Download as DownloadIcon, StopCircle, Copy, CheckCircle2, ExternalLink } from 'lucide-react';
 import { toast } from 'sonner';
@@ -31,6 +31,13 @@ export function LocalModelPanel({
   const [inFlight, setInFlight] = useState<Set<string>>(new Set());
   const [runtime, setRuntime] = useState<LlamaRuntimeStatus | null>(null);
   const [checkingRuntime, setCheckingRuntime] = useState(false);
+  // Model ids currently in the post-download verify (hashing) phase, so the row
+  // can show "Verifying…" instead of a silent 100% that looks stuck.
+  const [verifying, setVerifying] = useState<Set<string>>(new Set());
+  // Custom-model-by-URL form.
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customName, setCustomName] = useState('');
+  const [customUrl, setCustomUrl] = useState('');
 
   const refreshRuntime = async () => {
     setCheckingRuntime(true);
@@ -73,7 +80,20 @@ export function LocalModelPanel({
         }));
       });
       cancelDone = await ai.onDownloadDone((ev: DownloadDoneEvent) => {
+        // 'verifying' is an intermediate status: bytes are all downloaded and we
+        // are hashing before finalizing. Keep the row "active" but flip it to a
+        // Verifying label — do NOT clear inFlight/progress yet.
+        if (ev.status === 'verifying') {
+          setVerifying(prev => new Set(prev).add(ev.modelId));
+          return;
+        }
+        // Terminal statuses (ok / error / canceled / already_installed): clear.
         setInFlight(prev => {
+          const next = new Set(prev);
+          next.delete(ev.modelId);
+          return next;
+        });
+        setVerifying(prev => {
           const next = new Set(prev);
           next.delete(ev.modelId);
           return next;
@@ -85,6 +105,8 @@ export function LocalModelPanel({
         });
         if (ev.status === 'error') {
           toast.error(`Download failed: ${ev.message ?? 'unknown error'}`);
+        } else if (ev.status === 'ok') {
+          toast.success('Model downloaded and ready.');
         }
         void refresh();
       });
@@ -105,6 +127,24 @@ export function LocalModelPanel({
         // Cancel path — already handled by onDownloadDone, nothing to surface.
         return;
       }
+      toast.error(isAiError(e) ? e.message : String(e));
+    }
+  };
+
+  const handleDownloadCustom = async () => {
+    const url = customUrl.trim();
+    if (!url) { toast.error('Enter a model URL.'); return; }
+    if (!/^https?:\/\//i.test(url)) { toast.error('URL must start with http:// or https://'); return; }
+    // Derive an id from the name, or fall back to the URL's filename.
+    const fromUrl = url.split('/').pop()?.replace(/\.gguf$/i, '') ?? 'custom-model';
+    const id = (customName.trim() || fromUrl).replace(/[^a-zA-Z0-9._-]+/g, '-');
+    setInFlight(prev => new Set(prev).add(id));
+    try {
+      await ai.downloadModelUrl(id, url);
+      setCustomName(''); setCustomUrl(''); setCustomOpen(false);
+      await refresh();
+    } catch (e) {
+      if (isAiError(e) && e.kind === 'Canceled') return;
       toast.error(isAiError(e) ? e.message : String(e));
     }
   };
@@ -139,10 +179,10 @@ export function LocalModelPanel({
   }
 
   return (
-    <div className="space-y-2 border-t border-border pt-3">
-      <div className="flex items-center justify-between">
+    <div className="space-y-3 border-t border-border pt-4">
+      <div className="flex items-center justify-between gap-3 mb-1">
         <label className="text-[10px] uppercase tracking-wide text-muted-foreground font-medium">Local models</label>
-        <span className="text-[10px] text-muted-foreground opacity-70">
+        <span className="text-[10px] text-muted-foreground opacity-70 truncate">
           Stored in <span className="font-mono">ai-models/</span>
         </span>
       </div>
@@ -153,20 +193,18 @@ export function LocalModelPanel({
         <p className="text-[11px] text-muted-foreground">No models in catalog.</p>
       )}
 
-      <RadioGroup
-        // Selection model: the RadioGroup drives `onPick` and the card
-        // click target also calls `onPick` — both converge on the same
-        // state setter so either path works for the user.
-        value={selectedId ?? ''}
-        onValueChange={(v) => { if (typeof v === 'string') onPick(v); }}
-        className="contents"
-      >
+      {/* Selection is card-click → onPick; the selected card shows a check.
+          No radio group needed. */}
+      <div className="flex flex-col gap-2">
       {models.map(m => {
         const prog = progress[m.id];
-        const downloading = inFlight.has(m.id) || !!prog;
-        const pct = prog && prog.total > 0
-          ? Math.min(100, Math.round((prog.downloaded / prog.total) * 100))
-          : (m.downloaded ? 100 : 0);
+        const isVerifying = verifying.has(m.id);
+        const downloading = inFlight.has(m.id) || !!prog || isVerifying;
+        const pct = isVerifying
+          ? 100
+          : prog && prog.total > 0
+            ? Math.min(100, Math.round((prog.downloaded / prog.total) * 100))
+            : (m.downloaded ? 100 : 0);
         const isSelected = selectedId === m.id;
         const canSelect = m.downloaded && !downloading;
 
@@ -181,8 +219,12 @@ export function LocalModelPanel({
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
                 <div className="flex items-center gap-1.5">
-                  <RadioGroupItem value={m.id} disabled={!canSelect} />
-                  <span className="text-xs font-medium truncate">{m.display}</span>
+                  {/* No radio — the card's border + a check on the selected row
+                      is a clearer, less cluttered selection affordance. */}
+                  {isSelected && (
+                    <CheckCircle2 className="w-3.5 h-3.5 text-primary shrink-0" />
+                  )}
+                  <span className={`text-xs font-medium truncate ${isSelected ? 'text-primary' : ''}`}>{m.display}</span>
                   {!m.hashPinned && (
                     <span
                       className="text-[9px] uppercase tracking-wide px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-700 dark:text-yellow-400 shrink-0"
@@ -233,25 +275,75 @@ export function LocalModelPanel({
               <div className="mt-1.5">
                 <div className="h-1 w-full bg-muted/40 rounded overflow-hidden">
                   <div
-                    className="h-full bg-primary transition-[width] duration-300"
-                    style={{ width: `${pct}%` }}
+                    className={`h-full transition-[width] duration-300 ${isVerifying ? 'bg-primary/60 animate-pulse w-full' : 'bg-primary'}`}
+                    style={isVerifying ? undefined : { width: `${pct}%` }}
                   />
                 </div>
                 <div className="text-[10px] text-muted-foreground mt-0.5 flex items-center justify-between">
-                  <span>
-                    {fmtBytes(prog?.downloaded ?? m.partialBytes)} / {fmtBytes(prog?.total ?? m.sizeBytes)}
-                    {' '}({pct}%)
-                  </span>
-                  {prog && <span>{fmtRate(prog.speedBps)}</span>}
+                  {isVerifying ? (
+                    <span className="flex items-center gap-1 text-primary">
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                      Verifying & finalizing… (checking the file — this can take a moment for large models)
+                    </span>
+                  ) : (
+                    <span>
+                      {fmtBytes(prog?.downloaded ?? m.partialBytes)} / {fmtBytes(prog?.total ?? m.sizeBytes)}
+                      {' '}({pct}%)
+                    </span>
+                  )}
+                  {prog && !isVerifying && <span>{fmtRate(prog.speedBps)}</span>}
                 </div>
               </div>
             )}
           </div>
         );
       })}
-      </RadioGroup>
+      </div>
 
-      <p className="text-[10px] text-muted-foreground opacity-70">
+      {/* Custom model by URL — for any direct .gguf link (Hugging Face, etc.). */}
+      {!customOpen ? (
+        <button
+          type="button"
+          onClick={() => setCustomOpen(true)}
+          className="mt-1 text-[11px] text-primary hover:underline flex items-center gap-1.5 py-1"
+        >
+          <DownloadIcon className="w-3 h-3" /> Add a model by URL
+        </button>
+      ) : (
+        <div className="mt-1 rounded-md border border-border p-3 space-y-2">
+          <div className="text-[11px] font-medium">Add a model by URL</div>
+          <Input
+            value={customName}
+            onChange={(e) => setCustomName(e.target.value)}
+            placeholder="Name (optional, e.g. my-llama-8b)"
+            className="h-7 text-xs"
+          />
+          <Input
+            value={customUrl}
+            onChange={(e) => setCustomUrl(e.target.value)}
+            placeholder="https://…/model.gguf"
+            className="h-7 text-xs font-mono"
+          />
+          <p className="text-[10px] text-muted-foreground">
+            Direct link to a <span className="font-mono">.gguf</span> file. Not hash-verified — only use sources you trust.
+          </p>
+          <div className="flex items-center gap-2">
+            <Button size="sm" className="h-7 text-xs gap-1.5" onClick={() => void handleDownloadCustom()}>
+              <DownloadIcon className="w-3 h-3" /> Download
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-7 text-xs"
+              onClick={() => { setCustomOpen(false); setCustomName(''); setCustomUrl(''); }}
+            >
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+
+      <p className="mt-1 pt-2 border-t border-border/40 text-[10px] text-muted-foreground opacity-70">
         Pick a downloaded model, then Start chat. Weights stay on disk after End chat.
       </p>
     </div>

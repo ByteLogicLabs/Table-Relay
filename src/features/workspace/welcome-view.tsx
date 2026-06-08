@@ -30,6 +30,7 @@ export default function WelcomeView({
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingConnection, setEditingConnection] = useState<ConnectionProfile | undefined>();
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
   const connState = useConnections();
 
   // The Settings dialog normally lives in the connection rail, but the rail
@@ -37,7 +38,11 @@ export default function WelcomeView({
   // (⌘+,) and the in-app gear button had nothing to open. Host a dialog here
   // and listen for the same `tablerelay:open-settings` event the rail uses.
   useEffect(() => {
-    const handler = () => setSettingsOpen(true);
+    const handler = (e: Event) => {
+      const section = (e as CustomEvent<{ section?: string }>).detail?.section;
+      setSettingsSection(section);
+      setSettingsOpen(true);
+    };
     window.addEventListener('tablerelay:open-settings', handler);
     return () => window.removeEventListener('tablerelay:open-settings', handler);
   }, []);
@@ -237,7 +242,7 @@ export default function WelcomeView({
         initialData={editingConnection}
       />
 
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialSection={settingsSection} />
     </div>
   );
 }

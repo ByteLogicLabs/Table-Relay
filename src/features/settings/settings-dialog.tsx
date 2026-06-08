@@ -28,6 +28,7 @@ import {
   applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
 } from '../../lib/settings-store';
 import ConnectionTransferDialog from '../connections/connection-transfer-dialog';
+import { LocalModelPanel } from '../ai-chat/local-model-panel';
 import { Row, Toggle, DataRow } from './settings-controls';
 import { AppearanceSettings, EditorSettings } from './settings-sections';
 import {
@@ -93,6 +94,8 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
   const [credentials, setCredentials]   = useState<CredentialProfile[]>([]);
   const [activeId,    setActiveId]       = useState<string | null>(null);
   const [aiMode,      setAiMode]         = useState<AiMode>('list');
+  // Selected on-device GGUF model id in the llama.cpp panel (highlight only).
+  const [localModelId, setLocalModelId]  = useState<string>('');
   const [editingId,   setEditingId]      = useState<string | null>(null);
   const [form,        setForm]           = useState<ProfileForm>(blankForm());
   const [saving,      setSaving]         = useState(false);
@@ -774,6 +777,19 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                   </div>
                 )}
 
+                {/* ── Local models (llama.cpp) ── */}
+                {aiMode === 'list' && (
+                  <div className="mt-6 pt-5 border-t border-border">
+                    <h3 className="text-sm font-medium mb-0.5">On-device models (llama.cpp)</h3>
+                    <p className="text-xs text-muted-foreground mb-3">
+                      Run a GGUF model locally — no API key, fully offline. Requires the
+                      <code className="mx-1 px-1 rounded bg-muted text-[11px]">llama-server</code>
+                      binary; download a model below, then pick <strong>Local Llama</strong> in the chat.
+                    </p>
+                    <LocalModelPanel selectedId={localModelId} onPick={setLocalModelId} />
+                  </div>
+                )}
+
                 {/* ── Add / Edit form ── */}
                 {aiMode === 'form' && (
                   <div className="space-y-3">
@@ -787,7 +803,12 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                           </SelectValue>
                         </SelectTrigger>
                         <SelectContent>
-                          {PROVIDERS.map(p => (
+                          {/* CLI tools (claude/codex/gemini/opencode) are NOT
+                              listed here: they auth through their own installed
+                              binary and are started directly from the chat panel,
+                              so they don't belong in the saved-API-credential
+                              form. Only key/URL-based providers appear. */}
+                          {PROVIDERS.filter(p => !p.requiresLocalCli).map(p => (
                             <SelectItem key={p.kind} value={p.kind} className="text-xs">
                               <span className="block">
                                 <span className="font-medium">{p.label}</span>

@@ -321,6 +321,7 @@ pub fn run() {
             commands::ai::ai_cli_available,
             commands::ai::ai_list_local_models,
             commands::ai::ai_download_model,
+            commands::ai::ai_download_model_url,
             commands::ai::ai_cancel_download,
             commands::ai::ai_delete_model,
             commands::ai::ai_check_llama_server,

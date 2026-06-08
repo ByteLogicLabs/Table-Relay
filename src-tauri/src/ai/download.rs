@@ -21,29 +21,40 @@ use super::http::{client, map_reqwest, map_status};
 use super::models_catalog::{self, ModelEntry};
 use super::AiError;
 
-/// Where downloads live. Resolution order:
-///   1. `DBTABLE_MODEL_DIR` env var (useful for tests / CI / packaged apps).
-///   2. `<project_root>/ai-models/` where `project_root` is the first
-///      ancestor of `cwd` containing a `src-tauri/` or `package.json`.
-///      This matters in Tauri dev mode, where `cwd` is `<project>/src-tauri/`
-///      — without this we'd litter weights inside `src-tauri/ai-models/`.
-///   3. The OS app-data directory (`…/me.bytelogic.tablerelay/ai-models`). This is
-///      the path that matters for PACKAGED builds on macOS / Windows / Linux,
-///      where there is no project root and `cwd` is read-only (`/`,
-///      `C:\Windows\System32`, etc.).
+/// Where downloaded GGUF model weights live. Resolution order:
+///   1. `DBTABLE_MODEL_DIR` env var (tests / CI / explicit override).
+///   2. The OS app-data directory (`…/me.bytelogic.tablerelay/ai-models`) — the
+///      correct, persistent, user-writable location for PACKAGED builds on
+///      macOS / Windows / Linux. Models live beside the encrypted store and
+///      survive app updates.
+///   3. (DEBUG BUILDS ONLY) `<project_root>/ai-models/` so `tauri dev` doesn't
+///      litter weights inside the OS app-data dir while iterating. Release
+///      builds NEVER use this — a packaged app must not write into a project
+///      tree (which may not exist, or may be read-only).
 ///   4. `<cwd>/ai-models/` as a last-resort fallback.
+///
+/// IMPORTANT: prod prefers app-data over project-root. The previous order had
+/// these reversed, so a release app launched from a directory that merely
+/// contained a `package.json` would scatter multi-GB weights there instead of
+/// the proper app-data location.
 pub fn models_dir() -> PathBuf {
     if let Ok(p) = std::env::var("DBTABLE_MODEL_DIR") {
         return PathBuf::from(p);
     }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    if let Some(root) = find_project_root(&cwd) {
-        return root.join("ai-models");
+    // Dev convenience: keep weights in the project tree during `tauri dev`.
+    #[cfg(debug_assertions)]
+    {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        if let Some(root) = find_project_root(&cwd) {
+            return root.join("ai-models");
+        }
     }
     if let Some(data) = os_app_data_dir() {
         return data.join("ai-models");
     }
-    cwd.join("ai-models")
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("ai-models")
 }
 
 /// Platform app-data dir for `me.bytelogic.tablerelay`, resolved from env without
@@ -85,6 +96,7 @@ fn os_app_data_dir() -> Option<PathBuf> {
     }
 }
 
+#[cfg(debug_assertions)]
 fn find_project_root(start: &Path) -> Option<PathBuf> {
     let mut cursor = start.to_path_buf();
     loop {
@@ -174,14 +186,49 @@ pub async fn download(
     app: AppHandle,
     registry: Arc<DownloadRegistry>,
 ) -> Result<(), AiError> {
-    let entry = models_catalog::find(&id)
-        .ok_or_else(|| AiError::InvalidModel(format!("unknown model id: {id}")))?;
+    download_inner(id, None, app, registry).await
+}
 
-    // `"TODO"` is the dev sentinel: we still hash the download and log the
-    // result, so the operator can paste the verified hash back into the
-    // catalog. Any non-`TODO` value is treated as authoritative and any
-    // mismatch hard-fails the install.
-    let verify_hash = entry.sha256 != "TODO";
+/// Download a user-supplied GGUF by URL (not in the catalog). `id` becomes the
+/// on-disk filename stem and the model id the user picks in the chat. No hash
+/// verification (we have nothing to pin against) — the file is hash-logged only.
+pub async fn download_url(
+    id: String,
+    url: String,
+    app: AppHandle,
+    registry: Arc<DownloadRegistry>,
+) -> Result<(), AiError> {
+    download_inner(id, Some(url), app, registry).await
+}
+
+async fn download_inner(
+    id: String,
+    custom_url: Option<String>,
+    app: AppHandle,
+    registry: Arc<DownloadRegistry>,
+) -> Result<(), AiError> {
+    // Resolve the source URL + verification policy + size hint either from the
+    // built-in catalog (by id) or from a user-supplied URL (custom download).
+    let (source_url, expected_sha, size_hint): (String, Option<String>, u64) = match &custom_url {
+        Some(u) => {
+            if !(u.starts_with("http://") || u.starts_with("https://")) {
+                return Err(AiError::InvalidModel(
+                    "model URL must start with http:// or https://".into(),
+                ));
+            }
+            // No catalog entry → nothing to hash-verify against; size unknown.
+            (u.clone(), None, 0)
+        }
+        None => {
+            let entry = models_catalog::find(&id)
+                .ok_or_else(|| AiError::InvalidModel(format!("unknown model id: {id}")))?;
+            // `"TODO"` is the dev sentinel: we still hash the download and log the
+            // result. Any non-`TODO` value is authoritative and a mismatch
+            // hard-fails the install.
+            let expected = if entry.sha256 == "TODO" { None } else { Some(entry.sha256.to_string()) };
+            (entry.url.to_string(), expected, entry.size_bytes)
+        }
+    };
 
     let dir = models_dir();
     tokio::fs::create_dir_all(&dir)
@@ -218,12 +265,20 @@ pub async fn download(
         Err(_) => 0,
     };
 
-    let mut req = client()?.get(entry.url);
+    let mut req = client()?.get(&source_url);
     if start_offset > 0 {
         req = req.header("Range", format!("bytes={}-", start_offset));
     }
     let res = req.send().await.map_err(map_reqwest)?;
     let status = res.status();
+    // HTTP 416 (Range Not Satisfiable) means the `.part` is ALREADY the full
+    // file — a prior attempt downloaded everything but was killed (HMR/rebuild/
+    // crash) before finalize, leaving a complete `.part` that looked "stuck" in
+    // the UI. Skip straight to verify + rename instead of erroring.
+    if status.as_u16() == 416 && start_offset > 0 {
+        crate::log_line!("ai_download", "{id}: .part already complete ({start_offset} bytes), finalizing");
+        return finalize_download(&id, &part_path, &final_path, expected_sha, &app).await;
+    }
     if !status.is_success() {
         let body = res.text().await.unwrap_or_default();
         return Err(map_status(status, &body));
@@ -235,7 +290,7 @@ pub async fn download(
     let total = res
         .content_length()
         .map(|n| n + if resumed { start_offset } else { 0 })
-        .unwrap_or(entry.size_bytes);
+        .unwrap_or(size_hint);
 
     let mut file = if resumed {
         OpenOptions::new()
@@ -305,47 +360,59 @@ pub async fn download(
     file.flush().await.ok();
     drop(file);
 
-    // Compute SHA256 in every case. Streams the partial read-only through
-    // the hasher so memory stays constant for multi-GB files.
-    let actual = sha256_of(&part_path).await?;
+    finalize_download(&id, &part_path, &final_path, expected_sha, &app).await
+}
 
-    if verify_hash {
-        if !actual.eq_ignore_ascii_case(entry.sha256) {
-            let _ = tokio::fs::remove_file(&part_path).await;
-            let msg = format!(
-                "sha256 mismatch for {id}: expected {} got {actual}",
-                entry.sha256
-            );
+/// Verify (if a hash is pinned) + rename `.part` → `.gguf` + emit the terminal
+/// `done` event. Shared by the normal download path AND the
+/// `.part`-already-complete recovery path. Emits a `verifying` status first so
+/// the UI shows "Verifying…" during the (multi-second, multi-GB) hash instead of
+/// sitting at a silent 100% that looks stuck.
+async fn finalize_download(
+    id: &str,
+    part_path: &Path,
+    final_path: &Path,
+    expected_sha: Option<String>,
+    app: &AppHandle,
+) -> Result<(), AiError> {
+    // Tell the UI we've left the download phase and are now verifying.
+    let _ = app.emit(
+        "ai://download/done",
+        DoneEvent { model_id: id, status: "verifying", message: None },
+    );
+
+    // Compute SHA256. Streams read-only so memory stays constant for multi-GB
+    // files.
+    let actual = sha256_of(part_path).await?;
+
+    if let Some(expected) = &expected_sha {
+        if !actual.eq_ignore_ascii_case(expected) {
+            let _ = tokio::fs::remove_file(part_path).await;
+            let msg = format!("sha256 mismatch for {id}: expected {expected} got {actual}");
             let _ = app.emit(
                 "ai://download/done",
-                DoneEvent { model_id: &id, status: "error", message: Some(msg.clone()) },
+                DoneEvent { model_id: id, status: "error", message: Some(msg.clone()) },
             );
             return Err(AiError::Other(msg));
         }
     } else {
-        // No pinned hash yet. Log the computed value so the operator can
-        // paste it back into `models_catalog.rs` to lock it down for future
-        // users. This is the one case where we install an unverified blob —
-        // a deliberate dev escape hatch.
         crate::log_line!(
             "ai_download",
             "model {id} installed without hash verification. Pin this into models_catalog.rs: sha256 = \"{actual}\""
         );
     }
 
-    tokio::fs::rename(&part_path, &final_path)
+    tokio::fs::rename(part_path, final_path)
         .await
         .map_err(|e| AiError::Other(format!("rename: {e}")))?;
-    let done_msg = if verify_hash {
+    let done_msg = if expected_sha.is_some() {
         None
     } else {
-        // Surface the hash to the UI too — shows up in the "done" toast so
-        // you don't have to tail the log to see it.
         Some(format!("installed without hash verification · sha256 {actual}"))
     };
     let _ = app.emit(
         "ai://download/done",
-        DoneEvent { model_id: &id, status: "ok", message: done_msg },
+        DoneEvent { model_id: id, status: "ok", message: done_msg },
     );
     Ok(())
 }

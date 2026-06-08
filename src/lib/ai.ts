@@ -303,7 +303,7 @@ export interface DownloadProgressEvent {
 
 export interface DownloadDoneEvent {
   modelId: string;
-  status: 'ok' | 'canceled' | 'error' | 'already_installed';
+  status: 'ok' | 'canceled' | 'error' | 'already_installed' | 'verifying';
   message?: string;
 }
 
@@ -394,6 +394,10 @@ export const ai = {
 
   downloadModel: (id: string): Promise<void> =>
     invoke<void>('ai_download_model', { id }),
+
+  /** Download a user-supplied GGUF model by direct URL (not in the catalog). */
+  downloadModelUrl: (id: string, url: string): Promise<void> =>
+    invoke<void>('ai_download_model_url', { id, url }),
 
   cancelDownload: (id: string): Promise<void> =>
     invoke<void>('ai_cancel_download', { id }),

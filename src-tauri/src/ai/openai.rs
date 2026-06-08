@@ -657,7 +657,58 @@ fn extract_text_tool_call(
             _ => {}
         }
     }
+
+    // Second fallback: weaker local models (Qwen-Coder, small Llamas) often
+    // ignore the tool-call channel entirely and just answer "here's the query"
+    // with a ```sql fenced block. When `call_query` is available, treat a lone
+    // SQL fence as intent to run it — otherwise the chat loops forever ("run
+    // it" → model re-pastes the SQL → never executes). Only fires when a
+    // query tool exists in the catalog.
+    if let Some(sql) = extract_sql_fence(content) {
+        let query_tool = tools.iter().find_map(|t| {
+            let n = t.function.name;
+            if n == "call_query" || n == "run_query" || n == "call_sql" {
+                Some(n.to_string())
+            } else {
+                None
+            }
+        });
+        if let Some(name) = query_tool {
+            return Some(crate::ai::ToolCall {
+                id: format!("textsql-{}", sql.len()),
+                name,
+                arguments: serde_json::json!({ "sql": sql }).to_string(),
+            });
+        }
+    }
     None
+}
+
+/// Pull the first ```sql … ``` fenced block out of model prose. Returns the
+/// trimmed SQL, or None if there's no SQL fence. Accepts ```sql and a bare ```
+/// fence that contains an obvious SQL statement.
+fn extract_sql_fence(content: &str) -> Option<String> {
+    let lower = content.to_ascii_lowercase();
+    // Locate a fence opening: prefer an explicit ```sql.
+    let fence_start = lower.find("```sql").map(|i| i + 6).or_else(|| {
+        // Bare ``` fence — only accept if the body starts with a SQL verb.
+        lower.find("```").and_then(|i| {
+            let body = content[i + 3..].trim_start();
+            let bl = body.to_ascii_lowercase();
+            let looks_sql = ["select", "with", "insert", "update", "delete", "create", "alter", "drop"]
+                .iter()
+                .any(|kw| bl.starts_with(kw));
+            if looks_sql { Some(i + 3) } else { None }
+        })
+    })?;
+    let rest = &content[fence_start..];
+    let end = rest.find("```").unwrap_or(rest.len());
+    let sql = rest[..end].trim().trim_start_matches('\n').trim();
+    if sql.is_empty() {
+        None
+    } else {
+        Some(sql.to_string())
+    }
 }
 
 fn try_match_tool(
@@ -781,4 +832,47 @@ fn map_finish(raw: &str) -> FinishReason {
 // turning on `tracing`.
 fn tracing_fallback(msg: &str) {
     crate::log_line!("ai_openai", "{msg}");
+}
+
+#[cfg(test)]
+mod sql_fence_tests {
+    use super::*;
+    use crate::ai::tools::catalog_scoped;
+
+    #[test]
+    fn extracts_explicit_sql_fence() {
+        let c = "Here you go:\n```sql\nSELECT COUNT(*) FROM film_genres;\n```\nDone.";
+        assert_eq!(
+            extract_sql_fence(c).as_deref(),
+            Some("SELECT COUNT(*) FROM film_genres;")
+        );
+    }
+
+    #[test]
+    fn extracts_bare_fence_with_sql_verb() {
+        let c = "```\nSELECT 1\n```";
+        assert_eq!(extract_sql_fence(c).as_deref(), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn ignores_non_sql_bare_fence() {
+        let c = "```\nnpm install foo\n```";
+        assert_eq!(extract_sql_fence(c), None);
+    }
+
+    #[test]
+    fn no_fence_returns_none() {
+        assert_eq!(extract_sql_fence("just talking, no code"), None);
+    }
+
+    #[test]
+    fn text_fallback_synthesizes_call_query_from_sql_prose() {
+        // The exact failure: weak local model writes SQL prose instead of a
+        // tool call. With call_query in the catalog, we synthesize the call.
+        let tools = catalog_scoped(false, true);
+        let content = "To count rows:\n```sql\nSELECT COUNT(DISTINCT actor_id) FROM film_actors;\n```";
+        let call = extract_text_tool_call(content, &tools).expect("should synthesize a call");
+        assert!(call.name == "call_query" || call.name == "run_query" || call.name == "call_sql");
+        assert!(call.arguments.contains("actor_id"));
+    }
 }
