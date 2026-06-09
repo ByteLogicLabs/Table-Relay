@@ -215,6 +215,10 @@ impl MongoDriver {
                 name,
                 columns: cols,
                 unique,
+                // Mongo index kinds live per-field (asc/desc/text/2dsphere/…),
+                // not as a single SQL-style method; the editor handles that
+                // via the fields textbox, so leave the SQL algorithm unset.
+                algorithm: None,
             });
         }
 

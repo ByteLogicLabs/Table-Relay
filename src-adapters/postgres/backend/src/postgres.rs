@@ -242,6 +242,8 @@ impl PostgresDriver {
             Option<String>,
             Option<String>,
             Option<String>,
+            Option<i32>,
+            Option<i32>,
         )>(
             r#"SELECT column_name,
                       COALESCE(udt_name, data_type) AS data_type,
@@ -251,7 +253,9 @@ impl PostgresDriver {
                       is_identity,
                       identity_generation,
                       is_generated,
-                      generation_expression
+                      generation_expression,
+                      numeric_precision,
+                      numeric_scale
                FROM information_schema.columns
                WHERE table_schema = $1 AND table_name = $2
                ORDER BY ordinal_position"#,
@@ -281,42 +285,60 @@ impl PostgresDriver {
         .bind(table)
         .fetch_optional(&self.pool);
 
-        // Indexes via pg_index + pg_class. indkey is an int2vector of
-        // attribute numbers (1-based); we expand against pg_attribute to
-        // get column names. `indisprimary` flags the PK index; `indisunique`
-        // catches single-column uniques we surface as UK on the column.
-        let idx_fut = sqlx::query_as::<_, (String, String, bool, bool)>(
+        // Indexes via pg_index + pg_class. `indkey` is an int2vector of
+        // attribute numbers (1-based). We expand it WITH ORDINALITY so each
+        // column keeps its real position within the index — `array_position`
+        // returns the FIRST match, which misorders any repeated attnum and
+        // collapses expression entries (attnum 0). `am.amname` is the index
+        // method (btree/hash/gin/gist/…) so the editor can show + diff the
+        // real algorithm instead of assuming BTREE. We restrict to key
+        // columns (k.attnum > 0) — expression-index entries (attnum 0) don't
+        // join to a real column and would otherwise produce blanks.
+        let idx_fut = sqlx::query_as::<_, (String, String, bool, bool, String)>(
             r#"SELECT ic.relname AS index_name,
                       a.attname  AS column_name,
                       ix.indisunique AS is_unique,
-                      ix.indisprimary AS is_primary
+                      ix.indisprimary AS is_primary,
+                      am.amname AS method
                FROM pg_catalog.pg_index ix
                JOIN pg_catalog.pg_class ic ON ic.oid = ix.indexrelid
                JOIN pg_catalog.pg_class tc ON tc.oid = ix.indrelid
                JOIN pg_catalog.pg_namespace n ON n.oid = tc.relnamespace
+               JOIN pg_catalog.pg_am am ON am.oid = ic.relam
+               JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, ord)
+                    ON TRUE
                JOIN pg_catalog.pg_attribute a
-                    ON a.attrelid = tc.oid
-                   AND a.attnum = ANY(ix.indkey)
-               WHERE n.nspname = $1 AND tc.relname = $2
-               ORDER BY ic.relname, array_position(ix.indkey, a.attnum)"#,
+                    ON a.attrelid = tc.oid AND a.attnum = k.attnum
+               WHERE n.nspname = $1 AND tc.relname = $2 AND k.attnum > 0
+               ORDER BY ic.relname, k.ord"#,
         )
         .bind(schema)
         .bind(table)
         .fetch_all(&self.pool);
 
         // Foreign keys via pg_constraint. `conkey` / `confkey` are int2[]
-        // of the local / referenced column positions; we unnest both in
-        // lockstep to get aligned (from_col, to_col) pairs.
-        let fk_fut = sqlx::query_as::<_, (String, String, String, String, String)>(
+        // of the local / referenced column positions. We unnest BOTH WITH
+        // ORDINALITY and join on the shared ordinal so each (from_col,
+        // to_col) pair stays aligned and ordered — a plain `unnest()` in the
+        // SELECT list (or `ORDER BY conname` alone) loses the column order,
+        // which transposes composite-FK mappings. `confupdtype`/`confdeltype`
+        // carry the ON UPDATE / ON DELETE actions (a/r/c/n/d) so the editor
+        // shows the real action instead of always "NO ACTION".
+        let fk_fut = sqlx::query_as::<_, (String, String, String, String, String, String, String)>(
             r#"WITH fk AS (
                    SELECT con.conname,
                           con.conrelid,
                           con.confrelid,
-                          unnest(con.conkey)  AS local_attnum,
-                          unnest(con.confkey) AS foreign_attnum
+                          con.confupdtype,
+                          con.confdeltype,
+                          lk.attnum AS local_attnum,
+                          fk2.attnum AS foreign_attnum,
+                          lk.ord     AS ord
                    FROM pg_catalog.pg_constraint con
                    JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                   JOIN LATERAL unnest(con.conkey)  WITH ORDINALITY AS lk(attnum, ord)  ON TRUE
+                   JOIN LATERAL unnest(con.confkey) WITH ORDINALITY AS fk2(attnum, ord) ON fk2.ord = lk.ord
                    WHERE con.contype = 'f'
                      AND n.nspname = $1
                      AND c.relname = $2
@@ -325,7 +347,9 @@ impl PostgresDriver {
                       la.attname                   AS from_col,
                       fn.nspname                   AS ref_schema,
                       fc.relname                   AS ref_table,
-                      fa.attname                   AS ref_col
+                      fa.attname                   AS ref_col,
+                      fk.confupdtype::text         AS on_update,
+                      fk.confdeltype::text         AS on_delete
                FROM fk
                JOIN pg_catalog.pg_attribute la
                     ON la.attrelid = fk.conrelid AND la.attnum = fk.local_attnum
@@ -333,7 +357,7 @@ impl PostgresDriver {
                JOIN pg_catalog.pg_namespace fn ON fn.oid = fc.relnamespace
                JOIN pg_catalog.pg_attribute fa
                     ON fa.attrelid = fk.confrelid AND fa.attnum = fk.foreign_attnum
-               ORDER BY fk.conname"#,
+               ORDER BY fk.conname, fk.ord"#,
         )
         .bind(schema)
         .bind(table)
@@ -352,12 +376,12 @@ impl PostgresDriver {
         // column indexes and the PK.
         let mut indexes_map: std::collections::BTreeMap<
             String,
-            (Vec<String>, bool, bool),
+            (Vec<String>, bool, bool, String),
         > = Default::default();
-        for (idx_name, col, is_unique, is_primary) in idx_rows {
+        for (idx_name, col, is_unique, is_primary, method) in idx_rows {
             let entry = indexes_map
                 .entry(idx_name)
-                .or_insert_with(|| (Vec::new(), is_unique, is_primary));
+                .or_insert_with(|| (Vec::new(), is_unique, is_primary, method.clone()));
             entry.0.push(col);
             entry.1 = entry.1 && is_unique;
             entry.2 = entry.2 || is_primary;
@@ -366,7 +390,7 @@ impl PostgresDriver {
         let mut primary_key: Vec<String> = Vec::new();
         let mut indexed_cols: std::collections::BTreeSet<String> = Default::default();
         let mut unique_single: std::collections::BTreeSet<String> = Default::default();
-        for (_, (cols, unique, is_primary)) in &indexes_map {
+        for (_, (cols, unique, is_primary, _method)) in &indexes_map {
             for c in cols {
                 indexed_cols.insert(c.clone());
             }
@@ -383,16 +407,20 @@ impl PostgresDriver {
             to_schema: String,
             to_table: String,
             to_cols: Vec<String>,
+            on_update: String,
+            on_delete: String,
         }
         let mut fk_map: std::collections::BTreeMap<String, FkAcc> = Default::default();
         let mut fk_cols_set: std::collections::BTreeSet<String> = Default::default();
-        for (name, col, ref_schema, ref_table, ref_col) in fk_rows {
+        for (name, col, ref_schema, ref_table, ref_col, on_update, on_delete) in fk_rows {
             fk_cols_set.insert(col.clone());
             let entry = fk_map.entry(name).or_default();
             entry.from_cols.push(col);
             entry.to_schema = ref_schema;
             entry.to_table = ref_table;
             entry.to_cols.push(ref_col);
+            entry.on_update = on_update;
+            entry.on_delete = on_delete;
         }
 
         let columns: Vec<ColumnInfo> = col_rows
@@ -408,7 +436,19 @@ impl PostgresDriver {
                     identity_generation,
                     is_generated,
                     generation_expression,
+                    numeric_precision,
+                    numeric_scale,
                 )| {
+                    // Compose precision/scale into the type for numeric/decimal
+                    // so the editor shows `numeric(10,2)` instead of a bare
+                    // `numeric` (which would silently drop precision on edit).
+                    // `character_maximum_length` already covers varchar via the
+                    // `length` field; numeric uses precision/scale instead.
+                    let data_type = match (data_type.as_str(), numeric_precision, numeric_scale) {
+                        ("numeric" | "decimal", Some(p), Some(s)) if s > 0 => format!("{data_type}({p},{s})"),
+                        ("numeric" | "decimal", Some(p), _) => format!("{data_type}({p})"),
+                        _ => data_type,
+                    };
                     let mut extra_tags: Vec<String> = Vec::new();
                     if is_identity.as_deref().map(|s| s.eq_ignore_ascii_case("YES")).unwrap_or(false) {
                         // `identity_generation` is `"ALWAYS"` or `"BY DEFAULT"`.
@@ -456,10 +496,15 @@ impl PostgresDriver {
 
         let indexes: Vec<IndexInfo> = indexes_map
             .into_iter()
-            .map(|(name, (columns, unique, _is_primary))| IndexInfo {
+            .map(|(name, (columns, unique, _is_primary, method))| IndexInfo {
                 name,
                 columns,
                 unique,
+                // Normalise to the uppercase forms the editor's algorithm
+                // dropdown uses (BTREE/HASH/…); other PG methods (gin/gist/
+                // brin/spgist) pass through uppercased and render as a custom
+                // value in the searchable cell.
+                algorithm: Some(method.to_uppercase()),
             })
             .collect();
 
@@ -473,6 +518,8 @@ impl PostgresDriver {
                 to_schema: acc.to_schema,
                 to_table: acc.to_table,
                 to_columns: acc.to_cols,
+                on_update: Some(decode_fk_action(&acc.on_update)),
+                on_delete: Some(decode_fk_action(&acc.on_delete)),
             })
             .collect();
 
@@ -570,6 +617,9 @@ impl PostgresDriver {
                 to_schema: schema.to_string(),
                 to_table: a.to_table,
                 to_columns: a.to_cols,
+                // Relations view (diagram) doesn't need referential actions.
+                on_update: None,
+                on_delete: None,
             })
             .collect())
     }
@@ -869,6 +919,23 @@ impl PostgresDriver {
             })?;
         log_line!("pg_create_db", "  created database {}", name);
         Ok(())
+    }
+
+    /// Every collation registered in the current database, alphabetised.
+    /// Drives the schema editor's per-column collation dropdown. We skip
+    /// the `default`/`C`/`POSIX` pseudo-collations' duplicates by reading
+    /// distinct names from `pg_collation`.
+    pub async fn list_all_collations(&self) -> Result<Vec<String>, AdapterError> {
+        let rows: Vec<String> = sqlx::query_as::<_, (String,)>(
+            "SELECT DISTINCT collname FROM pg_collation ORDER BY collname",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AdapterError::from)?
+        .into_iter()
+        .map(|(n,)| n)
+        .collect();
+        Ok(rows)
     }
 
     pub async fn run_query(
@@ -1785,10 +1852,28 @@ pub(crate) fn bind_json<'q>(
             }
         }
         JsonValue::String(s) => q.bind(s.clone()),
-        JsonValue::Array(_) | JsonValue::Object(_) => {
-            q.bind(serde_json::to_string(v).unwrap_or_default())
-        }
+        // Bind arrays/objects as a real JSON value (OID json/jsonb), not a
+        // text string. Postgres won't implicitly cast a text param to jsonb
+        // (`column is of type jsonb but expression is of type text`), so a
+        // grid edit on a json/jsonb column must arrive as a JSON bind. The
+        // frontend sends parsed JSON for json-kind cells; this is the
+        // matching backend half.
+        JsonValue::Array(_) | JsonValue::Object(_) => q.bind(sqlx::types::Json(v.clone())),
     }
+}
+
+/// Decode a Postgres `confupdtype`/`confdeltype` code into canonical SQL.
+/// Codes (see pg_constraint): a=NO ACTION, r=RESTRICT, c=CASCADE,
+/// n=SET NULL, d=SET DEFAULT.
+fn decode_fk_action(code: &str) -> String {
+    match code.trim() {
+        "c" => "CASCADE",
+        "n" => "SET NULL",
+        "d" => "SET DEFAULT",
+        "r" => "RESTRICT",
+        _ => "NO ACTION",
+    }
+    .to_string()
 }
 
 /// Postgres identifier quoting — double quotes, double them to escape.

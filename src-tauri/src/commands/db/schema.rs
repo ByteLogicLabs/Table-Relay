@@ -269,3 +269,23 @@ pub async fn db_list_collations(
     })
     .await
 }
+
+/// Every collation the server knows, independent of charset. Drives the
+/// schema editor's per-column collation dropdown. Empty list ⇒ adapter
+/// has no collation concept and the cell stays free-text.
+#[tauri::command]
+pub async fn db_list_all_collations(
+    app: AppHandle,
+    connection_id: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<Vec<String>, AdapterError> {
+    with_retry(
+        &app,
+        &registry,
+        &factories,
+        &connection_id,
+        |a| async move { a.list_all_collations().await },
+    )
+    .await
+}

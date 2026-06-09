@@ -127,6 +127,13 @@ pub struct IndexInfo {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    /// Index method / algorithm as the engine reports it (MySQL
+    /// `INDEX_TYPE`: BTREE/HASH/FULLTEXT/SPATIAL; Postgres `pg_am.amname`:
+    /// btree/hash/gin/gist/…). `None` for adapters that don't expose it.
+    /// Lets the schema editor show the real method and diff changes to it
+    /// instead of always assuming BTREE.
+    #[serde(default)]
+    pub algorithm: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -139,6 +146,14 @@ pub struct ForeignKey {
     pub to_schema: String,
     pub to_table: String,
     pub to_columns: Vec<String>,
+    /// Referential actions as canonical SQL (`NO ACTION`, `CASCADE`,
+    /// `SET NULL`, `RESTRICT`, `SET DEFAULT`). `None` when the adapter
+    /// doesn't surface them; the editor then shows `NO ACTION` and only
+    /// marks the FK dirty on a real change once actions are known.
+    #[serde(default)]
+    pub on_update: Option<String>,
+    #[serde(default)]
+    pub on_delete: Option<String>,
 }
 
 /// Result of `execute_raw`. May contain multiple statements; each carries its

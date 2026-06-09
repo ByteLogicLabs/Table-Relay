@@ -243,6 +243,9 @@ impl SqliteDriver {
                 name: name.clone(),
                 columns,
                 unique,
+                // SQLite has no exposed index method (all b-tree); leave it
+                // unset so the editor doesn't claim a specific algorithm.
+                algorithm: None,
             });
         }
 
@@ -284,6 +287,8 @@ impl SqliteDriver {
                 to_schema: MAIN_SCHEMA.into(),
                 to_table: acc.to_table,
                 to_columns: acc.to_cols,
+                on_update: None,
+                on_delete: None,
             })
             .collect();
 
@@ -409,6 +414,8 @@ impl SqliteDriver {
                     to_schema: MAIN_SCHEMA.into(),
                     to_table: acc.to_table,
                     to_columns: acc.to_cols,
+                    on_update: None,
+                    on_delete: None,
                 });
             }
         }

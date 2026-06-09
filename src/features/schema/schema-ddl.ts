@@ -4,10 +4,13 @@ import {
   type DraftColumn,
   type DraftForeignKey,
   type DraftIndex,
+  type FkAction,
   columnKeyFor,
   columnTypeString,
   isStringyType,
   normaliseExtra,
+  normaliseIndexAlgorithm,
+  normaliseFkAction,
 } from './schema-types';
 
 export function q(ident: string, dialect: Dialect = 'mysql'): string {
@@ -19,19 +22,98 @@ export function quoteQualified(schema: string, table: string, dialect: Dialect =
   return `${q(schema, dialect)}.${q(table, dialect)}`;
 }
 
+/** Format a column DEFAULT for emission. Distinguishes a SQL expression
+ *  (kept verbatim) from a string literal (quoted). Without this, a user
+ *  typing `active` produced `DEFAULT active` — a syntax error on Postgres
+ *  and a bad column reference on MySQL. Heuristics, in order:
+ *   - already quoted (`'...'`) → keep as-is
+ *   - numeric literal, NULL, TRUE/FALSE → keep unquoted
+ *   - a known no-arg keyword or any `func(...)` call → keep unquoted
+ *     (CURRENT_TIMESTAMP, now(), nextval(...), gen_random_uuid(), …)
+ *   - otherwise → treat as a string literal and single-quote it
+ *  This is best-effort; power users can always pre-quote to force literal. */
+export function formatDefault(raw: string): string {
+  const v = raw.trim();
+  if (v === '') return v;
+  // Already a quoted string literal — leave untouched (user took control).
+  if (/^'.*'$/s.test(v)) return v;
+  const up = v.toUpperCase();
+  if (up === 'NULL' || up === 'TRUE' || up === 'FALSE') return up;
+  // Numeric literal (int / decimal / scientific / signed).
+  if (/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(v)) return v;
+  // Bare keyword expressions and function calls stay unquoted.
+  const KEYWORD_EXPRS = new Set([
+    'CURRENT_TIMESTAMP', 'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_USER',
+    'LOCALTIME', 'LOCALTIMESTAMP', 'NOW', 'UUID',
+  ]);
+  if (KEYWORD_EXPRS.has(up.replace(/\(\)$/, ''))) return v;
+  if (/^[a-z_][a-z0-9_]*\s*\(.*\)$/is.test(v)) return v; // some_func(args)
+  if (/::/.test(v)) return v; // already a Postgres cast expression
+  // Fallback: a string literal. Single-quote, doubling embedded quotes.
+  return `'${v.replace(/'/g, "''")}'`;
+}
+
+/** Reduce a DEFAULT (draft text or server-reported) to a canonical core so
+ *  the dirty-diff doesn't fire on cosmetic differences the server adds. The
+ *  server normalises defaults: Postgres returns `'active'::text`, MySQL may
+ *  return `active` (bare) or `CURRENT_TIMESTAMP` lowercased. We first run the
+ *  value through `formatDefault` so a bare literal the user typed (`active`)
+ *  and the engine's quoted form (`'active'`/`'active'::text`) reduce to the
+ *  SAME canonical core — without this the column read as perpetually dirty
+ *  after every save. Then strip a trailing `::type` cast, unwrap the quotes
+ *  (preserving the literal's case), and case-fold bare expressions. */
+function canonicalDefault(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  let v = raw.trim();
+  if (v === '') return null;
+  // Normalise the draft's bare string literal into quoted form so it lines
+  // up with the engine's reported value (`active` -> `'active'`). Keywords,
+  // numbers, functions and casts pass through unchanged.
+  v = formatDefault(v);
+  // Drop a trailing Postgres cast: 'active'::text  ->  'active'
+  v = v.replace(/::[a-z_][a-z0-9_ "().]*$/i, '').trim();
+  // Unwrap a single-quoted literal and unescape doubled quotes (case kept).
+  const m = /^'(.*)'$/s.exec(v);
+  if (m) return m[1].replace(/''/g, "'");
+  // Bare expression / keyword / number — case-fold for stable comparison.
+  return v.toUpperCase();
+}
+
+/** Whether two DEFAULTs are semantically equal after normalisation. */
+export function defaultsEqual(a: string | null | undefined, b: string | null | undefined): boolean {
+  return canonicalDefault(a) === canonicalDefault(b);
+}
+
+/** Diff a per-column "inherit-able" attribute (charset/collation). An empty
+ *  draft value means "inherit from table/db" — not a change — so it never
+ *  counts as dirty regardless of the server-reported effective value. A
+ *  non-empty draft is compared case-insensitively. */
+function attrChanged(draft: string, orig: string | null | undefined): boolean {
+  const d = draft.trim();
+  if (d === '') return false;
+  return d.toLowerCase() !== (orig ?? '').trim().toLowerCase();
+}
+
 export function buildColumnClause(col: DraftColumn, dialect: Dialect = 'mysql'): string {
   const parts = [q(col.name, dialect), col.dataType.trim()];
-  // CHARACTER SET / COLLATE only apply to string-ish types and are MySQL
-  // syntax; Postgres uses `COLLATE "foo"` without CHARACTER SET, and
-  // SQLite has no concept of either. Skip for non-MySQL to keep the
-  // emitted DDL valid across dialects.
-  if (dialect === 'mysql' && isStringyType(col.dataType)) {
-    if (col.characterSet.trim()) parts.push(`CHARACTER SET ${col.characterSet.trim()}`);
-    if (col.collation.trim()) parts.push(`COLLATE ${col.collation.trim()}`);
+  // CHARACTER SET / COLLATE only apply to string-ish types. MySQL accepts
+  // both, bare-worded (`CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`).
+  // Postgres has no per-column CHARACTER SET (encoding is database-level),
+  // but does support `COLLATE "name"` — and the name must be
+  // double-quoted (collations like `en_US` / `und-x-icu` aren't bare
+  // identifiers). SQLite has no concept of either. Emit per-dialect so the
+  // user's collation pick actually reaches the DDL.
+  if (isStringyType(col.dataType)) {
+    if (dialect === 'mysql') {
+      if (col.characterSet.trim()) parts.push(`CHARACTER SET ${col.characterSet.trim()}`);
+      if (col.collation.trim()) parts.push(`COLLATE ${col.collation.trim()}`);
+    } else if (dialect === 'postgres' && col.collation.trim()) {
+      parts.push(`COLLATE "${col.collation.trim().replace(/"/g, '""')}"`);
+    }
   }
   parts.push(col.nullable ? 'NULL' : 'NOT NULL');
   if (col.defaultValue !== null && col.defaultValue !== '') {
-    parts.push(`DEFAULT ${col.defaultValue}`);
+    parts.push(`DEFAULT ${formatDefault(col.defaultValue)}`);
   }
   const extra = col.extra.trim();
   if (extra && extra.toUpperCase() !== 'NONE') {
@@ -71,11 +153,16 @@ export function isColumnsDirty(original: ColumnInfo[], drafts: DraftColumn[]): b
     if (d.name !== o.name) return true;
     if (d.dataType !== origType) return true;
     if (d.nullable !== o.nullable) return true;
-    if ((d.defaultValue ?? null) !== (o.default ?? null)) return true;
+    if (!defaultsEqual(d.defaultValue, o.default)) return true;
     if (d.key !== columnKeyFor(o)) return true;
     if (d.extra !== normaliseExtra(o.extra ?? '')) return true;
-    if (d.characterSet !== (o.characterSet ?? '')) return true;
-    if (d.collation !== (o.collation ?? '')) return true;
+    // Charset/collation: an empty draft means "inherit" — don't diff it
+    // against the server-reported effective value (MySQL returns the table's
+    // inherited charset even when the column clause omitted it, which would
+    // otherwise mark every string column perpetually dirty). Only a non-empty
+    // user choice that differs (case-insensitively) counts.
+    if (attrChanged(d.characterSet, o.characterSet)) return true;
+    if (attrChanged(d.collation, o.collation)) return true;
   }
   return false;
 }
@@ -90,9 +177,20 @@ export function isIndexesDirty(original: IndexInfo[], drafts: DraftIndex[]): boo
     if (!o) return true;
     if (d.name !== o.name) return true;
     if (d.isUnique !== o.unique) return true;
+    if (algorithmChanged(d, o)) return true;
     if (d.columns.split(',').map(s => s.trim()).filter(Boolean).join(',') !== o.columns.join(',')) return true;
   }
   return false;
+}
+
+/** Did the user change the index method? Only compares when the engine
+ *  reported a method we can represent (`normaliseIndexAlgorithm` non-null) —
+ *  otherwise the draft falls back to BTREE and a real GIN/GIST index would
+ *  look perpetually dirty. */
+function algorithmChanged(d: DraftIndex, o: IndexInfo): boolean {
+  const origAlg = normaliseIndexAlgorithm(o.algorithm);
+  if (!origAlg) return false;
+  return d.algorithm !== origAlg;
 }
 
 export function isFksDirty(original: ForeignKey[], drafts: DraftForeignKey[]): boolean {
@@ -106,10 +204,19 @@ export function isFksDirty(original: ForeignKey[], drafts: DraftForeignKey[]): b
     if (d.columns.join(',') !== o.fromColumns.join(',')) return true;
     if (d.refTable !== o.toTable) return true;
     if (d.refColumns.split(',').map(s => s.trim()).filter(Boolean).join(',') !== o.toColumns.join(',')) return true;
-    // onUpdate/onDelete aren't in ForeignKey — treat as non-dirty unless changed from NO ACTION
-    if (d.onUpdate !== 'NO ACTION' || d.onDelete !== 'NO ACTION') return true;
+    if (fkActionChanged(d.onUpdate, o.onUpdate)) return true;
+    if (fkActionChanged(d.onDelete, o.onDelete)) return true;
   }
   return false;
+}
+
+/** Did the user change a referential action? When the adapter didn't report
+ *  the original action (`undefined`), the draft defaults to NO ACTION — only
+ *  flag dirty if the user picked something other than that default, so an
+ *  unchanged FK with unknown actions doesn't read as perpetually dirty. */
+function fkActionChanged(draft: FkAction, orig: string | undefined | null): boolean {
+  const o = normaliseFkAction(orig);
+  return draft !== o;
 }
 
 // -------- SQL batch builder --------
@@ -262,7 +369,7 @@ export function buildSaveBatch(
       const renamed = c.name !== orig.name;
       const typeChanged = c.dataType !== origType;
       const nullChanged = c.nullable !== orig.nullable;
-      const defaultChanged = (c.defaultValue ?? null) !== (orig.default ?? null);
+      const defaultChanged = !defaultsEqual(c.defaultValue, orig.default);
       const extraChanged = c.extra !== normaliseExtra(orig.extra ?? '');
       const charsetChanged = c.characterSet !== (orig.characterSet ?? '');
       const collationChanged = c.collation !== (orig.collation ?? '');
@@ -277,8 +384,16 @@ export function buildSaveBatch(
             out.push(`ALTER TABLE ${tbl} RENAME COLUMN ${qi(c.originalName)} TO ${qi(c.name)}`);
           }
           const colRef = qi(c.name);
-          if (typeChanged && c.dataType.trim()) {
-            out.push(`ALTER TABLE ${tbl} ALTER COLUMN ${colRef} TYPE ${c.dataType.trim()}`);
+          // Collation lives on the type in Postgres, so a collation change
+          // (with or without a type change) is applied via `ALTER COLUMN
+          // … TYPE`. Restate the existing type when only the collation
+          // moved. The name is double-quoted (`en_US`, `und-x-icu` aren't
+          // bare identifiers).
+          const pgCollate = isStringyType(c.dataType) && c.collation.trim()
+            ? ` COLLATE "${c.collation.trim().replace(/"/g, '""')}"`
+            : '';
+          if ((typeChanged || collationChanged) && c.dataType.trim()) {
+            out.push(`ALTER TABLE ${tbl} ALTER COLUMN ${colRef} TYPE ${c.dataType.trim()}${pgCollate}`);
           }
           if (nullChanged) {
             out.push(
@@ -290,11 +405,12 @@ export function buildSaveBatch(
           if (defaultChanged) {
             out.push(
               c.defaultValue !== null && c.defaultValue !== ''
-                ? `ALTER TABLE ${tbl} ALTER COLUMN ${colRef} SET DEFAULT ${c.defaultValue}`
+                ? `ALTER TABLE ${tbl} ALTER COLUMN ${colRef} SET DEFAULT ${formatDefault(c.defaultValue)}`
                 : `ALTER TABLE ${tbl} ALTER COLUMN ${colRef} DROP DEFAULT`,
             );
           }
-          // `extra`, charset, collation are MySQL concepts — skip on PG.
+          // `extra` + `charset` are MySQL-only; skipped on PG. Collation
+          // is handled above via `ALTER COLUMN … TYPE … COLLATE`.
         }
       }
       // Key transitions
@@ -322,18 +438,22 @@ export function buildSaveBatch(
     }
   }
 
-  // 5) Add / restore indexes
+  // 5) Add / restore indexes. A blank name is auto-generated (mirrors the
+  //    create-table path) — silently skipping a named-but-unnamed index
+  //    made it look like the index "rolled back" after save when really it
+  //    was never emitted. Only the columns are required.
   for (const i of indexes) {
     if (i.pendingDelete) continue;
     const cols = i.columns.split(',').map(s => s.trim()).filter(Boolean);
-    if (cols.length === 0 || !i.name.trim()) continue;
+    if (cols.length === 0) continue;
     const orig = i.originalName ? origIndexes.get(i.originalName) : null;
     const recreate = !orig || indexNeedsRecreate(i, orig);
     if (recreate) {
+      const name = i.name.trim() || defaultIndexName(table, cols, i.isUnique);
       const unique = i.isUnique ? 'UNIQUE ' : '';
       const colList = cols.map(qi).join(', ');
       const using = dialect === 'mysql' ? ` USING ${i.algorithm}` : '';
-      out.push(`CREATE ${unique}INDEX ${qi(i.name)}${using} ON ${tbl} (${colList})`);
+      out.push(`CREATE ${unique}INDEX ${qi(name)}${using} ON ${tbl} (${colList})`);
     }
   }
 
@@ -363,6 +483,7 @@ export function indexNeedsRecreate(d: DraftIndex, o?: IndexInfo): boolean {
   if (!o) return true;
   if (d.name !== o.name) return true;
   if (d.isUnique !== o.unique) return true;
+  if (algorithmChanged(d, o)) return true;
   const cols = d.columns.split(',').map(s => s.trim()).filter(Boolean);
   return cols.join(',') !== o.columns.join(',');
 }
@@ -373,6 +494,7 @@ export function fkNeedsRecreate(d: DraftForeignKey, o?: ForeignKey): boolean {
   if (d.refTable !== o.toTable) return true;
   const refCols = d.refColumns.split(',').map(s => s.trim()).filter(Boolean);
   if (refCols.join(',') !== o.toColumns.join(',')) return true;
-  if (d.onUpdate !== 'NO ACTION' || d.onDelete !== 'NO ACTION') return true;
+  if (fkActionChanged(d.onUpdate, o.onUpdate)) return true;
+  if (fkActionChanged(d.onDelete, o.onDelete)) return true;
   return false;
 }

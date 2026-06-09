@@ -38,11 +38,15 @@ use crate::ai::{AiError, AiProvider, ProviderKind};
 pub(super) const DEFAULT_AI_MAX_TOKENS: u32 = 16_384;
 
 /// Default tool-calling round cap when the user hasn't set one. Capable
-/// agentic models legitimately chain several reads → a query → a summary, so
-/// 12 leaves headroom; the repeat-guard below stops genuine loops far sooner.
-pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 50;
+/// agentic models legitimately chain many steps — "analyze this DB, create
+/// several tables, seed dummy data" is dozens of describe→create→insert calls.
+/// The per-tool repeat-guards (identical `call_query` capped at 4, shape tools
+/// at 6) stop genuine loops far sooner, so a high round ceiling is safe and
+/// lets big multi-step tasks finish instead of being cut off mid-way.
+pub const DEFAULT_MAX_TOOL_ITERATIONS: u32 = 100;
 /// Default cap on consecutive identical tool calls before the loop-guard stops
-/// the turn. Overridable per-turn via the user's AI settings.
+/// the turn. Overridable per-turn via the user's AI settings. (Per-tool caps in
+/// the loop are tighter; this is the generic backstop.)
 pub const DEFAULT_MAX_REPEAT_CALLS: u32 = 50;
 
 #[derive(Debug, Serialize)]

@@ -294,11 +294,12 @@ impl MysqlDriver {
 
         let idx_fut = async {
             let t = Instant::now();
-            let r = sqlx::query_as::<_, (String, String, i64, i64)>(
+            let r = sqlx::query_as::<_, (String, String, i64, i64, String)>(
                 r#"SELECT CAST(INDEX_NAME AS CHAR CHARACTER SET utf8mb4),
                           CAST(COLUMN_NAME AS CHAR CHARACTER SET utf8mb4),
                           CAST(SEQ_IN_INDEX AS SIGNED),
-                          CAST(NON_UNIQUE AS SIGNED)
+                          CAST(NON_UNIQUE AS SIGNED),
+                          CAST(INDEX_TYPE AS CHAR CHARACTER SET utf8mb4)
                    FROM information_schema.STATISTICS
                    WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
                    ORDER BY INDEX_NAME, SEQ_IN_INDEX"#,
@@ -319,16 +320,27 @@ impl MysqlDriver {
                 Option<String>,
                 Option<String>,
                 Option<i64>,
+                Option<String>,
+                Option<String>,
             )>(
-                r#"SELECT CAST(CONSTRAINT_NAME AS CHAR CHARACTER SET utf8mb4),
-                          CAST(COLUMN_NAME AS CHAR CHARACTER SET utf8mb4),
-                          CAST(REFERENCED_TABLE_SCHEMA AS CHAR CHARACTER SET utf8mb4),
-                          CAST(REFERENCED_TABLE_NAME AS CHAR CHARACTER SET utf8mb4),
-                          CAST(REFERENCED_COLUMN_NAME AS CHAR CHARACTER SET utf8mb4),
-                          CAST(POSITION_IN_UNIQUE_CONSTRAINT AS SIGNED)
-                   FROM information_schema.KEY_COLUMN_USAGE
-                   WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? AND REFERENCED_TABLE_NAME IS NOT NULL
-                   ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION"#,
+                // Join REFERENTIAL_CONSTRAINTS for the ON UPDATE / ON DELETE
+                // rules (KEY_COLUMN_USAGE doesn't carry them), so the schema
+                // editor shows the real actions instead of always NO ACTION.
+                r#"SELECT CAST(kcu.CONSTRAINT_NAME AS CHAR CHARACTER SET utf8mb4),
+                          CAST(kcu.COLUMN_NAME AS CHAR CHARACTER SET utf8mb4),
+                          CAST(kcu.REFERENCED_TABLE_SCHEMA AS CHAR CHARACTER SET utf8mb4),
+                          CAST(kcu.REFERENCED_TABLE_NAME AS CHAR CHARACTER SET utf8mb4),
+                          CAST(kcu.REFERENCED_COLUMN_NAME AS CHAR CHARACTER SET utf8mb4),
+                          CAST(kcu.POSITION_IN_UNIQUE_CONSTRAINT AS SIGNED),
+                          CAST(rc.UPDATE_RULE AS CHAR CHARACTER SET utf8mb4),
+                          CAST(rc.DELETE_RULE AS CHAR CHARACTER SET utf8mb4)
+                   FROM information_schema.KEY_COLUMN_USAGE kcu
+                   LEFT JOIN information_schema.REFERENTIAL_CONSTRAINTS rc
+                          ON rc.CONSTRAINT_SCHEMA = kcu.TABLE_SCHEMA
+                         AND rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+                         AND rc.TABLE_NAME = kcu.TABLE_NAME
+                   WHERE kcu.TABLE_SCHEMA = ? AND kcu.TABLE_NAME = ? AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+                   ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION"#,
             )
             .bind(schema)
             .bind(table)
@@ -344,9 +356,11 @@ impl MysqlDriver {
             return Err(AdapterError::NotFound(format!("{schema}.{table} not found")));
         }
 
-        let mut indexes_map: std::collections::BTreeMap<String, (Vec<String>, bool)> = Default::default();
-        for (name, col, _seq, non_unique) in idx_rows {
-            let entry = indexes_map.entry(name).or_insert_with(|| (Vec::new(), non_unique == 0));
+        let mut indexes_map: std::collections::BTreeMap<String, (Vec<String>, bool, String)> = Default::default();
+        for (name, col, _seq, non_unique, index_type) in idx_rows {
+            let entry = indexes_map
+                .entry(name)
+                .or_insert_with(|| (Vec::new(), non_unique == 0, index_type.clone()));
             entry.0.push(col);
             entry.1 = entry.1 && non_unique == 0;
         }
@@ -354,7 +368,7 @@ impl MysqlDriver {
         let mut primary_key: Vec<String> = Vec::new();
         let mut indexed_cols: std::collections::BTreeSet<String> = Default::default();
         let mut unique_single: std::collections::BTreeSet<String> = Default::default();
-        for (name, (cols, unique)) in &indexes_map {
+        for (name, (cols, unique, _index_type)) in &indexes_map {
             for c in cols {
                 indexed_cols.insert(c.clone());
             }
@@ -365,12 +379,12 @@ impl MysqlDriver {
             }
         }
 
-        let fk_rows: Vec<(String, String, String, String, String, Option<i64>)> = match fk_rows_res {
+        let fk_rows: Vec<(String, String, String, String, String, Option<i64>, Option<String>, Option<String>)> = match fk_rows_res {
             Ok(rows) => rows
                 .into_iter()
-                .filter_map(|(name, col, ref_s, ref_t, ref_c, pos)| {
+                .filter_map(|(name, col, ref_s, ref_t, ref_c, pos, upd, del)| {
                     match (ref_s, ref_t, ref_c) {
-                        (Some(rs), Some(rt), Some(rc)) => Some((name, col, rs, rt, rc, pos)),
+                        (Some(rs), Some(rt), Some(rc)) => Some((name, col, rs, rt, rc, pos, upd, del)),
                         _ => None,
                     }
                 })
@@ -387,16 +401,22 @@ impl MysqlDriver {
             to_schema: String,
             to_table: String,
             to_cols: Vec<String>,
+            on_update: Option<String>,
+            on_delete: Option<String>,
         }
         let mut fk_map: std::collections::BTreeMap<String, FkAcc> = Default::default();
         let mut fk_cols_set: std::collections::BTreeSet<String> = Default::default();
-        for (name, col, ref_schema, ref_table, ref_col, _pos) in fk_rows {
+        for (name, col, ref_schema, ref_table, ref_col, _pos, on_update, on_delete) in fk_rows {
             fk_cols_set.insert(col.clone());
             let entry = fk_map.entry(name).or_default();
             entry.from_cols.push(col);
             entry.to_schema = ref_schema;
             entry.to_table = ref_table;
             entry.to_cols.push(ref_col);
+            // MySQL reports rules as canonical SQL already (CASCADE / SET NULL
+            // / NO ACTION / RESTRICT / SET DEFAULT). Keep the first non-null.
+            if entry.on_update.is_none() { entry.on_update = on_update; }
+            if entry.on_delete.is_none() { entry.on_delete = on_delete; }
         }
 
         let columns = col_rows
@@ -419,7 +439,12 @@ impl MysqlDriver {
 
         let indexes = indexes_map
             .into_iter()
-            .map(|(name, (columns, unique))| IndexInfo { name, columns, unique })
+            .map(|(name, (columns, unique, index_type))| IndexInfo {
+                name,
+                columns,
+                unique,
+                algorithm: Some(index_type),
+            })
             .collect();
 
         let foreign_keys = fk_map
@@ -432,6 +457,8 @@ impl MysqlDriver {
                 to_schema: acc.to_schema,
                 to_table: acc.to_table,
                 to_columns: acc.to_cols,
+                on_update: acc.on_update,
+                on_delete: acc.on_delete,
             })
             .collect();
 
@@ -508,12 +535,13 @@ impl MysqlDriver {
         };
 
         let idx_fut = async {
-            sqlx::query_as::<_, (String, String, String, i64, i64)>(
+            sqlx::query_as::<_, (String, String, String, i64, i64, String)>(
                 r#"SELECT CAST(TABLE_NAME AS CHAR CHARACTER SET utf8mb4),
                           CAST(INDEX_NAME AS CHAR CHARACTER SET utf8mb4),
                           CAST(COLUMN_NAME AS CHAR CHARACTER SET utf8mb4),
                           CAST(SEQ_IN_INDEX AS SIGNED),
-                          CAST(NON_UNIQUE AS SIGNED)
+                          CAST(NON_UNIQUE AS SIGNED),
+                          CAST(INDEX_TYPE AS CHAR CHARACTER SET utf8mb4)
                    FROM information_schema.STATISTICS
                    WHERE TABLE_SCHEMA = ?
                    ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX"#,
@@ -562,11 +590,13 @@ impl MysqlDriver {
 
         let mut idx_by_table: std::collections::BTreeMap<
             String,
-            std::collections::BTreeMap<String, (Vec<String>, bool)>,
+            std::collections::BTreeMap<String, (Vec<String>, bool, String)>,
         > = Default::default();
-        for (tbl, idx_name, col_name, _seq, non_unique) in idx {
+        for (tbl, idx_name, col_name, _seq, non_unique, index_type) in idx {
             let per_table = idx_by_table.entry(tbl).or_default();
-            let entry = per_table.entry(idx_name).or_insert_with(|| (Vec::new(), non_unique == 0));
+            let entry = per_table
+                .entry(idx_name)
+                .or_insert_with(|| (Vec::new(), non_unique == 0, index_type.clone()));
             entry.0.push(col_name);
             entry.1 = entry.1 && non_unique == 0;
         }
@@ -604,7 +634,7 @@ impl MysqlDriver {
             let mut primary_key: Vec<String> = Vec::new();
             let mut indexed_cols: std::collections::BTreeSet<String> = Default::default();
             let mut unique_single: std::collections::BTreeSet<String> = Default::default();
-            for (name, (cols, unique)) in &indexes_map {
+            for (name, (cols, unique, _index_type)) in &indexes_map {
                 for c in cols { indexed_cols.insert(c.clone()); }
                 if name == "PRIMARY" {
                     primary_key = cols.clone();
@@ -639,7 +669,12 @@ impl MysqlDriver {
 
             let indexes = indexes_map
                 .into_iter()
-                .map(|(name, (columns, unique))| IndexInfo { name, columns, unique })
+                .map(|(name, (columns, unique, index_type))| IndexInfo {
+                    name,
+                    columns,
+                    unique,
+                    algorithm: Some(index_type),
+                })
                 .collect();
 
             let foreign_keys = fk_map
@@ -652,6 +687,10 @@ impl MysqlDriver {
                     to_schema: acc.to_schema,
                     to_table: acc.to_table,
                     to_columns: acc.to_cols,
+                    // Bulk schema scan doesn't fetch referential rules; the
+                    // per-table editor uses describe_table which does.
+                    on_update: None,
+                    on_delete: None,
                 })
                 .collect();
 
@@ -705,6 +744,9 @@ impl MysqlDriver {
                 to_schema: to_schema.clone(),
                 to_table: to_table.clone(),
                 to_columns: Vec::new(),
+                // Relations view doesn't need referential actions.
+                on_update: None,
+                on_delete: None,
             });
             entry.from_columns.push(from_col);
             entry.to_columns.push(to_col);
@@ -1236,6 +1278,22 @@ impl MysqlDriver {
         others.sort_unstable();
         defaults.extend(others);
         Ok(defaults)
+    }
+
+    /// Every collation on the server, alphabetised. Used by the schema
+    /// editor's per-column collation dropdown, which isn't scoped to a
+    /// single charset.
+    pub async fn list_all_collations(&self) -> Result<Vec<String>, AdapterError> {
+        let mut rows: Vec<String> = sqlx::query_as::<_, (String,)>(
+            "SELECT COLLATION_NAME FROM information_schema.COLLATIONS",
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|(n,)| n)
+        .collect();
+        rows.sort_unstable();
+        Ok(rows)
     }
 
     pub async fn shutdown(&self) {

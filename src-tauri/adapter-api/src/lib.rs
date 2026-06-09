@@ -234,6 +234,16 @@ pub trait Adapter: Send + Sync {
         Ok(Vec::new())
     }
 
+    /// Every collation the live server knows about, independent of any
+    /// charset. The schema editor's per-column "collation" cell renders
+    /// these as a searchable dropdown (free-text still accepted). MySQL
+    /// reads `information_schema.COLLATIONS`; Postgres reads
+    /// `pg_collation`. Default returns `Ok(vec![])` so adapters without a
+    /// collation concept (SQLite, Mongo, Redis) keep a free-text cell.
+    async fn list_all_collations(&self) -> Result<Vec<String>, AdapterError> {
+        Ok(Vec::new())
+    }
+
     /// Apply a structured "modify indexes" request — drop named indexes,
     /// create new ones, in that order, against a single table/collection.
     /// Default returns `Unsupported`; adapters opt in by overriding and

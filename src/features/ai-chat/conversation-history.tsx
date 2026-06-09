@@ -24,6 +24,10 @@ export function ConversationHistory({ onSelect }: Props) {
   const [open, setOpen] = useState(false);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [loading, setLoading] = useState(false);
+  // Id of the conversation currently being resumed. Drives a per-row spinner
+  // and blocks duplicate opens — restoring a long transcript (re-seeding the
+  // backend session + messages) can take a beat and otherwise looks frozen.
+  const [openingId, setOpeningId] = useState<string | null>(null);
   const [confirmTargets, setConfirmTargets] = useState<Conversation[] | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -52,6 +56,10 @@ export function ConversationHistory({ onSelect }: Props) {
   }, [open, selection.clearSelection]);
 
   const openConversation = useCallback(async (id: string) => {
+    // Guard against double-open (Enter + click, or impatient re-clicks while the
+    // first resume is still in flight).
+    if (openingId) return;
+    setOpeningId(id);
     try {
       await loadConversation(id);
       setOpen(false);
@@ -60,8 +68,10 @@ export function ConversationHistory({ onSelect }: Props) {
       // e.g. no credentials to start a session with. Keep the overlay open and
       // surface why instead of silently doing nothing.
       toast.error(errorMessage(e));
+    } finally {
+      setOpeningId(null);
     }
-  }, [onSelect]);
+  }, [onSelect, openingId]);
 
   const requestDelete = useCallback((ids: string[]) => {
     const targets = conversations.filter(c => ids.includes(c.id));
@@ -213,7 +223,13 @@ export function ConversationHistory({ onSelect }: Props) {
               </div>
             </div>
             <div className="flex items-center gap-1">
-              {loading && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
+              {openingId && (
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground mr-1">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Resuming…
+                </span>
+              )}
+              {loading && !openingId && <Loader2 className="w-3.5 h-3.5 animate-spin text-muted-foreground" />}
               {selection.selectedIds.size > 0 && (
                 <Button
                   variant="ghost"
@@ -248,6 +264,10 @@ export function ConversationHistory({ onSelect }: Props) {
               {conversations.map(conv => {
                 const isSelected = selection.selectedIds.has(conv.id);
                 const isFocused = selection.focusedId === conv.id;
+                const isOpening = openingId === conv.id;
+                // While a resume is in flight, dim the other rows so it's clear
+                // the click registered and the panel is busy.
+                const dimmed = openingId !== null && !isOpening;
                 return (
                   <ContextMenu key={conv.id}>
                     <ContextMenuTrigger>
@@ -256,17 +276,23 @@ export function ConversationHistory({ onSelect }: Props) {
                         aria-selected={isSelected}
                         data-focused={isFocused || undefined}
                         className={
-                          'group/conv flex items-center gap-3 px-4 py-3 cursor-pointer ' +
+                          'group/conv flex items-center gap-3 px-4 py-3 ' +
+                          (openingId ? 'cursor-default ' : 'cursor-pointer ') +
                           (isSelected
                             ? 'bg-accent/70 hover:bg-accent'
                             : 'hover:bg-accent') +
-                          (isFocused ? ' ring-1 ring-inset ring-primary/40' : '')
+                          (isFocused ? ' ring-1 ring-inset ring-primary/40' : '') +
+                          (dimmed ? ' opacity-40 pointer-events-none' : '')
                         }
                         onClick={(e) => handleRowClick(e, conv.id)}
                         onContextMenu={() => handleRowContextMenu(conv.id)}
                       >
                         <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center shrink-0">
-                          <MessageSquare className="w-4 h-4 text-muted-foreground" />
+                          {isOpening ? (
+                            <Loader2 className="w-4 h-4 text-primary animate-spin" />
+                          ) : (
+                            <MessageSquare className="w-4 h-4 text-muted-foreground" />
+                          )}
                         </div>
                         <div className="flex-1 min-w-0">
                           <div className="truncate text-sm font-medium">{conv.title}</div>

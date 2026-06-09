@@ -1,7 +1,7 @@
 {
   "name": "table-relay",
   "private": true,
-  "version": "0.1.5",
+  "version": "0.1.6",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +14,7 @@
     "tauri:dev:verbose": "tauri dev -v",
     "tauri:build": "tauri build",
     "build:mac": "tauri build --bundles app && npm run sign:mac && npm run dmg:mac",
+    "build:mac:universal": "tauri build --target universal-apple-darwin --bundles app && npm run sign:mac -- universal-apple-darwin && npm run dmg:mac -- universal-apple-darwin",
     "build:mac:intel": "tauri build --target x86_64-apple-darwin --bundles app && npm run sign:mac -- x86_64-apple-darwin && npm run dmg:mac -- x86_64-apple-darwin",
     "build:mac:app": "tauri build --bundles app && npm run sign:mac",
     "sign:mac": "bash scripts/sign-mac.sh",

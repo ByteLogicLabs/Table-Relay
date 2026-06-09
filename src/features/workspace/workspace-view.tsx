@@ -321,11 +321,13 @@ export default function WorkspaceView({
     activeTabId: string | null;
     focusedSupportsImport: boolean;
     activeTabSupportsExport: boolean;
+    closeActiveTab: () => void;
   }>({
     focusedConnectionId: null,
     activeTabId: null,
     focusedSupportsImport: true,
     activeTabSupportsExport: true,
+    closeActiveTab: () => {},
   });
   const adapterManifests = useAdapterManifests();
   useEffect(() => {
@@ -358,6 +360,12 @@ export default function WorkspaceView({
       window.dispatchEvent(
         new CustomEvent("tablerelay:menu-export", { detail: { tabId: tid } }),
       );
+    });
+    // ⌘W / Ctrl+W (and File → Close Tab) closes the active tab. The native
+    // accelerator routes here instead of the old `close_window` item that quit
+    // the whole app. No-op when no tab is open (the window stays put).
+    const unlistenCloseTab = listen<void>("menu-file-close_tab", () => {
+      menuCtxRef.current.closeActiveTab();
     });
     const unlistenConnectionPicker = listen<void>(
       "menu-connection-picker",
@@ -425,6 +433,7 @@ export default function WorkspaceView({
     return () => {
       void unlistenImport.then((fn) => fn());
       void unlistenExport.then((fn) => fn());
+      void unlistenCloseTab.then((fn) => fn());
       void unlistenConnectionPicker.then((fn) => fn());
       void unlistenConnectionNew.then((fn) => fn());
       void unlistenConnectionTransfer.then((fn) => fn());
@@ -671,6 +680,11 @@ export default function WorkspaceView({
     menuCtxRef.current.activeTabSupportsExport = activeTabManifest
       ? activeTabManifest.capabilities.export.length > 0
       : true;
+    // Latest close-active-tab action for the ⌘W / "Close Tab" menu item. Uses
+    // the real focused tab id (any type), not the export-scoped one above.
+    menuCtxRef.current.closeActiveTab = () => {
+      if (activeTabId) handleCloseTab(activeTabId);
+    };
   });
 
   const handleFocusTile = (tile: RailTile) => {
@@ -952,20 +966,12 @@ export default function WorkspaceView({
     return () => window.removeEventListener("keydown", onKey);
   }, [focusedConnection, activeConnections, focusedTile]);
 
-  // ⌘+W / Ctrl+W closes the active tab. preventDefault so the browser's own
-  // close-window shortcut doesn't fire on the Tauri webview.
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "w") {
-        if (!activeTabId) return;
-        e.preventDefault();
-        handleCloseTab(activeTabId);
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeTabId]);
+  // ⌘+W / Ctrl+W close-tab is handled by the native "Close Tab" menu item
+  // (accelerator `CmdOrCtrl+W`), which emits `menu-file-close_tab` →
+  // `closeActiveTab` above. We no longer bind a webview keydown for it: the
+  // menu accelerator owns the key on every platform, and a second handler
+  // risked closing two tabs from one press. (The old `close_window` menu item
+  // that quit the whole app has been removed.)
 
   // ⌘+R / Ctrl+R soft-reloads the sidebar tree + active tab's data instead of
   // refreshing the whole page. We preventDefault so the browser's own reload
