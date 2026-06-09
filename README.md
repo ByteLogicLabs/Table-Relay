@@ -4,9 +4,9 @@
 
 # Table Relay
 
-**A fast, multi-database desktop workbench** for browsing, querying, editing, and diagramming your data — with a built-in AI assistant.
+**A fast, multi-database desktop workbench** for browsing, querying, editing, and diagramming your data, with a built-in AI assistant.
 
-One app for **MySQL · PostgreSQL · SQLite · MongoDB · Redis**, built with [Tauri](https://tauri.app) (Rust + React).
+One app for **MySQL, PostgreSQL, SQLite, MongoDB, Redis**, built with [Tauri](https://tauri.app) (Rust + React).
 
 </div>
 
@@ -14,26 +14,35 @@ One app for **MySQL · PostgreSQL · SQLite · MongoDB · Redis**, built with [T
 
 ## Features
 
-- **Data grid** — browse, filter, sort, and inline-edit rows. Editable JSON tree view for MongoDB documents.
-- **SQL editor** — Monaco-based editor with schema-aware autocompletion, multi-statement execution, a query log, and a destructive-query warning before you run a `DELETE`/`UPDATE`/`DROP`.
-- **Schema editor** — create and alter tables, columns, indexes, and foreign keys; the app emits dialect-correct DDL per driver.
-- **Diagrams** — auto-laid-out entity-relationship diagrams from your schema.
-- **Realtime** — publish/subscribe against Redis Pub/Sub and Postgres `LISTEN`/`NOTIFY`.
-- **Process list** — view and kill running queries/connections (where the driver supports it).
-- **AI assistant** — chat about your schema and data with OpenAI, Anthropic, Google Gemini, any OpenAI-compatible endpoint (Ollama, Groq, LM Studio), or a **fully local, on-device model** — Table Relay runs `llama.cpp` (`llama-server`) for you, with a built-in downloader for curated GGUF models (Qwen2.5-Coder 3B/7B/14B), so you can use the assistant offline with no API key and no data leaving your machine. The assistant inspects schema freely, but **every query it runs is gated by an approval prompt** — with **per-operation permissions** you can auto-allow individually (Read, Write, Create/DDL, Delete) while destructive statements (no-`WHERE` deletes, `DROP`, `TRUNCATE`) always ask.
-- **SSH tunneling** — connect to any networked database (MySQL, PostgreSQL, MongoDB, Redis) behind a jump host (password or key auth), with trust-on-first-use host-key pinning, keepalive-kept-alive sessions, and connection reuse so tunnels aren't re-handshaked on every operation. A small **SSH** badge marks tunneled connections in the rail. (SQLite is a local file, so it has no tunnel.)
-- **Settings** — theme, default row limit, NULL display, Monaco editor preferences, destructive-query confirmation, restore-on-startup, and AI approval persistence — all in one dialog.
-- **Built for speed** — lazy per-tab loading (only the table you're viewing fetches), in-memory caching of schema/structure/rows so switching tabs and connections is instant, parallel persistent connections, and a per-connection query gate that prevents pool stampedes.
+- **Data grid**: browse, filter, sort, and inline-edit rows. Editable JSON tree view for MongoDB documents.
+- **SQL editor**: Monaco-based editor with schema-aware autocompletion, multi-statement execution, a query log, and a destructive-query warning before you run a `DELETE`, `UPDATE`, or `DROP`.
+- **Schema editor**: create and alter tables, columns, indexes, and foreign keys. The app emits dialect-correct DDL per driver, with per-column data types and collation, searchable type/collation pickers, and table-level encoding/collation.
+- **Diagrams**: auto-laid-out entity-relationship diagrams from your schema.
+- **Realtime**: publish/subscribe against Redis Pub/Sub and Postgres `LISTEN`/`NOTIFY`.
+- **Process list**: view and kill running queries/connections (where the driver supports it).
+- **Import and export**:
+  - **Import connections** from other clients so you do not re-enter every server by hand. Supported sources include TablePlus, DBeaver, Navicat, HeidiSQL, and another Table Relay export. A password prompt fills in any secrets the source file does not carry.
+  - **Import data** from a `.sql`, `.csv`, or `.json` file.
+  - **Export** a query result or a whole connection to CSV, TSV, JSON, NDJSON, Excel, or SQL INSERT statements, with a progress dialog and cancellation for large exports.
+- **AI assistant**: chat about your schema and data with OpenAI, Anthropic, Google Gemini, any OpenAI-compatible endpoint (Ollama, Groq, LM Studio), a **fully local on-device model**, or a **CLI provider** (Claude Code or Codex CLI) that runs against the agent you already have logged in on your machine.
+  - For the local model, Table Relay runs `llama.cpp` (`llama-server`) for you, with a built-in downloader for curated GGUF models (Qwen2.5-Coder 3B/7B/14B), so you can use the assistant offline with no API key and no data leaving your machine.
+  - The assistant inspects schema freely, but **every query it runs is gated by an approval prompt**. With **per-operation permissions** you can auto-allow individually (Read, Write, Create/DDL, Delete) while destructive statements (no-`WHERE` deletes, `DROP`, `TRUNCATE`) always ask.
+  - The tool loop auto-retries transient provider failures (network timeouts, rate limits, upstream 5xx) with backoff, and guards against runaway repeat calls.
+- **MCP bridge**: Table Relay exposes its database tools over the Model Context Protocol, so an external MCP-capable client/agent can drive the same gated query surface.
+- **SSH tunneling**: connect to any networked database (MySQL, PostgreSQL, MongoDB, Redis) behind a jump host (password or key auth), with trust-on-first-use host-key pinning, keepalive-kept-alive sessions, and connection reuse so tunnels are not re-handshaked on every operation. A small **SSH** badge marks tunneled connections in the rail. (SQLite is a local file, so it has no tunnel.)
+- **Resilient connections**: a transparent reconnect supervisor rebuilds a dropped pool or SSH tunnel on the next query, with silent recovery for stale sockets and a "Reconnecting" badge only when a rebuild is genuinely needed.
+- **Settings**: theme, default row limit, NULL display, Monaco editor preferences, destructive-query confirmation, restore-on-startup, and AI approval persistence, all in one dialog.
+- **Built for speed**: lazy per-tab loading (only the table you are viewing fetches), in-memory caching of schema/structure/rows so switching tabs and connections is instant, parallel persistent connections, and a per-connection query gate that prevents pool stampedes.
 
 ## Supported databases
 
 | Driver | Browse/Edit | SQL/Query | Schema editor | Diagram | Realtime | SSH tunnel |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|
-| MySQL | ✅ | ✅ | ✅ | ✅ | — | ✅ |
+| MySQL | ✅ | ✅ | ✅ | ✅ | - | ✅ |
 | PostgreSQL | ✅ | ✅ | ✅ | ✅ | ✅ (`LISTEN`/`NOTIFY`) | ✅ |
-| SQLite | ✅ | ✅ | ✅ | ✅ | — | — |
-| MongoDB | ✅ | ✅ | ✅ | — | ✅ (change streams) | ✅ |
-| Redis | ✅ | ✅ | — | — | ✅ (Pub/Sub) | ✅ |
+| SQLite | ✅ | ✅ | ✅ | ✅ | - | - |
+| MongoDB | ✅ | ✅ | ✅ | - | ✅ (change streams) | ✅ |
+| Redis | ✅ | ✅ | - | - | ✅ (Pub/Sub) | ✅ |
 
 Exact capabilities per driver are declared in each adapter's `manifest.toml` and drive what the UI exposes.
 
@@ -44,7 +53,7 @@ Exact capabilities per driver are declared in each adapter's `manifest.toml` and
 ### Prerequisites
 
 - **Node.js** 20+ (developed against 22.x)
-- **Rust** 1.86+ and the Tauri prerequisites for your OS — see [tauri.app/start/prerequisites](https://tauri.app/start/prerequisites/) (Xcode CLT on macOS; `webkit2gtk`/`build-essential` on Linux; the C++ build tools + WebView2 on Windows).
+- **Rust** 1.86+ and the Tauri prerequisites for your OS, see [tauri.app/start/prerequisites](https://tauri.app/start/prerequisites/) (Xcode CLT on macOS; `webkit2gtk`/`build-essential` on Linux; the C++ build tools plus WebView2 on Windows).
 
 ### Run in development
 
@@ -55,26 +64,21 @@ npm run tauri:dev
 
 The first Rust build compiles all five database adapters and can take several minutes; subsequent builds are incremental.
 
-> **AI is optional and configured in-app, not via environment variables.** For a hosted provider, open **Settings → AI Providers**, add a credential, and activate it (keys are stored locally on your machine — see [Security](#security)). For a **local model** you need no key at all: pick **Local Llama**, download a GGUF model from the built-in catalog, and Table Relay runs it on-device via `llama.cpp` (install the open-source [`llama.cpp`](https://github.com/ggerganov/llama.cpp) `llama-server` CLI first — e.g. `brew install llama.cpp`). There is no required `.env` file to run the app.
+> **AI is optional and configured in-app, not via environment variables.** For a hosted provider, open **Settings > AI Providers**, add a credential, and activate it (keys are stored locally on your machine, see [Security](#security)). For a **local model** you need no key at all: pick **Local Llama**, download a GGUF model from the built-in catalog, and Table Relay runs it on-device via `llama.cpp` (install the open-source [`llama.cpp`](https://github.com/ggerganov/llama.cpp) `llama-server` CLI first, for example `brew install llama.cpp`). For a **CLI provider**, log in to Claude Code or Codex CLI in your terminal as usual; Table Relay only invokes the binary you already authenticated and bills under your own account. There is no required `.env` file to run the app.
 
 ### Installing a downloaded release
 
-Release builds are **not code-signed or notarized**, so the OS will warn you the
-first time you open the app.
+Release builds are **not code-signed or notarized**, so the OS will warn you the first time you open the app.
 
-**macOS** — you may see *"Table Relay is damaged and can't be opened"* or *"Apple
-cannot check it for malicious software."* This is Gatekeeper quarantining an
-unsigned download, not actual corruption. After dragging the app into
-`/Applications`, clear the quarantine flag once:
+**macOS**: you may see *"Table Relay is damaged and can't be opened"* or *"Apple cannot check it for malicious software."* This is usually Gatekeeper quarantining an unsigned download, not actual corruption. After dragging the app into `/Applications`, clear the quarantine flag once:
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Table Relay.app"
 ```
 
-Then open it normally.
+Then open it normally. If "damaged" still appears, confirm the build matches your Mac's architecture: a build made only for Apple Silicon will not run on an Intel Mac (and vice versa). Use a universal build to cover both (see the scripts below).
 
-**Windows** — SmartScreen shows *"Windows protected your PC."* Click **More
-info → Run anyway**.
+**Windows**: SmartScreen shows *"Windows protected your PC."* Click **More info > Run anyway**.
 
 ### Build a release bundle
 
@@ -82,17 +86,22 @@ info → Run anyway**.
 npm run tauri:build
 ```
 
-Produces a native installer/app for your platform under `src-tauri/target/release/bundle/`.
+Produces a native installer/app for your platform under `target/release/bundle/`.
 
 ### Other scripts
 
 | Command | What it does |
 |---|---|
 | `npm run dev` | Vite dev server only (frontend, no Tauri shell) |
-| `npm run build` | Type-check + build the frontend bundle |
+| `npm run build` | Type-check and build the frontend bundle |
 | `npm run lint` | `tsc --noEmit` type check |
 | `npm run tauri:dev` | Run the full desktop app in dev mode |
 | `npm run tauri:build` | Build the distributable desktop app |
+| `npm run build:mac` | Build, ad-hoc sign, and package a `.dmg` for the host architecture |
+| `npm run build:mac:universal` | Build a universal `.dmg` (Apple Silicon plus Intel) that runs on any Mac |
+| `npm run build:mac:intel` | Build an Intel-only `.dmg` |
+
+The `build:mac` scripts ad-hoc sign the app so it launches without the Gatekeeper "damaged" error, then assemble the `.dmg` with `hdiutil`. This is not notarization: a downloaded `.dmg` still needs the `xattr` step above on the receiving machine. For sharing to another Mac, prefer `build:mac:universal` so architecture is never the problem.
 
 ---
 
@@ -100,12 +109,12 @@ Produces a native installer/app for your platform under `src-tauri/target/releas
 
 ```
 src/                  React + TypeScript UI (Vite)
-  features/           One folder per workspace tab (data-grid, sql-editor, schema, diagram, realtime, ai-chat, …)
+  features/           One folder per workspace tab (data-grid, sql-editor, schema, diagram, realtime, ai-chat, ...)
   lib/                IPC wrappers, stores, Monaco/SQL helpers
   state/              Lightweight external stores (useSyncExternalStore)
 src-tauri/            Rust backend (Tauri host)
   src/commands/       Tauri command surface (db, ai, store, rail)
-  src/ai/             AI providers, streaming, tool-calling + approval flow
+  src/ai/             AI providers, streaming, tool-calling, approval flow, MCP bridge
   src/db/             Connection registry, reconnect supervisor, subscriptions
   src/store/          Local SQLite store (connection profiles, settings) via rusqlite
   adapter-api/        Shared `Adapter` trait, manifest, intent types
@@ -122,9 +131,10 @@ Each database is a self-contained adapter. To add a new one: drop a folder under
 
 Table Relay is currently in **development mode**, and you should treat it accordingly:
 
-- **Connection credentials and AI API keys are stored unencrypted** on your machine — in the app's local SQLite store (`store.db` in your OS app-data directory) and, for AI keys, in the WebView's `localStorage`. At-rest encryption / OS-keychain storage is planned but **not yet implemented**.
+- **Connection credentials and AI API keys are stored unencrypted** on your machine, in the app's local SQLite store (`store.db` in your OS app-data directory) and, for AI keys, in the WebView's `localStorage`. At-rest encryption and OS-keychain storage are planned but **not yet implemented**.
 - The AI assistant can read your schema without prompting, but **all queries it executes require explicit approval** in the chat panel.
-- Don't use this build to hold credentials for sensitive production systems until at-rest protection lands.
+- CLI AI providers run against the agent you logged in yourself; Table Relay never reads, stores, or transmits those credentials and adds no free access, usage is billed under your own account.
+- Do not use this build to hold credentials for sensitive production systems until at-rest protection lands.
 
 Do not commit `.env` files or any file containing real keys; the repo's `.gitignore` excludes `*.env`, but verify before pushing.
 
@@ -133,3 +143,5 @@ Do not commit `.env` files or any file containing real keys; the repo's `.gitign
 ## License
 
 [MIT](LICENSE) © 2026 ByteLogic Innovation / Tofik Hidayat
+</content>
+</invoke>
