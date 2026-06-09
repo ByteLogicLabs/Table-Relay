@@ -131,10 +131,10 @@ Each database is a self-contained adapter. To add a new one: drop a folder under
 
 Table Relay is currently in **development mode**, and you should treat it accordingly:
 
-- **Connection credentials and AI API keys are stored unencrypted** on your machine, in the app's local SQLite store (`store.db` in your OS app-data directory) and, for AI keys, in the WebView's `localStorage`. At-rest encryption and OS-keychain storage are planned but **not yet implemented**.
+- **Connection credentials and AI API keys are encrypted at rest.** They live in the app's local store, an AES-256-GCM encrypted SQLite snapshot (`store.db.enc` in your OS app-data directory). The encryption key is compiled into the app binary, so the file is protected against casual inspection and copy-off-disk, but **a key embedded in the binary is recoverable by a determined attacker**. A password-derived key or OS-keychain storage would be stronger and is still planned.
 - The AI assistant can read your schema without prompting, but **all queries it executes require explicit approval** in the chat panel.
 - CLI AI providers run against the agent you logged in yourself; Table Relay never reads, stores, or transmits those credentials and adds no free access, usage is billed under your own account.
-- Do not use this build to hold credentials for sensitive production systems until at-rest protection lands.
+- Be cautious holding credentials for sensitive production systems: at-rest encryption is in place, but the binary-embedded key and lack of OS-keychain integration mean this is not yet hardened for high-value secrets.
 
 Do not commit `.env` files or any file containing real keys; the repo's `.gitignore` excludes `*.env`, but verify before pushing.
 
@@ -142,6 +142,6 @@ Do not commit `.env` files or any file containing real keys; the repo's `.gitign
 
 ## License
 
-[MIT](LICENSE) © 2026 ByteLogic Innovation / Tofik Hidayat
+[MIT](LICENSE) © 2026
 </content>
 </invoke>
