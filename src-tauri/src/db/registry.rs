@@ -47,6 +47,13 @@ pub struct Registry {
     /// Per-connection mutex the reconnect supervisor holds so two
     /// concurrent commands on the same id don't race to rebuild.
     reconnect_locks: Mutex<HashMap<ConnectionId, Arc<Mutex<()>>>>,
+    /// Connection ids for which a `connection:reconnecting` toast was
+    /// emitted and not yet resolved. Lets the supervisor clear a stuck
+    /// "Reconnecting…" toast the moment any op succeeds again — without
+    /// this, a recovered connection (a later command works fine) leaves
+    /// the loading toast orphaned because no `reconnected`/`lost` event
+    /// ever fires on the happy path.
+    reconnecting: Mutex<std::collections::HashSet<ConnectionId>>,
 }
 
 impl Registry {
@@ -54,7 +61,20 @@ impl Registry {
         Self {
             inner: RwLock::new(HashMap::new()),
             reconnect_locks: Mutex::new(HashMap::new()),
+            reconnecting: Mutex::new(std::collections::HashSet::new()),
         }
+    }
+
+    /// Mark that a "reconnecting" toast is showing for `id`. Returns the
+    /// previous state so callers can avoid duplicate emits.
+    pub async fn set_reconnecting(&self, id: &str) {
+        self.reconnecting.lock().await.insert(id.to_string());
+    }
+
+    /// Clear the reconnecting flag for `id`, returning true if it WAS set
+    /// (i.e. a toast is outstanding and a resolving event should fire).
+    pub async fn take_reconnecting(&self, id: &str) -> bool {
+        self.reconnecting.lock().await.remove(id)
     }
 
     pub async fn insert(&self, id: ConnectionId, entry: ActiveConnection) {

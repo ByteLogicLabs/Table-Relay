@@ -93,10 +93,31 @@ where
     for attempt in 0..=MAX_RETRIES {
         let adapter = registry.get(id).await?;
         match op(adapter).await {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                // The op worked. If a "Reconnecting…" toast was left showing
+                // for this connection (a prior retry round announced it, then
+                // the supervisor gave up but the connection actually
+                // recovered), clear it now — otherwise it stays stuck forever.
+                if registry.take_reconnecting(id).await {
+                    crate::log_line!("reconnect", "{id}: recovered (op succeeded after a reconnecting toast)");
+                    emit(
+                        app,
+                        "connection:reconnected",
+                        ReconnectEvent {
+                            connection_id: id.to_string(),
+                            attempt: 0,
+                            max_attempts: MAX_RETRIES,
+                            error: None,
+                        },
+                    );
+                }
+                return Ok(v);
+            }
             Err(e) => {
                 if !is_transient(&e) || attempt == MAX_RETRIES {
                     if attempt > 0 && is_transient(&e) {
+                        crate::log_line!("reconnect", "{id}: giving up after {attempt} retries, connection lost: {e}");
+                        registry.take_reconnecting(id).await;
                         emit(
                             app,
                             "connection:lost",
@@ -110,6 +131,7 @@ where
                     }
                     return Err(e);
                 }
+                crate::log_line!("reconnect", "{id}: transient error on attempt {attempt}, entering recovery: {e}");
                 last_err = e;
             }
         }
@@ -125,11 +147,54 @@ where
         // Re-try the op once before committing to a rebuild.
         if let Ok(adapter) = registry.get(id).await {
             if let Ok(v) = op(adapter).await {
+                crate::log_line!("reconnect", "{id}: silent recovery (op succeeded on pool re-draw, no rebuild)");
+                if registry.take_reconnecting(id).await {
+                    emit(
+                        app,
+                        "connection:reconnected",
+                        ReconnectEvent {
+                            connection_id: id.to_string(),
+                            attempt: 0,
+                            max_attempts: MAX_RETRIES,
+                            error: None,
+                        },
+                    );
+                }
                 return Ok(v);
+            }
+            // The op failed, but is the POOL actually dead, or did we just
+            // draw one corpse connection (server killed an idle socket)? Ping
+            // the existing pool — a fresh ping opens a new connection. If it
+            // succeeds the pool is healthy; rebuilding would be pointless and
+            // (under a flapping server whose fresh handshakes EOF) spawns a
+            // storm of orphaned pools that exhausts the server. Skip the
+            // rebuild and let the next loop iteration re-issue the op on the
+            // pool we already have.
+            if let Ok(adapter) = registry.get(id).await {
+                if adapter.ping().await.is_ok() {
+                    crate::log_line!("reconnect", "{id}: silent recovery (existing pool pinged healthy, skipping rebuild)");
+                    if registry.take_reconnecting(id).await {
+                        emit(
+                            app,
+                            "connection:reconnected",
+                            ReconnectEvent {
+                                connection_id: id.to_string(),
+                                attempt: 0,
+                                max_attempts: MAX_RETRIES,
+                                error: None,
+                            },
+                        );
+                    }
+                    // Drop the lock and retry the op on the healthy pool.
+                    drop(_guard);
+                    continue;
+                }
             }
         }
 
         let next_attempt = attempt + 1;
+        crate::log_line!("reconnect", "{id}: pool dead, rebuilding (attempt {next_attempt}/{MAX_RETRIES}): {last_err}");
+        registry.set_reconnecting(id).await;
         emit(
             app,
             "connection:reconnecting",
@@ -149,6 +214,8 @@ where
                     last_err = e;
                     continue;
                 }
+                crate::log_line!("reconnect", "{id}: rebuilt successfully on attempt {next_attempt}");
+                registry.take_reconnecting(id).await;
                 emit(
                     app,
                     "connection:reconnected",
@@ -169,6 +236,8 @@ where
         }
     }
 
+    crate::log_line!("reconnect", "{id}: exhausted {MAX_RETRIES} rebuild attempts, connection lost: {last_err}");
+    registry.take_reconnecting(id).await;
     emit(
         app,
         "connection:lost",
@@ -197,7 +266,20 @@ pub(crate) async fn rebuild(
     })?;
     let factory = factories.get(adapter_id)?;
     let adapter = factory.connect(profile.to_adapter_profile(adapter_id)).await?;
-    let server = adapter.ping().await?;
+    // If the post-connect ping fails, explicitly shut the just-built pool
+    // down before returning. Otherwise every failed rebuild attempt leaks a
+    // pool (and any connection its ping opened) — under a flapping server
+    // that's hundreds of orphaned connections, which exhausts the server's
+    // max_connections and looks like a crash. `connect()` is lazy so a
+    // clean ping-failure usually holds ≤1 socket, but we must not rely on
+    // Drop timing for that.
+    let server = match adapter.ping().await {
+        Ok(s) => s,
+        Err(e) => {
+            adapter.shutdown().await;
+            return Err(e);
+        }
+    };
     let meta = ConnectionMeta {
         id: profile.id.clone(),
         server,

@@ -10,6 +10,27 @@ use crate::ai::{AiError, AiProvider, ChatMessage, ChatRole};
 
 use super::chat::{ChunkEvent, DoneEvent};
 
+/// Whether a provider error is worth auto-retrying. Transient infrastructure
+/// failures (timeouts, upstream 5xx, rate limits) usually succeed on a retry;
+/// errors needing user action (auth, bad model, context overflow, cancel) do
+/// not and should fail fast.
+fn is_retryable(e: &AiError) -> bool {
+    match e {
+        AiError::NetworkTimeout => true,
+        AiError::RateLimit(_) => true,
+        // Upstream 5xx are transient server-side; 4xx (in the message) are not.
+        AiError::Upstream(msg) => {
+            msg.contains("HTTP 5")
+                || msg.contains("502")
+                || msg.contains("503")
+                || msg.contains("504")
+                || msg.contains("overloaded")
+                || msg.contains("timeout")
+        }
+        _ => false,
+    }
+}
+
 /// Tool-loop path. Non-streaming: we round-trip with `complete_once`,
 /// execute any tool calls the model asks for, and loop until the model
 /// returns a plain-text reply. Once we have that reply, we emit it as one
@@ -89,9 +110,33 @@ pub(super) async fn run_tool_loop(
             )
         };
 
-        let turn = provider
-            .complete_once(&history, Some(&tools_catalog))
-            .await?;
+        // A transient blip to the provider shouldn't kill the whole turn.
+        // Auto-retry retryable errors (network timeout, upstream 5xx, rate
+        // limit) a few times with exponential backoff. Non-retryable errors
+        // (auth, invalid model, context-too-long, canceled) fail fast — they
+        // need user action and retrying just wastes time.
+        let turn = {
+            const MAX_RETRIES: u32 = 3;
+            const BACKOFF_MS: [u64; 3] = [800, 2_000, 5_000];
+            let mut attempt = 0u32;
+            loop {
+                match provider.complete_once(&history, Some(&tools_catalog)).await {
+                    Ok(t) => break t,
+                    Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
+                        let wait = BACKOFF_MS[attempt as usize];
+                        attempt += 1;
+                        crate::log_chat!(
+                            "error",
+                            "{} (retry {attempt}/{MAX_RETRIES} after {wait}ms)",
+                            e
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        };
 
         if turn.tool_calls.is_empty() {
             // Final answer. Commit + emit as one chunk + done.
@@ -235,13 +280,29 @@ pub(super) async fn run_tool_loop(
                 last_call_sig = Some(sig.clone());
                 repeat_calls = 1;
             }
-            // Read-only shape tools never need more than a couple identical
-            // calls — abort them well before the (possibly large) generic cap so
-            // a weak model can't burn the whole budget re-listing the same
-            // tables. `call_query` keeps the full `max_repeat_calls` budget.
-            const SHAPE_REPEAT_CAP: u32 = 3;
+            // Read-only shape tools never need to be re-run with identical args
+            // (the shape can't change mid-turn). The dedup short-circuit above
+            // already hands back a cheap "you have this, proceed" directive from
+            // the 2nd identical call on — no DB round-trip — so we can afford to
+            // let a weak model see that nudge a few times and course-correct
+            // before killing the whole turn. Cap of 3 was too tight: a model
+            // that re-listed schemas twice after a good result had its entire
+            // request (e.g. "analyze this db and make dummy data") aborted. 6
+            // gives ~4 dedup nudges to recover while still bounding the loop.
+            const SHAPE_REPEAT_CAP: u32 = 6;
+            // The SAME `call_query` with byte-identical args returns the same
+            // rows every time — re-issuing it is never progress. Weak models do
+            // this dozens of times; with the old budget of 50 the upstream HTTP
+            // request times out ("network timeout") long before the guard fires,
+            // so the user sees a network error instead of a clean "I looped".
+            // Cap identical query repeats low. (A model that needs to retry with
+            // DIFFERENT SQL resets the counter — only byte-identical repeats
+            // count, so legitimate iterative querying is unaffected.)
+            const CALL_QUERY_REPEAT_CAP: u32 = 4;
             let effective_cap = if is_shape_tool(&tc.name) {
                 max_repeat_calls.min(SHAPE_REPEAT_CAP)
+            } else if tc.name == "call_query" {
+                max_repeat_calls.min(CALL_QUERY_REPEAT_CAP)
             } else {
                 max_repeat_calls
             };

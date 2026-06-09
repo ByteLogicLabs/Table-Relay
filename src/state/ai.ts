@@ -108,7 +108,12 @@ function mutate(fn: (s: AiState) => AiState) {
 // bounded window, finalises the message as errored and clears the pending flag
 // so the panel un-wedges on its own. Each chunk pushes the deadline out, so a
 // legitimately slow stream never trips it.
-const WATCHDOG_IDLE_MS = 180_000; // 3 min with zero activity → assume stuck
+// Idle window before a turn with ZERO activity (no chunk, no tool call, not
+// waiting on approval) is assumed wedged. Bumped on every chunk AND every
+// tool call now, so a long multi-step turn (create tables, seed data) keeps
+// resetting it — only a genuinely dead turn (dropped event, wedged subprocess)
+// trips it. 5 min gives slow providers + big tool batches ample headroom.
+const WATCHDOG_IDLE_MS = 300_000;
 let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
 let watchdogKey: string | null = null;
 let watchdogRid: string | null = null;
@@ -128,9 +133,23 @@ function armWatchdog(key: string, rid: string) {
   watchdogTimer = setTimeout(() => onWatchdogFire(key, rid), WATCHDOG_IDLE_MS);
 }
 
-/** Bump the watchdog deadline for the active turn (on chunk activity). */
+/** Bump the watchdog deadline for the active turn (on chunk / tool activity).
+ *  Re-arms even from a disarmed state (e.g. after an approval pause) as long as
+ *  `rid` is still the pending turn for some connection bucket — so resuming
+ *  work after a long approval wait restores the safety net. */
 function bumpWatchdog(rid: string) {
-  if (watchdogRid === rid && watchdogKey) armWatchdog(watchdogKey, rid);
+  if (watchdogRid === rid && watchdogKey) {
+    armWatchdog(watchdogKey, rid);
+    return;
+  }
+  // Disarmed (or tracking a different turn) — find the bucket whose pending
+  // turn is `rid` and (re)arm for it.
+  for (const [key, chat] of Object.entries(state.byConnection)) {
+    if (chat.pendingRequestId === rid) {
+      armWatchdog(key, rid);
+      return;
+    }
+  }
 }
 
 function onWatchdogFire(key: string, rid: string) {
@@ -305,6 +324,11 @@ async function wireListeners() {
   // before the streaming assistant reply so the user sees the tool call
   // in context.
   unlisteners.push(await ai.onToolCallStarted(ev => {
+    // Tool activity = the turn is alive. A tool-heavy turn (create tables,
+    // insert rows, describe) streams NO text chunks for minutes, so without
+    // this the stuck-turn watchdog would fire mid-work and "clear" a healthy
+    // turn ("no response — stalled"). Push the deadline out on every tool.
+    bumpWatchdog(ev.requestId);
     mutate(s => {
       // The tool call fires during the assistant reply — look up the
       // owning connection via the reply's id.
@@ -329,6 +353,7 @@ async function wireListeners() {
     });
   }));
   unlisteners.push(await ai.onToolCallFinished(ev => {
+    bumpWatchdog(ev.requestId); // tool result arrived → turn is still alive
     // Capture across the mutate boundary so we can persist after state updates.
     let convId: string | undefined;
     let toolSnapshot: { name: string; arguments: string; result?: string; denied?: boolean } | undefined;
@@ -372,6 +397,11 @@ async function wireListeners() {
     }
   }));
   unlisteners.push(await ai.onApprovalRequest(ev => {
+    // A pending approval blocks on the USER, who may take far longer than the
+    // idle window. Disarm the watchdog so it doesn't "clear" a turn that's
+    // simply waiting for a click. It re-arms when the tool resolves
+    // (onToolCallFinished bumps) or the next chunk arrives.
+    disarmWatchdog();
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.toolCallId);
       if (!conn) return s;

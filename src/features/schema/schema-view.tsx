@@ -6,6 +6,7 @@ import { useAdapterManifests, resolveManifest } from '../../state/adapter-manife
 import { Loader2, AlertCircle, Plus, Trash2, Check, X } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
+import { SearchableSelect } from '../../components/ui/searchable-select';
 import { toast } from 'sonner';
 import { dialectFromManifest } from '../data-grid/editor-kinds';
 import {
@@ -107,6 +108,10 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
   const [newCollation, setNewCollation] = useState<string>(TABLE_DEFAULT_OPT);
   const [encodings, setEncodings] = useState<string[]>([]);
   const [collations, setCollations] = useState<string[]>([]);
+  // Server-wide collation catalogue for the per-column collation cell
+  // (edit mode). Independent of charset; empty for adapters with no
+  // collation concept (SQLite, Mongo, Redis) — the cell stays free-text.
+  const [allCollations, setAllCollations] = useState<string[]>([]);
 
   // Load encodings once the create-table view is active. Mirrors the
   // database-picker dialog's pattern — adapters that don't model
@@ -140,6 +145,18 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
       .catch(() => { if (!cancelled) setCollations([]); });
     return () => { cancelled = true; };
   }, [isNew, connection.id, newCharset]);
+
+  // Server-wide collation list for the per-column collation cell. Fetched
+  // in edit mode only (the cell is hidden while creating a table). Failure
+  // is silent — the combobox just falls back to free-text entry.
+  useEffect(() => {
+    if (isNew) return;
+    let cancelled = false;
+    db.listAllCollations(connection.id)
+      .then(list => { if (!cancelled) setAllCollations(list); })
+      .catch(() => { if (!cancelled) setAllCollations([]); });
+    return () => { cancelled = true; };
+  }, [isNew, connection.id]);
 
   const effectiveSchema = schema ?? connection.database ?? '';
 
@@ -203,7 +220,30 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
         rowCount: null,
       };
       setStructure(empty);
-      resetDrafts(empty);
+      // Seed a starter `id` column so the create-table grid opens ready to
+      // type instead of empty — most tables start with an auto-increment
+      // primary key, and an empty grid forced a confusing "Add column"
+      // click before any work could begin. The row is a normal draft: the
+      // user can rename, retype, or delete it. Dirty-tracking still gates
+      // on a real table name + a named column, so this seed alone doesn't
+      // mark the tab dirty.
+      const dialect = dialectFromManifest(activeManifest?.capabilities);
+      const seed: DraftColumn = {
+        id: makeId('col'),
+        originalName: null,
+        name: 'id',
+        dataType: dialect === 'postgres' ? 'serial' : 'int',
+        nullable: false,
+        defaultValue: null,
+        key: 'PRIMARY',
+        extra: dialect === 'mysql' ? 'AUTO_INCREMENT' : '',
+        characterSet: '',
+        collation: '',
+        pendingDelete: false,
+      };
+      setColumns([seed]);
+      setIndexes([]);
+      setForeignKeys([]);
       return;
     }
     if (!effectiveSchema) {
@@ -548,7 +588,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
 
   return (
     <div className="flex flex-col h-full bg-background">
-      <div className="h-10 border-b border-border flex items-center px-4 bg-muted/10 text-xs text-muted-foreground gap-2">
+      <div className="h-10 border-b border-border flex items-center px-4 bg-muted/30 text-xs text-muted-foreground gap-2">
         <span className="font-mono">{structure.schema}.</span>
         {effectiveIsNew ? (
           <>
@@ -580,24 +620,25 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
           <span className="text-muted-foreground">read-only</span>
         )}
         {schemaEditable && dirty && <span className="text-yellow-600 dark:text-yellow-400">● unsaved changes</span>}
-        <div className="ml-auto flex items-center gap-1">
+        <div className="ml-auto flex items-center gap-1.5">
           {columnsEditable && (
-            <Button variant="ghost" size="xs" onClick={addColumn}>
+            <Button variant="secondary" size="xs" onClick={addColumn} className="font-medium text-foreground">
               <Plus className="w-3 h-3 mr-1" />
               Add column
             </Button>
           )}
           {schemaEditable && (
-            <Button variant="ghost" size="xs" onClick={addIndex}>
+            <Button variant="secondary" size="xs" onClick={addIndex} className="font-medium text-foreground">
               <Plus className="w-3 h-3 mr-1" />
               Add index
             </Button>
           )}
           {schemaEditable && (
             <>
+              <span className="w-px h-4 bg-border mx-0.5" />
               <Button
                 size="xs"
-                variant={dirty ? 'default' : 'ghost'}
+                variant={dirty ? 'default' : 'outline'}
                 disabled={saveDisabled}
                 onClick={async () => { setLocalSaving(true); try { await doSave(); } finally { setLocalSaving(false); } }}
               >
@@ -606,7 +647,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                   ? (effectiveIsNew ? 'Creating…' : 'Saving…')
                   : (effectiveIsNew ? 'Create table' : 'Save')}
               </Button>
-              <Button size="xs" variant="ghost" disabled={!dirty || localSaving} onClick={doDiscard}>
+              <Button size="xs" variant="destructive" disabled={!dirty || localSaving} onClick={doDiscard}>
                 <X className="w-3 h-3 mr-1" />
                 Discard
               </Button>
@@ -623,35 +664,29 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
       {effectiveIsNew && encodings.length > 0 && (
         <div className="shrink-0 border-b border-border bg-muted/10 px-4 py-2 flex items-center gap-3 text-xs">
           <span className="text-muted-foreground">Encoding</span>
-          <Select value={newCharset} onValueChange={setNewCharset}>
-            <SelectTrigger className="h-7 w-56">
-              <SelectValue>
-                {(v) => (v === TABLE_DEFAULT_OPT ? 'Default (inherit from DB)' : String(v ?? ''))}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={TABLE_DEFAULT_OPT}>Default (inherit from DB)</SelectItem>
-              {encodings.map(name => (
-                <SelectItem key={name} value={name}>{name}</SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <SearchableSelect
+            value={newCharset}
+            onChange={setNewCharset}
+            className="h-7 w-56"
+            searchPlaceholder="Search encodings…"
+            options={[
+              { value: TABLE_DEFAULT_OPT, label: 'Default (inherit from DB)' },
+              ...encodings.map(name => ({ value: name, label: name })),
+            ]}
+          />
           {newCharset !== TABLE_DEFAULT_OPT && collations.length > 0 && (
             <>
               <span className="text-muted-foreground ml-2">Collation</span>
-              <Select value={newCollation} onValueChange={setNewCollation}>
-                <SelectTrigger className="h-7 w-72">
-                  <SelectValue>
-                    {(v) => (v === TABLE_DEFAULT_OPT ? 'Default (server picks)' : String(v ?? ''))}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value={TABLE_DEFAULT_OPT}>Default (server picks)</SelectItem>
-                  {collations.map(name => (
-                    <SelectItem key={name} value={name}>{name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+              <SearchableSelect
+                value={newCollation}
+                onChange={setNewCollation}
+                className="h-7 w-72"
+                searchPlaceholder="Search collations…"
+                options={[
+                  { value: TABLE_DEFAULT_OPT, label: 'Default (server picks)' },
+                  ...collations.map(name => ({ value: name, label: name })),
+                ]}
+              />
             </>
           )}
         </div>
@@ -767,12 +802,22 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     )}
                     {!effectiveIsNew && (
                       <Td className="font-mono text-muted-foreground p-0">
-                        <CellInput
-                          value={c.collation}
-                          onCommit={v => updateColumn(c.id, { collation: v })}
-                          disabled={!columnsEditable || c.pendingDelete || !isStringyType(c.dataType)}
-                          placeholder={isStringyType(c.dataType) ? 'utf8mb4_unicode_ci' : ''}
-                        />
+                        {allCollations.length > 0 ? (
+                          <CellCombobox
+                            value={c.collation}
+                            onCommit={v => updateColumn(c.id, { collation: v })}
+                            options={allCollations}
+                            disabled={!columnsEditable || c.pendingDelete || !isStringyType(c.dataType)}
+                            placeholder={isStringyType(c.dataType) ? 'utf8mb4_unicode_ci' : ''}
+                          />
+                        ) : (
+                          <CellInput
+                            value={c.collation}
+                            onCommit={v => updateColumn(c.id, { collation: v })}
+                            disabled={!columnsEditable || c.pendingDelete || !isStringyType(c.dataType)}
+                            placeholder={isStringyType(c.dataType) ? 'utf8mb4_unicode_ci' : ''}
+                          />
+                        )}
                       </Td>
                     )}
                     {!effectiveIsNew && (

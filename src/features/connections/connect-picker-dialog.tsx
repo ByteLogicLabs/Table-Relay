@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Edit, Trash2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
@@ -30,7 +30,11 @@ export default function ConnectPickerDialog({
   onDeleteConnection,
 }: ConnectPickerDialogProps) {
   const [query, setQuery] = useState('');
+  // Keyboard-highlighted row index into `filtered`. Arrow up/down move it,
+  // Enter connects it. Clamped to the filtered list as the query narrows.
+  const [highlight, setHighlight] = useState(0);
   const contextMenuOpenRef = useRef(false);
+  const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -42,6 +46,16 @@ export default function ConnectPickerDialog({
         c.driver.toLowerCase().includes(q),
     );
   }, [connections, query]);
+
+  // Reset the highlight to the first row whenever the dialog opens or the
+  // filtered set changes (typing narrows the list), so the highlight never
+  // points past the end.
+  useEffect(() => { setHighlight(0); }, [open, query]);
+
+  // Keep the highlighted row scrolled into view as the user arrows through.
+  useEffect(() => {
+    rowRefs.current[highlight]?.scrollIntoView({ block: 'nearest' });
+  }, [highlight]);
 
   const connect = (id: string) => {
     onOpenChange(false);
@@ -89,7 +103,16 @@ export default function ConnectPickerDialog({
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === 'Enter' && filtered.length === 1) connect(filtered[0].id);
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setHighlight((h) => (filtered.length === 0 ? 0 : (h + 1) % filtered.length));
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setHighlight((h) => (filtered.length === 0 ? 0 : (h - 1 + filtered.length) % filtered.length));
+                } else if (e.key === 'Enter') {
+                  const target = filtered[highlight] ?? (filtered.length === 1 ? filtered[0] : undefined);
+                  if (target) { e.preventDefault(); connect(target.id); }
+                }
               }}
             />
           </div>
@@ -102,16 +125,20 @@ export default function ConnectPickerDialog({
             </div>
           ) : (
             <div className="px-2 space-y-0.5">
-              {filtered.map((conn) => (
+              {filtered.map((conn, i) => (
                 <ContextMenu
                   key={conn.id}
                   onOpenChange={(v) => { contextMenuOpenRef.current = v; }}
                 >
                   <ContextMenuTrigger>
                     <button
+                      ref={(el) => { rowRefs.current[i] = el; }}
                       type="button"
                       onClick={() => connect(conn.id)}
-                      className="w-full flex items-center gap-3 px-3 py-2 rounded-md text-left hover:bg-muted/60 transition-colors"
+                      onMouseMove={() => setHighlight(i)}
+                      className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left transition-colors ${
+                        i === highlight ? 'bg-muted' : 'hover:bg-muted/60'
+                      }`}
                     >
                       <div
                         className="w-8 h-8 rounded-md bg-muted/70 flex items-center justify-center shrink-0"

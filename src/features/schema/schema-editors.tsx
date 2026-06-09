@@ -48,7 +48,15 @@ export function CellSelect({
 }) {
   return (
     <Select value={value} onValueChange={onChange} disabled={disabled}>
-      <SelectTrigger size="sm" className="h-7 border-0 bg-transparent hover:bg-muted/40 rounded-none w-full">
+      {/* Flat cell trigger: matches the borderless `CellInput` cells around
+          it. We explicitly clear the base trigger's dark fill + rounding —
+          tailwind-merge keeps `dark:bg-input/30` next to a base
+          `bg-transparent` (different variants), which is what made the
+          control look like an oversized pill inside the dense grid. */}
+      <SelectTrigger
+        size="sm"
+        className="h-7 w-full border-0 rounded-none shadow-none bg-transparent hover:bg-muted/40 dark:bg-transparent dark:hover:bg-muted/40 px-2.5"
+      >
         <SelectValue />
       </SelectTrigger>
       <SelectContent>
@@ -75,6 +83,11 @@ export function CellCombobox({
 }) {
   const [local, setLocal] = useState(value);
   const [open, setOpen] = useState(false);
+  // Whether the user has typed since the list opened. While false, the
+  // dropdown shows the FULL option list (not just the row matching the
+  // current value) so opening a populated cell doesn't collapse the list
+  // down to one item — the user can scan every type before deciding.
+  const [typing, setTyping] = useState(false);
   const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
   const ref = useRef<HTMLInputElement | null>(null);
   const wrapRef = useRef<HTMLDivElement | null>(null);
@@ -116,13 +129,17 @@ export function CellCombobox({
   }, [open]);
 
   const filtered = useMemo(() => {
+    // Only filter once the user starts typing. On open we show everything
+    // so the current value never hides the rest of the catalogue.
+    if (!typing) return options;
     const q = local.trim().toLowerCase();
     if (!q) return options;
     return options.filter(o => o.toLowerCase().includes(q));
-  }, [options, local]);
+  }, [options, local, typing]);
 
   const commit = (v: string) => {
     setLocal(v);
+    setTyping(false);
     if (v !== value) onCommit(v);
     setOpen(false);
   };
@@ -142,12 +159,12 @@ export function CellCombobox({
         value={local}
         disabled={disabled}
         placeholder={placeholder}
-        onChange={e => { setLocal(e.target.value); if (!open) setOpen(true); }}
-        onFocus={() => setOpen(true)}
+        onChange={e => { setLocal(e.target.value); setTyping(true); if (!open) setOpen(true); }}
+        onFocus={() => { setOpen(true); setTyping(false); }}
         onBlur={() => { if (local !== value && !open) onCommit(local); }}
         onKeyDown={e => {
           if (e.key === 'Enter') { commit(local); (e.target as HTMLInputElement).blur(); }
-          if (e.key === 'Escape') { setLocal(value); setOpen(false); (e.target as HTMLInputElement).blur(); }
+          if (e.key === 'Escape') { setLocal(value); setOpen(false); setTyping(false); (e.target as HTMLInputElement).blur(); }
           if (e.key === 'ArrowDown' && !open) { setOpen(true); }
         }}
         className="w-full px-2.5 py-1.5 pr-5 bg-transparent text-sm font-[inherit] outline-none focus:bg-muted/40 disabled:opacity-50"
@@ -156,7 +173,7 @@ export function CellCombobox({
         type="button"
         tabIndex={-1}
         disabled={disabled}
-        onMouseDown={(e) => { e.preventDefault(); setOpen(o => !o); ref.current?.focus(); }}
+        onMouseDown={(e) => { e.preventDefault(); setTyping(false); setOpen(o => !o); ref.current?.focus(); }}
         className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
       >
         <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M2 4l3 3 3-3z" /></svg>
@@ -180,7 +197,7 @@ export function CellCombobox({
               type="button"
               onMouseDown={(e) => { e.preventDefault(); commit(o); }}
               className={`w-full text-left px-3 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground ${
-                o === local ? 'bg-accent/50' : ''
+                o === value ? 'bg-accent/50' : ''
               }`}
             >
               {o}

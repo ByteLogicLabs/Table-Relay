@@ -138,18 +138,63 @@ export function coerceForColumn(
   value: unknown,
   booleanFormat: BooleanLiteralFormat = 'oneZero',
 ): unknown {
-  if (value === null || value === undefined || value === '') return value;
-  if (typeof value === 'string' && value.toUpperCase() === 'NULL') return value;
-  if (kind.kind === 'boolean') {
-    const truthyOut = booleanFormat === 'trueFalse' ? 'true' : '1';
-    const falsyOut = booleanFormat === 'trueFalse' ? 'false' : '0';
-    if (typeof value === 'boolean') return value ? truthyOut : falsyOut;
-    const s = String(value).trim().toLowerCase();
-    if (['1', 'true', 'yes', 'on', 't'].includes(s)) return truthyOut;
-    if (['0', 'false', 'no', 'off', 'f'].includes(s)) return falsyOut;
-    return value;
+  if (value === null || value === undefined) return value;
+  // The literal `NULL` sentinel means "write SQL NULL" — represent it as a
+  // real JS null so the adapter binds an actual NULL, not the 4-char string
+  // "NULL". (Postgres rejects the string on a non-text column; MySQL would
+  // silently store the text "NULL".) The grid sends this via "Set to NULL".
+  if (typeof value === 'string' && value.toUpperCase() === 'NULL') return null;
+  // Empty string is "set to empty", not NULL — pass it through verbatim for
+  // text columns. For typed columns (number/bool/json) an empty string can't
+  // be coerced, so leave it to the caller / validation; we return '' so the
+  // existing insert-skip-empty path still works.
+  if (value === '') return value;
+
+  // Emit correctly-typed JS values so the backend binds the right SQL type.
+  // This matters on Postgres, which (unlike MySQL) will NOT implicitly cast a
+  // text bind to int/numeric/bool/jsonb — `column = $1` with a text param
+  // throws "column is of type X but expression is of type text". MySQL is
+  // unaffected (it casts), so this is strictly safer for both.
+  switch (kind.kind) {
+    case 'boolean': {
+      // Normalise to a canonical boolean, then emit the form each engine's
+      // bind path accepts: a native JS boolean for `trueFalse` adapters
+      // (Postgres `boolean` — binds as a real bool, which Postgres requires
+      // and won't cast from text), and the integer 1/0 for `oneZero`
+      // adapters (MySQL `tinyint(1)`/SQLite — accept an int natively). Both
+      // are typed values, never the text strings 'true'/'1' that broke
+      // Postgres binds.
+      let b: boolean | null = null;
+      if (typeof value === 'boolean') b = value;
+      else {
+        const s = String(value).trim().toLowerCase();
+        if (['1', 'true', 'yes', 'on', 't'].includes(s)) b = true;
+        else if (['0', 'false', 'no', 'off', 'f'].includes(s)) b = false;
+      }
+      if (b === null) return value; // unrecognised — leave for validation
+      return booleanFormat === 'trueFalse' ? b : (b ? 1 : 0);
+    }
+    case 'number': {
+      const n = Number(value);
+      // Only coerce when it's actually numeric; otherwise pass through so
+      // validation can surface the error rather than binding NaN.
+      if (value === '' || !Number.isFinite(n)) return value;
+      return n;
+    }
+    case 'json': {
+      // Send parsed JSON so the adapter can bind a real json/jsonb value.
+      // If it doesn't parse, pass the raw string through (validation catches
+      // it upstream via validateEditorValue).
+      if (typeof value !== 'string') return value;
+      try {
+        return JSON.parse(value);
+      } catch {
+        return value;
+      }
+    }
+    default:
+      return value;
   }
-  return value;
 }
 
 export function validateEditorValue(kind: EditorKind, value: string): string | null {

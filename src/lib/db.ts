@@ -53,6 +53,10 @@ export interface IndexInfo {
   name: string;
   columns: string[];
   unique: boolean;
+  /** Index method as the engine reports it — MySQL BTREE/HASH/FULLTEXT/
+   *  SPATIAL, Postgres BTREE/HASH/GIN/GIST/… (uppercased). Undefined for
+   *  adapters that don't expose it (SQLite, Mongo). */
+  algorithm?: string;
 }
 
 export interface ForeignKey {
@@ -63,6 +67,11 @@ export interface ForeignKey {
   toSchema: string;
   toTable: string;
   toColumns: string[];
+  /** Referential actions as canonical SQL (`NO ACTION`, `CASCADE`,
+   *  `SET NULL`, `RESTRICT`, `SET DEFAULT`). Undefined when the adapter
+   *  didn't surface them (bulk schema scans / relations view). */
+  onUpdate?: string;
+  onDelete?: string;
 }
 
 export interface TableStructure {
@@ -595,6 +604,11 @@ export const db = {
    *  comes first, the rest alphabetised. */
   listCollations: (connectionId: string, charset: string) =>
     invoke<string[]>('db_list_collations', { connectionId, charset }),
+  /** Every collation on the server, independent of charset. Drives the
+   *  schema editor's per-column collation dropdown. Empty list ⇒ the
+   *  adapter has no collation concept and the cell stays free-text. */
+  listAllCollations: (connectionId: string) =>
+    invoke<string[]>('db_list_all_collations', { connectionId }),
   /** Top-level database names for the "Open database" picker. For
    *  Postgres this comes from `pg_database`; for engines without that
    *  distinction it falls back to schema names. */

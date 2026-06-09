@@ -5,10 +5,14 @@
 # Types offered in the "add column" picker. Free-text input still
 # accepts anything (geometry, hstore, custom domains).
 column_types = [
-  "bigint", "bigserial", "boolean", "bytea", "char", "character varying",
-  "date", "double precision", "inet", "integer", "json", "jsonb",
-  "numeric", "real", "serial", "smallint", "smallserial", "text",
-  "time", "timestamp", "timestamptz", "uuid", "varchar(255)", "xml",
+  "bigint", "bigserial", "bit", "bit varying", "boolean", "box", "bytea",
+  "char", "character", "character varying", "cidr", "circle", "date",
+  "double precision", "inet", "integer", "interval", "json", "jsonb",
+  "line", "lseg", "macaddr", "macaddr8", "money", "numeric", "path",
+  "pg_lsn", "point", "polygon", "real", "serial", "smallint", "smallserial",
+  "text", "time", "time with time zone", "timestamp",
+  "timestamp with time zone", "timestamptz", "tsquery", "tsvector", "uuid",
+  "varbit", "varchar(255)", "xml",
 ]
 
 [adapter]

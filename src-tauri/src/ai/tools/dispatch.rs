@@ -262,13 +262,18 @@ pub async fn dispatch(
 
     match name {
         "list_schemas" => {
-            // Hard backstop: when cross-database access is OFF, `list_schemas`
-            // is removed from the catalog — but a weak model can replay the tool
-            // name from earlier history or hallucinate it. Return a directive
-            // ERROR (not a success) so the model stops re-calling and proceeds
-            // with the active database it already knows. A successful result
-            // here is what caused the 3×-loop-then-abort behaviour.
-            if !auto_approvals.cross_database().await {
+            // Cross-database gate — but ONLY for adapters where schema ==
+            // database (MySQL/SQLite). There, `list_schemas` enumerates other
+            // databases, so blocking it when cross-DB is OFF is correct.
+            //
+            // On Postgres-style adapters (one database, many schemas:
+            // `public`, `netflix`, …) listing schemas is SAME-database
+            // introspection — the schemas all live in the connected DB and a
+            // PG connection can't reach others anyway. Blocking it there
+            // locked the model out of its own database's structure, leaving it
+            // to guess (`WHERE table_catalog = 'Apps'` → 0 rows → loop). So we
+            // allow `list_schemas` on those adapters regardless of the flag.
+            if !database_is_distinct_from_schema && !auto_approvals.cross_database().await {
                 let active = ctx.default_schema.clone().unwrap_or_default();
                 let active_label = if active.is_empty() { "the active database".to_string() } else { format!("`{active}`") };
                 return ToolResult::error(format!(

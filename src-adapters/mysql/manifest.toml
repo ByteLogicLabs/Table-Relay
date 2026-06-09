@@ -5,8 +5,9 @@ column_types = [
   "decimal", "double", "enum", "float", "geometry", "geometrycollection",
   "int", "json", "linestring", "longblob", "longtext", "mediumblob",
   "mediumint", "mediumtext", "multilinestring", "multipoint", "multipolygon",
-  "point", "polygon", "smallint", "text", "time", "timestamp", "tinyblob",
-  "tinyint", "tinytext", "varchar(255)", "year",
+  "numeric", "point", "polygon", "set", "smallint", "text", "time",
+  "timestamp", "tinyblob", "tinyint", "tinytext", "varbinary(255)",
+  "varchar(255)", "year",
 ]
 
 [adapter]

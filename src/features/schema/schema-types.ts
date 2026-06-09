@@ -147,15 +147,36 @@ export function indexesToDrafts(idxs: IndexInfo[], defaultAlgorithm: IndexAlgori
   // recreated with whatever kind is currently selected. Compass behaves
   // the same way: existing indexes can't be edited in place, only
   // dropped and recreated.
-  return idxs.map(i => ({
+  return idxs
+    // The PRIMARY index is the physical backing of the PK, which the
+    // column-level `key = PRIMARY` cell already owns. Surfacing it here too
+    // double-manages the same constraint: it appears as an editable index
+    // row, can't be dropped via `DROP INDEX` on MySQL ("DROP PRIMARY KEY"
+    // is the real path), and a PK edit would emit conflicting DDL. Hide it
+    // from the secondary-index pane; the PK lives on the column.
+    .filter(i => i.name.toUpperCase() !== 'PRIMARY')
+    .map(i => ({
     id: makeId('idx'),
     originalName: i.name,
     name: i.name,
-    algorithm: defaultAlgorithm,
+    // Use the engine-reported method when it's one the editor's dropdown
+    // knows (BTREE/HASH/FULLTEXT/SPATIAL); otherwise fall back to the
+    // default. This makes the algorithm cell reflect reality and lets the
+    // dirty-diff detect real changes instead of always assuming BTREE.
+    algorithm: normaliseIndexAlgorithm(i.algorithm) ?? defaultAlgorithm,
     isUnique: i.unique,
     columns: i.columns.join(', '),
     pendingDelete: false,
   }));
+}
+
+/** Map an engine-reported index method to the editor's `IndexAlgorithm`
+ *  enum, or `undefined` if it's not one we render (e.g. Postgres GIN/GIST —
+ *  those keep the default and the cell shows the fallback). */
+export function normaliseIndexAlgorithm(raw: string | undefined): IndexAlgorithm | undefined {
+  if (!raw) return undefined;
+  const up = raw.trim().toUpperCase();
+  return (SQL_INDEX_ALGORITHMS as string[]).includes(up) ? (up as IndexAlgorithm) : undefined;
 }
 
 export function fksToDrafts(fks: ForeignKey[]): DraftForeignKey[] {
@@ -166,8 +187,19 @@ export function fksToDrafts(fks: ForeignKey[]): DraftForeignKey[] {
     columns: [...f.fromColumns],
     refTable: f.toTable,
     refColumns: f.toColumns.join(', '),
-    onUpdate: 'NO ACTION',
-    onDelete: 'NO ACTION',
+    // Use the engine-reported referential actions so the editor shows the
+    // real ON UPDATE / ON DELETE and the dirty-diff doesn't flag an
+    // unchanged FK. Falls back to NO ACTION when the adapter didn't report
+    // them (matches SQL's default).
+    onUpdate: normaliseFkAction(f.onUpdate),
+    onDelete: normaliseFkAction(f.onDelete),
     pendingDelete: false,
   }));
+}
+
+/** Coerce an engine-reported action string to the editor's `FkAction`
+ *  enum, defaulting to `NO ACTION` for unknown/missing values. */
+export function normaliseFkAction(raw: string | undefined | null): FkAction {
+  const up = (raw ?? '').trim().toUpperCase();
+  return (FK_ACTIONS as string[]).includes(up) ? (up as FkAction) : 'NO ACTION';
 }

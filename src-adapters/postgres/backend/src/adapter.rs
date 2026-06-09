@@ -143,6 +143,10 @@ impl Adapter for PostgresAdapter {
         self.driver.create_schema(name, charset, collation).await
     }
 
+    async fn list_all_collations(&self) -> Result<Vec<String>, AdapterError> {
+        self.driver.list_all_collations().await
+    }
+
     async fn execute_raw(
         &self,
         command: &str,

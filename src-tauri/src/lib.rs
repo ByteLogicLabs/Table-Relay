@@ -99,6 +99,16 @@ pub fn run() {
             let export_data = MenuItemBuilder::with_id("file_export", "Export…")
                 .accelerator("CmdOrCtrl+Shift+E")
                 .build(handle)?;
+            // "Close Tab" menu entry. We deliberately DON'T bind it to
+            // `CmdOrCtrl+W` here: the webview already owns ⌘W via a guarded
+            // keydown handler (tabs-shell.tsx) that closes the active tab but
+            // skips the action while the user is typing in Monaco / an input.
+            // The old `close_window` predefined item used to steal ⌘W and quit
+            // the whole single-window app — removing it (below) frees the key
+            // for the webview. Clicking this menu item still works via the
+            // emitted `menu-file-close_tab` event as a no-accelerator fallback.
+            let close_tab = MenuItemBuilder::with_id("file_close_tab", "Close Tab")
+                .build(handle)?;
             let mut file_builder = SubmenuBuilder::new(handle, "File")
                 .item(&import_sql)
                 .item(&export_data)
@@ -118,7 +128,7 @@ pub fn run() {
                     .item(&PredefinedMenuItem::about(handle, None, None)?)
                     .separator();
             }
-            file_builder = file_builder.item(&PredefinedMenuItem::close_window(handle, None)?);
+            file_builder = file_builder.item(&close_tab);
             #[cfg(not(target_os = "macos"))]
             {
                 file_builder = file_builder.item(&PredefinedMenuItem::quit(handle, None)?);
@@ -139,11 +149,12 @@ pub fn run() {
             let view_menu = SubmenuBuilder::new(handle, "View")
                 .item(&PredefinedMenuItem::fullscreen(handle, None)?)
                 .build()?;
+            // No `close_window` item here — its default ⌘W accelerator would
+            // shadow the Close Tab binding and quit the single-window app.
+            // The window is still closable via the title-bar control and ⌘Q.
             let window_menu = SubmenuBuilder::new(handle, "Window")
                 .minimize()
                 .maximize()
-                .separator()
-                .item(&PredefinedMenuItem::close_window(handle, None)?)
                 .build()?;
 
             let connection_picker = MenuItemBuilder::with_id("connection_picker", "List Connections…")
@@ -295,6 +306,7 @@ pub fn run() {
             commands::db::db_create_database,
             commands::db::db_list_charsets,
             commands::db::db_list_collations,
+            commands::db::db_list_all_collations,
             // Multi-adapter surface (P4)
             commands::db::db_list_adapters,
             commands::db::db_browse,

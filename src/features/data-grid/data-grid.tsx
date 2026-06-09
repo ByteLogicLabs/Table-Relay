@@ -1219,14 +1219,18 @@ export default function DataGrid({
       if (op === "is_null" || op === "is_not_null") {
         return { column: f.column, op };
       }
-      // For gt/lt coerce numeric-looking strings to numbers so the adapter
-      // binds them as numbers, not strings (MySQL's implicit-cast behavior
-      // is fine but explicit is friendlier for non-MySQL adapters).
+      // Coerce to a number only when the COLUMN is numeric. Postgres rejects
+      // `int_col = $1` when `$1` is a text param ("operator does not exist:
+      // integer = text"); MySQL casts implicitly but explicit is correct for
+      // both. Keying off the column kind (not just "looks numeric") avoids the
+      // inverse bug — binding a number against a text column would fail PG with
+      // "text = integer". Applies to every comparison op; previously only
+      // gt/lt were coerced, which broke equality filters on numeric columns.
+      const isNumericColumn =
+        (columnKinds[f.column]?.kind ?? "text") === "number";
       const n = Number(f.value);
       const value =
-        (op === "gt" || op === "lt") && f.value !== "" && Number.isFinite(n)
-          ? n
-          : f.value;
+        isNumericColumn && f.value !== "" && Number.isFinite(n) ? n : f.value;
       return { column: f.column, op, value };
     });
   };

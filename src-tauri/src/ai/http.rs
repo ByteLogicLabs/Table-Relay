@@ -11,7 +11,11 @@ use crate::ai::AiError;
 /// cap the initial TCP + TLS handshake so dead networks fail fast.
 pub fn client() -> Result<reqwest::Client, AiError> {
     reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(15))
+        // Cap the TCP+TLS handshake so a dead network fails fast, but keep it
+        // generous: 15s was tight enough that a momentarily slow provider or
+        // congested link surfaced as a spurious "network timeout" mid-chat.
+        // 30s tolerates a slow handshake without making a truly dead host hang.
+        .connect_timeout(Duration::from_secs(30))
         // No overall `timeout()` — the body of a streaming response takes
         // minutes on long completions. Each provider sets a read-level
         // timeout via `read_timeout` below on the response.

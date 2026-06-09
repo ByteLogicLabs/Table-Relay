@@ -143,6 +143,10 @@ impl Adapter for MysqlAdapter {
         self.driver.list_collations(charset).await
     }
 
+    async fn list_all_collations(&self) -> Result<Vec<String>, AdapterError> {
+        self.driver.list_all_collations().await
+    }
+
     async fn execute_raw(
         &self,
         command: &str,
