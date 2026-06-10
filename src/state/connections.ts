@@ -17,6 +17,12 @@ interface State {
 const inflightStructures = new Map<string, Promise<TableStructure>>();
 const inflightConnects = new Map<string, Promise<ConnectionMeta | null>>();
 
+// Connection ids the user cancelled while a connect was in flight. The Tauri
+// `db_connect` invoke can't be aborted mid-handshake, so we let it finish and
+// then honour the cancellation: if it succeeded we tear the connection down
+// (so it doesn't leak), and either way we suppress the success/error state.
+const cancelledConnects = new Set<string>();
+
 // Same idea for list_schemas: StrictMode double-mount + the workspace, rail,
 // and sidebar each calling refreshSchemas on connect all piled up 4–6 concurrent
 // `db_list_schemas` round-trips per login over SSH.
@@ -74,6 +80,8 @@ export async function connectAndLoad(connectionId: string, force?: boolean): Pro
         return { ...s, activeById };
       });
     }
+    // Fresh attempt: clear any stale cancellation flag.
+    cancelledConnects.delete(connectionId);
     mutate(s => {
       const next = { ...s, connectingIds: new Set(s.connectingIds) };
       next.connectingIds.add(connectionId);
@@ -81,6 +89,13 @@ export async function connectAndLoad(connectionId: string, force?: boolean): Pro
     });
     try {
       const meta = await db.connect(connectionId);
+      if (cancelledConnects.has(connectionId)) {
+        // User bailed while we were connecting. The handshake still completed
+        // on the backend, so disconnect to avoid leaving an orphaned pool.
+        cancelledConnects.delete(connectionId);
+        void db.disconnect(connectionId).catch(() => {});
+        return null;
+      }
       mutate(s => {
         const activeById = new Map(s.activeById);
         activeById.set(connectionId, meta);
@@ -93,6 +108,12 @@ export async function connectAndLoad(connectionId: string, force?: boolean): Pro
       void refreshSchemas(connectionId);
       return meta;
     } catch (err) {
+      if (cancelledConnects.has(connectionId)) {
+        // User cancelled; swallow the (likely connection-refused/timeout)
+        // error instead of surfacing it as a failed connection.
+        cancelledConnects.delete(connectionId);
+        return null;
+      }
       const msg = isDbError(err) ? err.message : String(err);
       mutate(s => {
         const connectingIds = new Set(s.connectingIds);
@@ -108,6 +129,25 @@ export async function connectAndLoad(connectionId: string, force?: boolean): Pro
   });
   inflightConnects.set(connectionId, p);
   return p;
+}
+
+/**
+ * Cancel an in-flight connection attempt. The backend handshake can't be
+ * aborted, so we just stop waiting on it: clear the connecting spinner and flag
+ * the id so `connectAndLoad` discards whatever the handshake eventually
+ * produces (tearing down a late success). No-op if nothing is connecting.
+ */
+export function cancelConnect(connectionId: string): void {
+  if (!state.connectingIds.has(connectionId)) return;
+  cancelledConnects.add(connectionId);
+  inflightConnects.delete(connectionId);
+  mutate(s => {
+    const connectingIds = new Set(s.connectingIds);
+    connectingIds.delete(connectionId);
+    const lastErrorById = new Map(s.lastErrorById);
+    lastErrorById.delete(connectionId);
+    return { ...s, connectingIds, lastErrorById };
+  });
 }
 
 export async function disconnect(connectionId: string): Promise<void> {

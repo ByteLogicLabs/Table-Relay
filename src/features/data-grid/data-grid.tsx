@@ -75,6 +75,7 @@ import {
 import {
   readCachedGrid,
   writeCachedGrid,
+  patchCachedGridDraft,
   clearCachedGrid,
 } from "../../state/tab-data-cache";
 import { ensureTableStructure, useConnections } from "../../state/connections";
@@ -177,7 +178,9 @@ export default function DataGrid({
   );
   const [loading, setLoading] = useState(!cached);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [editedCells, setEditedCells] = useState<Record<string, unknown>>({});
+  const [editedCells, setEditedCells] = useState<Record<string, unknown>>(
+    () => cached?.editedCells ?? {},
+  );
   const [activeEdit, setActiveEdit] = useState<{
     rowId: string;
     col: string;
@@ -243,12 +246,31 @@ export default function DataGrid({
   const [lastSelectedRowId, setLastSelectedRowId] = useState<string | null>(
     null,
   );
-  const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(new Set());
+  const [pendingDeletes, setPendingDeletes] = useState<Set<string>>(
+    () => new Set(cached?.pendingDeletes ?? []),
+  );
   // Rows queued for INSERT on commit. Each has a synthetic __rowId prefixed
   // with `new:` so existing edit/select machinery can key off it the same way
   // as fetched rows.
-  const [pendingInserts, setPendingInserts] = useState<GridRow[]>([]);
+  const [pendingInserts, setPendingInserts] = useState<GridRow[]>(
+    () => (cached?.pendingInserts as GridRow[]) ?? [],
+  );
   const [isCommitting, setIsCommitting] = useState(false);
+
+  // Persist unsaved work (draft inserts, cell edits, queued deletes) into the
+  // tab cache whenever it changes, so it survives the grid unmounting on a
+  // connection switch — e.g. the user starts adding a row, switches to another
+  // connection to copy something, and comes back to find their draft intact.
+  // Cleared automatically: committing/discarding empties these and this effect
+  // writes the empty state through.
+  useEffect(() => {
+    if (!tabId) return;
+    patchCachedGridDraft(tabId, {
+      pendingInserts,
+      editedCells,
+      pendingDeletes: Array.from(pendingDeletes),
+    });
+  }, [tabId, pendingInserts, editedCells, pendingDeletes]);
   const [confirmDiscardOpen, setConfirmDiscardOpen] = useState(false);
   const [confirmRefreshOpen, setConfirmRefreshOpen] = useState(false);
   const [filterPopoverOpen, setFilterPopoverOpen] = useState(false);
@@ -1114,27 +1136,8 @@ export default function DataGrid({
         if (viewMode !== "table") return;
         if (isCommitting) return;
         e.preventDefault();
-        // If the user is mid-edit, flush that cell first — but only if its
-        // value is valid for the column type. Matches the button path where
-        // the editor's onBlur validator drops invalid edits silently.
-        const ae = activeEditRef.current;
-        if (ae) {
-          const kind = columnKindsRef.current[ae.col] ?? { kind: "text" };
-          if (validateEditorValue(kind, ae.value) === null) {
-            commitActiveEdit();
-          } else {
-            // Invalid active edit — cancel it so it doesn't poison the commit.
-            cancelActiveEdit();
-            toast.error(`Skipped invalid edit in ${ae.col}`);
-          }
-          setTimeout(() => {
-            if (hasPendingRef.current && !isCommittingRef.current)
-              void handleCommit();
-          }, 0);
-          return;
-        }
-        if (!hasPending) return;
-        void handleCommit();
+        // Flush any mid-edit cell, then commit — shared with the Commit button.
+        commitWithFlush();
         return;
       }
       if (mod && !e.shiftKey && key === "z") {
@@ -1519,6 +1522,26 @@ export default function DataGrid({
       const tableCols = structure.columns.map((c) => c.name);
       if (tableCols.length === 0) return;
 
+      // Positional paste maps against the VISIBLE columns in display order,
+      // because that is exactly what copy emits (displayCols, no header for a
+      // single row). Using the full schema-ordered list here misaligned every
+      // value whenever a column was hidden or reordered, so an internal
+      // copy→paste round-trip "did nothing useful". Fall back to all columns
+      // when nothing is visible.
+      const posCols = displayCols.length > 0 ? displayCols : tableCols;
+
+      // Auto-increment columns should regenerate on the server when a row is
+      // duplicated (copy a row, paste, save → new row with a fresh key).
+      // Carrying the copied key over would either collide or pin the new row to
+      // an existing id, so we drop those values from pasted drafts.
+      const isAutoIncrement = (extra?: string) =>
+        !!extra && /auto_increment/i.test(extra);
+      const autoIncCols = new Set(
+        structure.columns
+          .filter((c) => isAutoIncrement(c.extra))
+          .map((c) => c.name),
+      );
+
       const lowerToCol = new Map(tableCols.map((c) => [c.toLowerCase(), c]));
       const first = parsed[0].map((c) => c.trim().toLowerCase());
       const headerHits = first.filter((c) => lowerToCol.has(c)).length;
@@ -1539,12 +1562,14 @@ export default function DataGrid({
         if (looksLikeHeader) {
           parsed[0].forEach((h, idx) => {
             const col = lowerToCol.get(h.trim().toLowerCase());
-            if (!col || idx >= row.length) return;
+            if (!col || idx >= row.length || autoIncCols.has(col)) return;
             draft[col] = row[idx];
           });
         } else {
-          for (let i = 0; i < Math.min(tableCols.length, row.length); i++) {
-            draft[tableCols[i]] = row[i];
+          for (let i = 0; i < Math.min(posCols.length, row.length); i++) {
+            const col = posCols[i];
+            if (autoIncCols.has(col)) continue;
+            draft[col] = row[i];
           }
         }
         return draft;
@@ -1557,7 +1582,7 @@ export default function DataGrid({
         `Pasted ${drafts.length} row${drafts.length === 1 ? "" : "s"} as draft`,
       );
     },
-    [viewMode, structure, isCommitting, pushHistory],
+    [viewMode, structure, isCommitting, pushHistory, displayCols],
   );
 
   // Global paste capture for table view. If the focus is inside a cell editor
@@ -2454,6 +2479,35 @@ export default function DataGrid({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Flush any in-progress cell edit into the draft/edited state BEFORE
+  // committing, then run the commit on the next tick so the flushed value is
+  // visible in state. Without this, clicking Commit (or ⌘S) while a cell editor
+  // still holds a typed-but-unblurred value validates against a STALE draft and
+  // falsely reports a just-filled required field as "missing". Used by both the
+  // Commit button and the ⌘S shortcut so they behave identically.
+  const commitWithFlush = useCallback(() => {
+    if (isCommittingRef.current) return;
+    const ae = activeEditRef.current;
+    if (ae) {
+      const kind = columnKindsRef.current[ae.col] ?? { kind: "text" };
+      if (validateEditorValue(kind, ae.value) === null) {
+        commitActiveEdit();
+      } else {
+        // Invalid active edit — cancel it so it doesn't poison the commit.
+        cancelActiveEdit();
+        toast.error(`Skipped invalid edit in ${ae.col}`);
+      }
+      setTimeout(() => {
+        if (hasPendingRef.current && !isCommittingRef.current)
+          void handleCommit();
+      }, 0);
+      return;
+    }
+    if (!hasPendingRef.current) return;
+    void handleCommit();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [commitActiveEdit, cancelActiveEdit]);
+
   const closeMenu = useCallback(() => setMenuState(null), []);
 
   return (
@@ -2844,7 +2898,7 @@ export default function DataGrid({
                 variant="default"
                 className="bg-green-600 hover:bg-green-700 text-white"
                 disabled={isCommitting}
-                onClick={() => void handleCommit()}
+                onClick={() => commitWithFlush()}
                 title="Commit pending changes (⌘S)"
               >
                 <Check className="w-4 h-4 mr-2" />

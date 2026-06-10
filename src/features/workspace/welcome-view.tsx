@@ -9,7 +9,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { toast } from 'sonner';
 import MacWindowControls from './mac-window-controls';
 import DbIcon from '../../components/db-icon';
-import { useConnections } from '../../state/connections';
+import { useConnections, cancelConnect } from '../../state/connections';
 
 interface WelcomeViewProps {
   connections: ConnectionProfile[];
@@ -168,6 +168,14 @@ export default function WelcomeView({
                       <div className="flex flex-col items-center gap-2">
                         <div className="w-5 h-5 border-2 border-primary border-t-transparent rounded-full animate-spin" />
                         <span className="text-xs font-medium">Connecting...</span>
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="h-7 mt-1"
+                          onClick={(e) => { e.stopPropagation(); cancelConnect(conn.id); }}
+                        >
+                          Cancel
+                        </Button>
                       </div>
                     </div>
                   )}
