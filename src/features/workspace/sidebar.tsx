@@ -230,6 +230,16 @@ export default function Sidebar({
 
   const connState = useConnections();
   const conn = focusedConnection;
+
+  // Reset the table-list search whenever the focused connection changes. The
+  // sidebar is never unmounted across connection switches (e.g. ⌘K to another
+  // database), so without this the previous database's search term carries over
+  // and silently filters the new database's table list. Search should be fresh
+  // per connection.
+  useEffect(() => {
+    setFilter("");
+  }, [conn?.id]);
+
   const schemas = conn ? (connState.schemasById.get(conn.id) ?? []) : [];
   const isLoadingSchemas = conn
     ? connState.loadingSchemasById.has(conn.id)

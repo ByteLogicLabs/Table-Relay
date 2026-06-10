@@ -228,7 +228,13 @@ function UnlockedApp() {
     const name = connectionsRef.current.find(c => c.id === id)?.name ?? 'database';
     const toastId = toast.loading(`Connecting to ${name}…`);
     try {
-      await connectAndLoad(id);
+      const meta = await connectAndLoad(id);
+      if (!meta) {
+        // User cancelled the in-flight connect (or it was superseded). Don't
+        // open the connection or claim success — just clear the toast.
+        toast.dismiss(toastId);
+        return;
+      }
       setActiveConnectionIds(prev => (prev.includes(id) ? prev : [...prev, id]));
       toast.success(`Connected to ${name}`, { id: toastId });
     } catch (err) {
