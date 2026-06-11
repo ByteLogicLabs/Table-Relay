@@ -14,7 +14,7 @@ use adapter_api::{
     TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use sqlx::sqlite::{
     SqliteColumn, SqliteConnectOptions, SqlitePoolOptions, SqliteRow,
 };
@@ -1010,15 +1010,26 @@ pub(crate) fn column_to_json(row: &SqliteRow, idx: usize, type_name: &str) -> Js
     }
     if is_text {
         if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
-            return v.map(JsonValue::String).unwrap_or(JsonValue::Null);
+            return v
+                .map(|s| {
+                    if adapter_api::looks_binary(s.as_bytes()) {
+                        JsonValue::String(adapter_api::bytes_to_hex_upper(s.as_bytes()))
+                    } else {
+                        JsonValue::String(s)
+                    }
+                })
+                .unwrap_or(JsonValue::Null);
         }
     }
     if is_blob {
         if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
             return v
-                .map(|bytes| match std::str::from_utf8(&bytes) {
-                    Ok(s) => JsonValue::String(s.to_string()),
-                    Err(_) => json!({ "__binary__": true, "bytes": bytes.len() }),
+                .map(|bytes| {
+                    if adapter_api::looks_binary(&bytes) {
+                        JsonValue::String(adapter_api::bytes_to_hex_upper(&bytes))
+                    } else {
+                        JsonValue::String(String::from_utf8_lossy(&bytes).into_owned())
+                    }
                 })
                 .unwrap_or(JsonValue::Null);
         }
@@ -1033,13 +1044,24 @@ pub(crate) fn column_to_json(row: &SqliteRow, idx: usize, type_name: &str) -> Js
         return v.map(JsonValue::from).unwrap_or(JsonValue::Null);
     }
     if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
-        return v.map(JsonValue::String).unwrap_or(JsonValue::Null);
+        return v
+            .map(|s| {
+                if adapter_api::looks_binary(s.as_bytes()) {
+                    JsonValue::String(adapter_api::bytes_to_hex_upper(s.as_bytes()))
+                } else {
+                    JsonValue::String(s)
+                }
+            })
+            .unwrap_or(JsonValue::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
         return v
-            .map(|bytes| match std::str::from_utf8(&bytes) {
-                Ok(s) => JsonValue::String(s.to_string()),
-                Err(_) => json!({ "__binary__": true, "bytes": bytes.len() }),
+            .map(|bytes| {
+                if adapter_api::looks_binary(&bytes) {
+                    JsonValue::String(adapter_api::bytes_to_hex_upper(&bytes))
+                } else {
+                    JsonValue::String(String::from_utf8_lossy(&bytes).into_owned())
+                }
             })
             .unwrap_or(JsonValue::Null);
     }

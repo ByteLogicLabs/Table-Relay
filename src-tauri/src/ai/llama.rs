@@ -66,6 +66,19 @@ impl AiProvider for LlamaLocalProvider {
         self.inner.complete_once(history, tools).await
     }
 
+    async fn complete_once_stream(
+        &self,
+        history: &[crate::ai::ChatMessage],
+        tools: Option<&[crate::ai::tools::ToolDef]>,
+    ) -> Result<
+        Option<BoxStream<'static, Result<super::openai::ToolStreamEvent, AiError>>>,
+        AiError,
+    > {
+        // Call the TRAIT method (returns Option); the inherent method of the
+        // same name on OpenAiProvider would otherwise shadow it.
+        AiProvider::complete_once_stream(&self.inner, history, tools).await
+    }
+
     fn supports_tools(&self) -> bool {
         // llama-server implements the OpenAI tool-call shape — works as long
         // as the model itself was trained for tool use (Qwen 2.5 Coder, etc.).

@@ -622,9 +622,10 @@ pub(crate) fn value_to_json(v: &Value) -> JsonValue {
 }
 
 fn bytes_to_json(bytes: &[u8]) -> JsonValue {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => JsonValue::String(s.to_string()),
-        Err(_) => json!({ "__binary__": true, "bytes": bytes.len() }),
+    if adapter_api::looks_binary(bytes) {
+        JsonValue::String(adapter_api::bytes_to_hex_upper(bytes))
+    } else {
+        JsonValue::String(String::from_utf8_lossy(bytes).into_owned())
     }
 }
 

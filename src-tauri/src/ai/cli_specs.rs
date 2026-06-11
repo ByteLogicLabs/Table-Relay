@@ -466,6 +466,91 @@ impl CliSpec for OpencodeSpec {
     }
 }
 
+// ── kilo ───────────────────────────────────────────────────────────────────
+// Kilo is an opencode-compatible agent CLI: `kilo run --format json [-m M] <p>`
+// emits the same JSONL event shapes (text parts, step_finish, session.idle,
+// error). MCP is read from kilo's config (out-of-band), like opencode.
+
+pub struct KiloSpec;
+
+impl CliSpec for KiloSpec {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Kilo
+    }
+    fn binary_name(&self) -> &'static str {
+        "kilo"
+    }
+    fn extra_paths(&self) -> Vec<PathBuf> {
+        let mut v = npm_global_candidates("kilo");
+        if let Some(h) = home() {
+            // kilo's installer drops the binary here (not on a Finder/Start-menu
+            // app's PATH), so probe it explicitly.
+            v.extend(native_install_candidates(&h, ".kilo/bin", "kilo"));
+        }
+        v
+    }
+    fn build_args(&self, prompt: &str, model: &str, _mcp: Option<&str>) -> Vec<String> {
+        let mut a = vec!["run".into(), "--format".into(), "json".into()];
+        if !model.is_empty() {
+            a.push("-m".into());
+            a.push(model.into());
+        }
+        a.push(prompt.into());
+        a
+    }
+    fn parse_line(&self, line: &str) -> LineEvent {
+        // Identical event shapes to opencode (kilo is a fork).
+        OpencodeSpec.parse_line(line)
+    }
+}
+
+// ── antigravity (agy) ────────────────────────────────────────────────────────
+// Google Antigravity's headless agent CLI: `agy -p <prompt> [--model M]` runs a
+// single prompt non-interactively and prints the response as PLAIN TEXT (no JSON
+// stream). We stream stdout lines straight through as deltas. MCP/tools are not
+// wired (agy exposes tools via its own plugin system, not an MCP-config flag).
+
+pub struct AgySpec;
+
+impl CliSpec for AgySpec {
+    fn kind(&self) -> ProviderKind {
+        ProviderKind::Antigravity
+    }
+    fn binary_name(&self) -> &'static str {
+        "agy"
+    }
+    fn extra_paths(&self) -> Vec<PathBuf> {
+        let mut v = npm_global_candidates("agy");
+        if let Some(h) = home() {
+            // `agy install` drops the binary in ~/.local/bin.
+            v.extend(native_install_candidates(&h, ".local/bin", "agy"));
+        }
+        v
+    }
+    fn build_args(&self, prompt: &str, model: &str, _mcp: Option<&str>) -> Vec<String> {
+        // `-p`/`--print` takes the prompt as its value and prints the response.
+        let mut a: Vec<String> = Vec::new();
+        if !model.is_empty() {
+            a.push("--model".into());
+            a.push(model.into());
+        }
+        a.push("-p".into());
+        a.push(prompt.into());
+        a
+    }
+    fn tolerate_nonzero_exit(&self) -> bool {
+        // `agy` exits non-zero even on a successful run (observed on `agy models`
+        // and chat). Once we've streamed output, don't surface that as an error.
+        true
+    }
+    fn parse_line(&self, line: &str) -> LineEvent {
+        // Plain-text output: every stdout line is part of the answer. Keep the
+        // newline so multi-line responses survive (the engine reads lines with
+        // the terminator stripped). EOF ends the stream.
+        LineEvent::Delta(format!("{line}\n"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

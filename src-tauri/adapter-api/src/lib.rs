@@ -17,6 +17,45 @@ pub mod ssh_hosts;
 pub mod template;
 pub mod types;
 
+/// Render bytes as an uppercase hex string (e.g. `FFD8FFE0…`). Used by adapters
+/// to surface a non-UTF-8 BLOB/`bytea`/binary value in a readable, copyable form
+/// — the same convention TablePlus and other clients use — instead of dropping
+/// it or showing a placeholder. Dep-free so every adapter can call it.
+pub fn bytes_to_hex_upper(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
+/// Heuristic: do these bytes look like binary (not human-readable text)?
+/// Used to decide whether a column value — from EITHER the binary (`Vec<u8>`)
+/// or the text (`String`) read path — should be shown as hex instead of a
+/// blank/garbled cell, matching TablePlus.
+///
+/// Operates on raw bytes so it's correct for any encoding: a NUL byte, or more
+/// than ~10% C0 control bytes (tab/newline/return excepted), means binary.
+/// Multi-byte UTF-8 (emoji incl. zero-width joiners, CJK, accents) is all
+/// high bytes (0x80+), never flagged — real text is preserved.
+pub fn looks_binary(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let mut control = 0usize;
+    for &b in bytes {
+        if b == 0 {
+            return true; // a NUL byte is a near-certain binary signal
+        }
+        if b < 0x20 && b != b'\t' && b != b'\n' && b != b'\r' {
+            control += 1;
+        }
+    }
+    control * 100 > bytes.len() * 10
+}
+
 use std::sync::Arc;
 
 use async_trait::async_trait;

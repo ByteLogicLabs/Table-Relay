@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 import { copyText } from '../../lib/clipboard';
 import { History, Loader2, MessageSquare, Trash2, X } from 'lucide-react';
 import { Button } from '../../components/ui/button';
+import { Checkbox } from '../../components/ui/checkbox';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -14,7 +15,7 @@ import { DestructiveConfirmDialog } from '../../components/destructive-confirm-d
 import { useMultiSelection } from '../../hooks/use-multi-selection';
 import { getClickIntent, getKeyIntent } from '../../lib/click-intent';
 import { type Conversation, errorMessage } from '../../lib/ai';
-import { listConversations, loadConversation, deleteConversation } from '../../state/ai';
+import { listConversations, loadConversation, deleteConversation, deleteAllConversations } from '../../state/ai';
 
 interface Props {
   onSelect?: () => void;
@@ -81,12 +82,17 @@ export function ConversationHistory({ onSelect }: Props) {
 
   const performDelete = useCallback(async () => {
     if (!confirmTargets) return;
-    for (const conv of confirmTargets) {
-      try { await deleteConversation(conv.id); } catch { /* ignore */ }
+    // Deleting every conversation → one bulk call instead of N round-trips.
+    if (confirmTargets.length === conversations.length && conversations.length > 0) {
+      try { await deleteAllConversations(); } catch { /* ignore */ }
+    } else {
+      for (const conv of confirmTargets) {
+        try { await deleteConversation(conv.id); } catch { /* ignore */ }
+      }
     }
     selection.clearSelection();
     void refresh();
-  }, [confirmTargets, refresh, selection]);
+  }, [confirmTargets, conversations.length, refresh, selection]);
 
   const handleRowClick = useCallback((e: React.MouseEvent, id: string) => {
     const intent = getClickIntent(e);
@@ -241,6 +247,17 @@ export function ConversationHistory({ onSelect }: Props) {
                   Delete {selection.selectedIds.size}
                 </Button>
               )}
+              {conversations.length > 0 && selection.selectedIds.size === 0 && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-destructive hover:text-destructive"
+                  onClick={() => requestDelete(conversations.map(c => c.id))}
+                  title="Delete all conversations"
+                >
+                  Clear all
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 size="icon"
@@ -287,6 +304,15 @@ export function ConversationHistory({ onSelect }: Props) {
                         onClick={(e) => handleRowClick(e, conv.id)}
                         onContextMenu={() => handleRowContextMenu(conv.id)}
                       >
+                        {/* Per-row select checkbox — toggles this conversation
+                            in the delete selection without opening it. */}
+                        <Checkbox
+                          checked={isSelected}
+                          onCheckedChange={() => selection.toggleSelection(conv.id)}
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label={`Select ${conv.title}`}
+                          className="shrink-0"
+                        />
                         <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center shrink-0">
                           {isOpening ? (
                             <Loader2 className="w-4 h-4 text-primary animate-spin" />
@@ -358,6 +384,7 @@ export function ConversationHistory({ onSelect }: Props) {
         action="Delete"
         itemNoun="conversation"
         itemNames={confirmTargets?.map(c => c.title) ?? []}
+        showList={false}
         warning="This cannot be undone."
         onConfirm={() => { void performDelete(); }}
       />

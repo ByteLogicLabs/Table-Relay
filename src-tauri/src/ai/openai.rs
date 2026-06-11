@@ -42,6 +42,14 @@ pub struct ToolTurn {
     pub finish_reason: String,
 }
 
+/// Event yielded while streaming a tool turn. `Delta` carries a content
+/// fragment to render live; the terminal `Done` carries the assembled
+/// `ToolTurn` (full content + any tool calls) so the loop can proceed.
+pub enum ToolStreamEvent {
+    Delta(String),
+    Done(ToolTurn),
+}
+
 impl OpenAiProvider {
     pub fn new(base_url: String, api_key: String, model: String, kind: ProviderKind) -> Self {
         Self {
@@ -160,52 +168,9 @@ impl OpenAiProvider {
         history: &[crate::ai::ChatMessage],
         tools: Option<&[crate::ai::tools::ToolDef]>,
     ) -> Result<ToolTurn, AiError> {
-        // Build the messages array with the OpenAI tool-use shape: assistant
-        // turns that originated a tool call carry `tool_calls` in place of
-        // content; tool replies carry `tool_call_id`.
-        #[derive(Serialize)]
-        struct ToolCallWire<'a> {
-            id: &'a str,
-            #[serde(rename = "type")]
-            kind: &'a str,
-            function: ToolCallFn<'a>,
-        }
-        #[derive(Serialize)]
-        struct ToolCallFn<'a> {
-            name: &'a str,
-            arguments: &'a str,
-        }
-
-        let mut msgs: Vec<serde_json::Value> = Vec::with_capacity(history.len());
-        for m in history {
-            match m.role {
-                crate::ai::ChatRole::Tool => {
-                    msgs.push(serde_json::json!({
-                        "role": "tool",
-                        "tool_call_id": m.tool_call_id,
-                        "content": m.content,
-                    }));
-                }
-                crate::ai::ChatRole::Assistant if !m.tool_calls.is_empty() => {
-                    let calls: Vec<ToolCallWire> = m.tool_calls.iter().map(|c| ToolCallWire {
-                        id: &c.id,
-                        kind: "function",
-                        function: ToolCallFn { name: &c.name, arguments: &c.arguments },
-                    }).collect();
-                    msgs.push(serde_json::json!({
-                        "role": "assistant",
-                        "content": if m.content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(m.content.clone()) },
-                        "tool_calls": calls,
-                    }));
-                }
-                _ => {
-                    msgs.push(serde_json::json!({
-                        "role": role_str(m.role),
-                        "content": m.content,
-                    }));
-                }
-            }
-        }
+        // Build the messages array with the OpenAI tool-use shape (shared with
+        // the streaming variant).
+        let msgs = build_tool_messages(history);
 
         let mut body = serde_json::json!({
             "model": self.model,
@@ -276,6 +241,80 @@ impl OpenAiProvider {
         parse_tool_turn_response(res, tools).await
     }
 
+    /// Streaming sibling of `complete_once`. Same request shape with
+    /// `stream: true`; returns a stream of content deltas + a terminal `Done`
+    /// carrying the assembled `ToolTurn`. Mirrors the `max_completion_tokens`
+    /// fallback so reasoning-era OpenAI models stream too.
+    pub async fn complete_once_stream(
+        &self,
+        history: &[crate::ai::ChatMessage],
+        tools: Option<&[crate::ai::tools::ToolDef]>,
+    ) -> Result<BoxStream<'static, Result<ToolStreamEvent, AiError>>, AiError> {
+        let msgs = build_tool_messages(history);
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "messages": msgs,
+            "stream": true,
+        });
+        let token_params = self.token_limit_params(Some(DEFAULT_TOOL_MAX_TOKENS));
+        if let Some(max_tokens) = token_params.max_tokens {
+            body["max_tokens"] = serde_json::json!(max_tokens);
+        }
+        if let Some(max_completion_tokens) = token_params.max_completion_tokens {
+            body["max_completion_tokens"] = serde_json::json!(max_completion_tokens);
+        }
+        if let Some(tools) = tools {
+            body["tools"] = serde_json::to_value(tools).unwrap_or(serde_json::Value::Null);
+            body["tool_choice"] = serde_json::Value::String("auto".into());
+        }
+        crate::log_line!(
+            "ai_tools_req",
+            "POST {}/chat/completions (stream) tools={} msgs={}",
+            self.base_url,
+            tools.map(|t| t.len()).unwrap_or(0),
+            msgs.len()
+        );
+
+        let key = self.api_key.lock().await.to_string();
+        let url = format!("{}/chat/completions", self.base_url);
+        let res = client()?
+            .post(&url)
+            .bearer_auth(&key)
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest)?;
+        let status = res.status();
+        if !status.is_success() {
+            let error_body = res.text().await.unwrap_or_default();
+            log_upstream_error("tool_stream", &self.model, &self.base_url, status, &error_body);
+            if Self::should_retry_with_max_completion_tokens(status, &error_body) {
+                let mut retry_body = body.clone();
+                if let Some(obj) = retry_body.as_object_mut() {
+                    obj.remove("max_tokens");
+                }
+                retry_body["max_completion_tokens"] = serde_json::json!(DEFAULT_TOOL_MAX_TOKENS);
+                let retry = client()?
+                    .post(&url)
+                    .bearer_auth(&key)
+                    .json(&retry_body)
+                    .send()
+                    .await
+                    .map_err(map_reqwest)?;
+                let retry_status = retry.status();
+                if retry_status.is_success() {
+                    return Ok(build_tool_stream(retry, tools.map(|t| t.to_vec())));
+                }
+                let retry_body = retry.text().await.unwrap_or_default();
+                log_upstream_error("tool_stream_retry", &self.model, &self.base_url, retry_status, &retry_body);
+                return Err(map_status(retry_status, &retry_body));
+            }
+            return Err(map_status(status, &error_body));
+        }
+
+        Ok(build_tool_stream(res, tools.map(|t| t.to_vec())))
+    }
+
     /// Reasoning-era OpenAI models (o1 / o3 / o4 / gpt-5 family) replaced
     /// `max_tokens` with `max_completion_tokens`. Third-party OpenAI-compatible
     /// backends (Ollama, Groq, vLLM…) still accept `max_tokens`, so we only
@@ -317,6 +356,171 @@ impl OpenAiProvider {
 struct TokenLimitParams {
     max_tokens: Option<u32>,
     max_completion_tokens: Option<u32>,
+}
+
+/// Build the OpenAI tool-use `messages` array from our chat history. Assistant
+/// turns that originated a tool call carry `tool_calls`; tool replies carry
+/// `tool_call_id`. Shared by the streaming and non-streaming tool paths.
+fn build_tool_messages(history: &[crate::ai::ChatMessage]) -> Vec<serde_json::Value> {
+    let mut msgs: Vec<serde_json::Value> = Vec::with_capacity(history.len());
+    for m in history {
+        match m.role {
+            crate::ai::ChatRole::Tool => {
+                msgs.push(serde_json::json!({
+                    "role": "tool",
+                    "tool_call_id": m.tool_call_id,
+                    "content": m.content,
+                }));
+            }
+            crate::ai::ChatRole::Assistant if !m.tool_calls.is_empty() => {
+                let calls: Vec<serde_json::Value> = m
+                    .tool_calls
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "id": c.id,
+                            "type": "function",
+                            "function": { "name": c.name, "arguments": c.arguments },
+                        })
+                    })
+                    .collect();
+                msgs.push(serde_json::json!({
+                    "role": "assistant",
+                    "content": if m.content.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(m.content.clone()) },
+                    "tool_calls": calls,
+                }));
+            }
+            _ => {
+                msgs.push(serde_json::json!({
+                    "role": role_str(m.role),
+                    "content": m.content,
+                }));
+            }
+        }
+    }
+    msgs
+}
+
+// --- Streaming tool-turn wire shapes (OpenAI `delta` chunks) ---------------
+#[derive(Deserialize)]
+struct StreamToolPayload {
+    #[serde(default)]
+    choices: Vec<StreamToolChoice>,
+}
+#[derive(Deserialize)]
+struct StreamToolChoice {
+    #[serde(default)]
+    delta: StreamToolDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
+}
+#[derive(Deserialize, Default)]
+struct StreamToolDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<StreamToolCallDelta>>,
+}
+#[derive(Deserialize)]
+struct StreamToolCallDelta {
+    #[serde(default)]
+    index: Option<u32>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamToolCallFn>,
+}
+#[derive(Deserialize, Default)]
+struct StreamToolCallFn {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+/// Turn a successful streaming HTTP response into a stream of `ToolStreamEvent`.
+/// Content deltas are yielded as they arrive; tool-call deltas are accumulated
+/// by index (OpenAI splits `arguments` across many chunks) and surfaced in the
+/// terminal `Done` event along with the full content.
+fn build_tool_stream(
+    res: reqwest::Response,
+    tools_owned: Option<Vec<crate::ai::tools::ToolDef>>,
+) -> BoxStream<'static, Result<ToolStreamEvent, AiError>> {
+    #[derive(Default)]
+    struct AccCall {
+        id: String,
+        name: String,
+        arguments: String,
+    }
+    let bytes = res.bytes_stream();
+    let s = async_stream::try_stream! {
+        let mut content = String::new();
+        let mut finish = String::new();
+        let mut acc: Vec<AccCall> = Vec::new();
+        let mut lines = std::pin::pin!(super::sse::data_lines(bytes));
+        while let Some(payload) = lines.next().await {
+            let payload = payload.map_err(AiError::Upstream)?;
+            let p: StreamToolPayload = match serde_json::from_str(&payload) {
+                Ok(v) => v,
+                Err(_) => continue, // tolerate keep-alive / non-JSON frames
+            };
+            let Some(choice) = p.choices.into_iter().next() else { continue };
+            if let Some(fr) = choice.finish_reason {
+                if !fr.is_empty() { finish = fr; }
+            }
+            if let Some(c) = choice.delta.content {
+                if !c.is_empty() {
+                    content.push_str(&c);
+                    yield ToolStreamEvent::Delta(c);
+                }
+            }
+            if let Some(deltas) = choice.delta.tool_calls {
+                for d in deltas {
+                    let idx = d.index.unwrap_or(0) as usize;
+                    while acc.len() <= idx { acc.push(AccCall::default()); }
+                    let slot = &mut acc[idx];
+                    if let Some(id) = d.id {
+                        if !id.is_empty() { slot.id = id; }
+                    }
+                    if let Some(f) = d.function {
+                        if let Some(n) = f.name {
+                            if !n.is_empty() { slot.name = n; }
+                        }
+                        if let Some(a) = f.arguments { slot.arguments.push_str(&a); }
+                    }
+                }
+            }
+        }
+        let mut tool_calls: Vec<crate::ai::ToolCall> = acc
+            .into_iter()
+            .filter(|c| !c.name.is_empty())
+            .map(|c| crate::ai::ToolCall { id: c.id, name: c.name, arguments: c.arguments })
+            .collect();
+        let mut final_content = content;
+        // Same text-fallback as the non-streaming path: small local models that
+        // print a tool call as JSON text instead of using the structured
+        // channel still get parsed into a real tool call.
+        if tool_calls.is_empty() {
+            if let Some(ts) = tools_owned.as_ref() {
+                if let Some(extracted) = extract_text_tool_call(&final_content, ts) {
+                    tool_calls.push(extracted);
+                    final_content.clear();
+                }
+            }
+        }
+        crate::log_line!(
+            "ai_tools_resp",
+            "stream done tool_calls={} content_len={}",
+            tool_calls.len(),
+            final_content.len()
+        );
+        yield ToolStreamEvent::Done(ToolTurn {
+            content: final_content,
+            tool_calls,
+            finish_reason: finish,
+        });
+    };
+    Box::pin(s)
 }
 
 async fn parse_tool_turn_response(
@@ -594,6 +798,16 @@ impl AiProvider for OpenAiProvider {
     ) -> Result<ToolTurn, AiError> {
         // Delegate to the inherent method we already implemented above.
         OpenAiProvider::complete_once(self, history, tools).await
+    }
+
+    async fn complete_once_stream(
+        &self,
+        history: &[crate::ai::ChatMessage],
+        tools: Option<&[crate::ai::tools::ToolDef]>,
+    ) -> Result<Option<BoxStream<'static, Result<ToolStreamEvent, AiError>>>, AiError> {
+        OpenAiProvider::complete_once_stream(self, history, tools)
+            .await
+            .map(Some)
     }
 
     fn supports_tools(&self) -> bool {

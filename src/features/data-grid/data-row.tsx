@@ -211,6 +211,7 @@ interface SharedMenuProps {
   onUndoRowDelete: (rowId: string) => void;
   onDiscardInsert: (rowId: string) => void;
   onSetNull: (rowId: string, col: string) => void;
+  onDuplicateRow: (rowId: string) => void;
 }
 
 export function SharedContextMenu({
@@ -223,6 +224,7 @@ export function SharedContextMenu({
   onUndoRowDelete,
   onDiscardInsert,
   onSetNull,
+  onDuplicateRow,
 }: SharedMenuProps) {
   useEffect(() => {
     if (!state) return;
@@ -322,6 +324,12 @@ export function SharedContextMenu({
           >
             Copy Row as JSON
           </button>
+          <button
+            className={itemCls}
+            onClick={() => act(() => onDuplicateRow(state.rowId))}
+          >
+            Duplicate row
+          </button>
         </>
       ) : (
         <>
@@ -354,6 +362,12 @@ export function SharedContextMenu({
             }
           >
             Copy Row as JSON
+          </button>
+          <button
+            className={itemCls}
+            onClick={() => act(() => onDuplicateRow(state.rowId))}
+          >
+            Duplicate row
           </button>
         </>
       )}

@@ -26,6 +26,7 @@ import { analyzeMongoFind } from './analyze-mongo';
 import { analyzeDestructive, type DestructiveStatement } from './analyze-destructive';
 import { DestructiveWarningDialog } from './destructive-warning-dialog';
 import { classifyColumn, coerceForColumn, validateEditorValue, dialectFromManifest, type EditorKind } from '../data-grid/editor-kinds';
+import { truncateForCell, CELL_MAX_RENDER_CHARS } from '../data-grid/data-grid-utils';
 import { registerQueryCompletion } from '../../lib/query-completion/hooks';
 import {
   ensureTableStructure,
@@ -1501,6 +1502,12 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                             const cellEditable = resultIsEditable && editableColumnSet.has(col.name) && !isPk && !isSavingResult;
                             const isCurrentlyEditing = activeResultEdit?.rowIdx === ri && activeResultEdit?.col === col.name;
                             const displayText = isEdited ? pendingValue : baseText;
+                            // Only render a short preview in the cell — long
+                            // values (e.g. hex-rendered binary) bloat the DOM and
+                            // can render blank. The full value is still available
+                            // on double-click (the edit input gets it untruncated)
+                            // and via copy.
+                            const [previewText, previewTruncated] = truncateForCell(displayText);
                             const kind = kindByColumn[col.name] ?? { kind: 'text' as const };
                             const validationError = isCurrentlyEditing ? validateEditorValue(kind, activeResultEdit.value) : null;
                             const cellClass = isEdited
@@ -1530,7 +1537,12 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
                                     absolutely so opening it never re-lays-out the
                                     column (the cause of the "cell moves" jump). */}
                                 <div className="block box-border px-2 py-1.5 leading-normal truncate selectable cursor-text">
-                                  {displayText}
+                                  {previewText}
+                                  {previewTruncated && (
+                                    <span className="ml-2 text-[10px] text-muted-foreground/70">
+                                      +{(displayText.length - CELL_MAX_RENDER_CHARS).toLocaleString()} more
+                                    </span>
+                                  )}
                                 </div>
                                 {isCurrentlyEditing && (
                                   <input

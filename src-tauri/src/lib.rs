@@ -191,6 +191,14 @@ pub fn run() {
                 .item(&connection_transfer)
                 .build()?;
 
+            // AI menu — opens the AI chat panel (frontend listens for
+            // `menu-ai-chat`). Hidden for now; re-add `.item(&ai_menu)` to the
+            // builder below to restore it.
+            // let ai_chat = MenuItemBuilder::with_id("ai_chat", "AI Chat")
+            //     .accelerator("CmdOrCtrl+Shift+A")
+            //     .build(handle)?;
+            // let ai_menu = SubmenuBuilder::new(handle, "AI").item(&ai_chat).build()?;
+
             let mut menu_builder = MenuBuilder::new(handle);
             // macOS-only "app menu" (first menu, named after the bundle)
             // carries About / Quit. Without it the app has no Quit entry.
@@ -218,6 +226,7 @@ pub fn run() {
                 .item(&file_menu)
                 .item(&edit_menu)
                 .item(&connection_menu)
+                // .item(&ai_menu) // hidden for now
                 .item(&view_menu)
                 .item(&window_menu)
                 .build()?;
@@ -237,6 +246,8 @@ pub fn run() {
                     Some(format!("menu-app-{action}"))
                 } else if let Some(action) = id.strip_prefix("connection_") {
                     Some(format!("menu-connection-{action}"))
+                } else if let Some(action) = id.strip_prefix("ai_") {
+                    Some(format!("menu-ai-{action}"))
                 } else {
                     None
                 };
@@ -348,7 +359,9 @@ pub fn run() {
             commands::ai::ai_conversation_get,
             commands::ai::ai_conversation_create,
             commands::ai::ai_conversation_delete,
+            commands::ai::ai_conversation_delete_all,
             commands::ai::ai_conversation_update_title,
+            commands::ai::ai_conversation_set_model,
             commands::ai::ai_conversation_save_message,
             commands::ai::ai_conversation_clear_messages,
         ])

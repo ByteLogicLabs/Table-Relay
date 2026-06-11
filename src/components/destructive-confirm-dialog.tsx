@@ -21,6 +21,9 @@ interface Props {
   context?: string;
   /** Extra warning text below the names list. */
   warning?: string;
+  /** Render the visible names list. Off when the count alone is enough (e.g.
+   *  clearing many conversations) — `itemNames` is still used for the count. */
+  showList?: boolean;
   onConfirm: () => void;
 }
 
@@ -32,6 +35,7 @@ export function DestructiveConfirmDialog({
   itemNames,
   context,
   warning,
+  showList = true,
   onConfirm,
 }: Props) {
   const count = itemNames.length;
@@ -48,18 +52,20 @@ export function DestructiveConfirmDialog({
           <DialogTitle className="text-destructive">{title}</DialogTitle>
           {context && <DialogDescription>{context}</DialogDescription>}
         </DialogHeader>
-        <div className="max-h-48 overflow-auto rounded bg-muted p-2 text-xs font-mono">
-          <ul className="space-y-0.5">
-            {visibleNames.map((name) => (
-              <li key={name} className="truncate">{name}</li>
-            ))}
-          </ul>
-          {overflow > 0 && (
-            <div className="mt-1 text-muted-foreground">
-              …and {overflow} more
-            </div>
-          )}
-        </div>
+        {showList && (
+          <div className="max-h-48 overflow-auto rounded bg-muted p-2 text-xs font-mono">
+            <ul className="space-y-0.5">
+              {visibleNames.map((name) => (
+                <li key={name} className="truncate">{name}</li>
+              ))}
+            </ul>
+            {overflow > 0 && (
+              <div className="mt-1 text-muted-foreground">
+                …and {overflow} more
+              </div>
+            )}
+          </div>
+        )}
         {warning && (
           <p className="text-xs text-muted-foreground">{warning}</p>
         )}

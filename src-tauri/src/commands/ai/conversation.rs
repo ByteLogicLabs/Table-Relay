@@ -105,6 +105,15 @@ pub async fn ai_conversation_delete(
 }
 
 #[tauri::command]
+pub async fn ai_conversation_delete_all(
+    store: State<'_, Arc<crate::store::Store>>,
+) -> Result<(), AiError> {
+    store
+        .with_conn(true, |db| conv_repo::delete_all(db))
+        .map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
 pub async fn ai_conversation_update_title(
     store: State<'_, Arc<crate::store::Store>>,
     id: String,
@@ -112,6 +121,20 @@ pub async fn ai_conversation_update_title(
 ) -> Result<(), AiError> {
     store
         .with_conn(true, |db| conv_repo::update_title(db, &id, &title))
+        .map_err(|e| AiError::Other(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn ai_conversation_set_model(
+    store: State<'_, Arc<crate::store::Store>>,
+    id: String,
+    provider_kind: Option<String>,
+    model: Option<String>,
+) -> Result<(), AiError> {
+    store
+        .with_conn(true, |db| {
+            conv_repo::update_provider_model(db, &id, provider_kind.as_deref(), model.as_deref())
+        })
         .map_err(|e| AiError::Other(e.to_string()))
 }
 

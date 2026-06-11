@@ -1,10 +1,10 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp, Terminal, RefreshCw } from 'lucide-react';
 import { ConversationHistory } from './conversation-history';
 import { Button } from '../../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 import { SearchableSelect } from '../../components/ui/searchable-select';
-import { useAi, start, end, sendMessage, stopStreaming, syncStatus, newChat, setFocusedConnection, currentChat, restoreBackendTranscript, type ChatPrefill } from '../../state/ai';
+import { useAi, start, end, sendMessage, stopStreaming, syncStatus, newChat, setFocusedConnection, currentChat, restoreBackendTranscript, setSwapping as setSessionSwapping, type ChatPrefill } from '../../state/ai';
 import { ai, isAiError, type AiProviderKind, type ChatFocus } from '../../lib/ai';
 import {
   type CredentialProfile,
@@ -15,7 +15,7 @@ import {
 } from '../../lib/ai-credentials';
 import { Settings as SettingsIcon } from 'lucide-react';
 import { toast } from 'sonner';
-import { openSettings, focusLabel, PROVIDERS } from './chat-utils';
+import { openSettings, focusLabel, PROVIDERS, providerKindLabel } from './chat-utils';
 import { PermissionsButton } from './chat-permissions';
 import { AssistantOrUserBubble, ToolBubble } from './chat-bubbles';
 
@@ -43,7 +43,10 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
   // in the background), so `ending` is effectively unreachable — the UI
   // flips to the StartScreen immediately on click. Keep the check anyway
   // in case an external caller sets the state directly.
-  const showActive = s.status === 'active';
+  // Keep the active view during a swap — the session momentarily goes
+  // `inactive` between teardown and restart, which would otherwise flicker the
+  // whole panel to the StartScreen and back.
+  const showActive = s.status === 'active' || !!s.swapping;
 
   // Reconcile with backend state on mount, and keep the store in sync with
   // whatever connection the workspace is looking at. The store uses this
@@ -156,6 +159,8 @@ function providerDot(kind?: AiProviderKind): string {
     case 'openai_compatible': return 'bg-purple-500';
     case 'codex_cli':         return 'bg-slate-400';
     case 'opencode':          return 'bg-amber-500';
+    case 'kilo':              return 'bg-teal-500';
+    case 'antigravity':       return 'bg-indigo-500';
     case 'llama_local':       return 'bg-rose-500';
     default:                  return 'bg-muted-foreground/50';
   }
@@ -229,6 +234,7 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
   const swap = async (value: string) => {
     if (switching) return;
     setSwitching(true);
+    setSessionSwapping(true); // hold the active view across end()→start()
     try {
       // The slot is single-slot; await teardown before start() so a racing
       // start can't throw SessionAlreadyActive. (Each swap helper ends first.)
@@ -245,6 +251,7 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
       toast.error(isAiError(e) ? e.message : String(e));
     } finally {
       setSwitching(false);
+      setSessionSwapping(false);
     }
   };
 
@@ -299,7 +306,7 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
             <span className="flex items-center gap-2 min-w-0">
               <span className={`w-2 h-2 rounded-full shrink-0 ${providerDot(c.kind)}`} />
               <span className="font-medium truncate">{c.name}</span>
-              <span className="text-muted-foreground text-[10px] shrink-0">{c.kind}</span>
+              <span className="text-muted-foreground text-[10px] shrink-0">{providerKindLabel(c.kind)}</span>
             </span>
           </SelectItem>
         ))}
@@ -397,6 +404,7 @@ function ActiveModelPicker({
   const swap = async (nextModel: string) => {
     if (!providerKind || swapping || nextModel === model) return;
     setSwapping(true);
+    setSessionSwapping(true); // hold the active view across end()→start()
     try {
       // Pull saved credentials so we can restart with the same auth. CLI
       // providers don't need any — they auth through the binary.
@@ -421,12 +429,18 @@ function ActiveModelPicker({
       toast.error(isAiError(e) ? e.message : String(e));
     } finally {
       setSwapping(false);
+      setSessionSwapping(false);
     }
   };
 
   // Don't render a dangling "provider · " when no model is set (e.g. opencode
   // started without an explicit model — it uses its own configured default).
-  const label = model ? `${providerKind ?? ''} · ${model}` : `${providerKind ?? ''} · (default)`;
+  // Lead with the real model name — that's the useful, specific bit. The
+  // credential chip to the left already names the provider, so prefixing the
+  // kind here (e.g. "OpenAI-compatible · …") is just noise. Fall back to the
+  // kind label only when no model is set (CLI default, etc.).
+  const kindLabel = providerKind ? providerKindLabel(providerKind) : '';
+  const label = model || `${kindLabel} · (default)`;
   if (!providerKind || providerKind === 'llama_local') {
     // Local Llama only has one model per session — swapping means
     // respawning llama-server, which isn't a "mid-chat" operation. Fall
@@ -530,14 +544,18 @@ function CliModelSearchPicker({
   // rather than showing a blank trigger (the opencode "no active model" case).
   const placeholder = loading
     ? 'Loading models…'
-    : (model || `${providerKind} default — pick to change`);
+    : (model || `${providerKindLabel(providerKind)} default — pick to change`);
 
   return (
     <SearchableSelect
       value={model ?? ''}
       options={options}
       onChange={onPick}
-      disabled={swapping || loading}
+      // Only block during an actual swap. Don't disable while the catalog is
+      // still loading (or failed) — `allowCustom` lets the user type a model id,
+      // so a slow/unreachable `<cli> models` never traps them with no way to set
+      // one.
+      disabled={swapping}
       placeholder={placeholder}
       searchPlaceholder="Search or type a model id…"
       className="h-7 max-w-44 text-[11px] font-mono"
@@ -808,7 +826,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
               <div className="flex items-center gap-2">
                 <span className="text-sm font-medium truncate flex-1">{cred.name}</span>
                 <span className="text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground shrink-0">
-                  {cred.kind}
+                  {providerKindLabel(cred.kind)}
                 </span>
               </div>
               <p className="text-[11px] text-muted-foreground truncate mt-0.5 font-mono">
@@ -887,6 +905,16 @@ function ActiveSession({
   const streaming = !!chat.pendingRequestId;
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Auto-grow the composer: start at one line and expand to fit the content up
+  // to a cap, after which it scrolls. Runs on every draft change (typing, paste,
+  // prefill, and the reset to empty after send).
+  useLayoutEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const MAX_PX = 160; // ~8 lines, then it scrolls instead of pushing the bar
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, MAX_PX)}px`;
+  }, [draft]);
   // When the user arrives via a `focusOnly` prefill (e.g. Generate from an
   // empty editor) we remember the kind so the next Send uses it.
   const [stickyKind, setStickyKind] = useState<ChatPrefill['kind'] | null>(null);
@@ -1029,10 +1057,13 @@ function ActiveSession({
                   ? 'Describe the query you want…'
                   : 'Ask anything about your database…'
             }
-            rows={2}
+            rows={1}
             // Always editable — even mid-stream. Sending while a turn is in
             // flight queues the message rather than blocking the input.
-            className="w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm outline-none placeholder:text-muted-foreground"
+            // Height is driven by the auto-grow effect (rows={1} = single line
+            // baseline); `max-h-40` caps the growth and `overflow-y-auto` lets
+            // it scroll past that instead of pushing the send bar off-screen.
+            className="w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm outline-none placeholder:text-muted-foreground max-h-40 overflow-y-auto leading-relaxed"
           />
           <div className="flex items-center gap-1 px-1.5 pb-1.5">
             {/* Focus chip — the context that goes out with the next turn.

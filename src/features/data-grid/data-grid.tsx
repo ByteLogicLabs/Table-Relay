@@ -170,13 +170,24 @@ export default function DataGrid({
     ];
   }, [connState.schemasById, connectionId, schema, tableName]);
   const cached = tabId ? readCachedGrid(tabId) : undefined;
+  // A cache entry is only "loaded" if it carries a real fetch result (a
+  // structure, or at least columns). A draft-only skeleton — created when the
+  // user starts adding a row before the first fetch lands, see
+  // `patchCachedGridDraft` — has neither, and must NOT suppress the structure
+  // fetch (otherwise commit later fails with "table structure unavailable").
+  const hasLoadedCache =
+    !!cached && (cached.structure != null || cached.cols.length > 0);
   const [data, setData] = useState<GridData>(() =>
     cached ? { cols: cached.cols, rows: cached.rows as GridRow[] } : EMPTY_DATA,
   );
   const [structure, setStructure] = useState<TableStructure | null>(
     cached?.structure ?? null,
   );
-  const [loading, setLoading] = useState(!cached);
+  // Mirror of `structure` so async handlers (handleCommit) can read the latest
+  // value and load it on demand without a stale closure.
+  const structureRef = useRef(structure);
+  structureRef.current = structure;
+  const [loading, setLoading] = useState(!hasLoadedCache);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [editedCells, setEditedCells] = useState<Record<string, unknown>>(
     () => cached?.editedCells ?? {},
@@ -763,10 +774,11 @@ export default function DataGrid({
   const loadTargetKey = () =>
     `${connectionId}|${schema}|${tableName}|${page}|${limit}|${JSON.stringify(activeFilters)}|${JSON.stringify(activeServerSort)}|${queryProjectionKey}`;
   const loadedTargetRef = useRef<string | null>(null);
-  // Seed from cache on first render: if we hydrated from the tab cache, that
-  // snapshot already IS the loaded state, so the loader must not refetch it.
-  // (Lazy ref init — the React-recommended pattern; runs once.)
-  if (loadedTargetRef.current === null && cached) {
+  // Seed from cache on first render: if we hydrated a REAL fetch result from
+  // the tab cache, that snapshot already IS the loaded state, so the loader
+  // must not refetch it. A draft-only skeleton doesn't count — we still need to
+  // fetch the structure/rows. (Lazy ref init — runs once.)
+  if (loadedTargetRef.current === null && hasLoadedCache) {
     loadedTargetRef.current = loadTargetKey();
   }
   // Reset page to 1 when limit/filters/sort change. Runs on *change*, not
@@ -1120,6 +1132,59 @@ export default function DataGrid({
     );
   }, [selectedRows, displayCols, rowsForView, editedCells]);
 
+  // Duplicate one or more existing/draft rows as new draft inserts. Copies
+  // EVERY column value verbatim — including the primary key — plus any
+  // uncommitted edits on the source row, so the duplicate is a true copy the
+  // user can tweak before committing. (If the PK collides on commit, the DB
+  // returns a clear duplicate-key error and the user edits it.) This is the
+  // reliable path for "duplicate a row"; Ctrl+C → Ctrl+V does the same via the
+  // clipboard. Selects + scrolls to the new drafts so they're visible.
+  const duplicateRows = useCallback(
+    (rowIds: string[]) => {
+      if (viewMode !== "table" || !structure || isCommitting) return;
+      const source = [...data.rows, ...pendingInserts];
+      const createdIds: string[] = [];
+      const drafts: GridRow[] = [];
+      for (const rid of rowIds) {
+        const src = source.find((r) => r.__rowId === rid);
+        if (!src) continue;
+        const id = `new:${crypto.randomUUID()}`;
+        const draft: GridRow = { __rowId: id };
+        for (const c of structure.columns) {
+          // Prefer any pending edit on the source row over its fetched value.
+          const editKey = `${rid}${KEY_SEP}${c.name}`;
+          draft[c.name] =
+            editedCells[editKey] !== undefined
+              ? editedCells[editKey]
+              : (src[c.name] ?? null);
+        }
+        createdIds.push(id);
+        drafts.push(draft);
+      }
+      if (drafts.length === 0) return;
+      pushHistory();
+      setPendingInserts((prev) => [...prev, ...drafts]);
+      setSelectedRows(new Set(createdIds));
+      const lastId = createdIds[createdIds.length - 1] ?? null;
+      setLastSelectedRowId(lastId);
+      if (lastId) {
+        requestAnimationFrame(() => {
+          const el = document.querySelector(
+            `tr[data-row-id="${CSS.escape(lastId)}"]`,
+          );
+          el?.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
+      toast.success(
+        `Duplicated ${drafts.length} row${drafts.length === 1 ? "" : "s"} as draft`,
+      );
+    },
+    // `pushHistory` is declared below; it's only invoked at call time (never
+    // during render), so it's safe to omit from the dep array.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [viewMode, structure, isCommitting, data.rows, pendingInserts, editedCells],
+  );
+
   // Keyboard shortcuts: Delete/Backspace queues selected rows for deletion,
   // Escape clears the selection, ⌘/Ctrl+S commits pending changes,
   // ⌘/Ctrl+Z undoes, ⌘/Ctrl+Shift+Z (or ⌘Y on non-Mac) redoes. Skip while
@@ -1161,6 +1226,11 @@ export default function DataGrid({
         void copySelectedRows();
         return;
       }
+      if (mod && key === "d" && selectedRows.size > 0) {
+        e.preventDefault();
+        duplicateRows(Array.from(selectedRows));
+        return;
+      }
       if (e.key === "Escape" && selectedRows.size > 0) {
         setSelectedRows(new Set());
         setLastSelectedRowId(null);
@@ -1185,6 +1255,7 @@ export default function DataGrid({
     hasPending,
     isCommitting,
     copySelectedRows,
+    duplicateRows,
   ]);
 
   /**
@@ -1530,18 +1601,6 @@ export default function DataGrid({
       // when nothing is visible.
       const posCols = displayCols.length > 0 ? displayCols : tableCols;
 
-      // Auto-increment columns should regenerate on the server when a row is
-      // duplicated (copy a row, paste, save → new row with a fresh key).
-      // Carrying the copied key over would either collide or pin the new row to
-      // an existing id, so we drop those values from pasted drafts.
-      const isAutoIncrement = (extra?: string) =>
-        !!extra && /auto_increment/i.test(extra);
-      const autoIncCols = new Set(
-        structure.columns
-          .filter((c) => isAutoIncrement(c.extra))
-          .map((c) => c.name),
-      );
-
       const lowerToCol = new Map(tableCols.map((c) => [c.toLowerCase(), c]));
       const first = parsed[0].map((c) => c.trim().toLowerCase());
       const headerHits = first.filter((c) => lowerToCol.has(c)).length;
@@ -1562,14 +1621,12 @@ export default function DataGrid({
         if (looksLikeHeader) {
           parsed[0].forEach((h, idx) => {
             const col = lowerToCol.get(h.trim().toLowerCase());
-            if (!col || idx >= row.length || autoIncCols.has(col)) return;
+            if (!col || idx >= row.length) return;
             draft[col] = row[idx];
           });
         } else {
           for (let i = 0; i < Math.min(posCols.length, row.length); i++) {
-            const col = posCols[i];
-            if (autoIncCols.has(col)) continue;
-            draft[col] = row[i];
+            draft[posCols[i]] = row[i];
           }
         }
         return draft;
@@ -1577,7 +1634,19 @@ export default function DataGrid({
 
       setPendingInserts((prev) => [...prev, ...drafts]);
       setSelectedRows(new Set(createdIds));
-      setLastSelectedRowId(createdIds[createdIds.length - 1] ?? null);
+      const lastId = createdIds[createdIds.length - 1] ?? null;
+      setLastSelectedRowId(lastId);
+      // Pasted drafts are appended after the (possibly filtered) rows, so they
+      // land at the bottom — off-screen if the view is full. Scroll the last
+      // one into view so the user sees them, matching the "Add row" behavior.
+      if (lastId) {
+        requestAnimationFrame(() => {
+          const el = document.querySelector(
+            `tr[data-row-id="${CSS.escape(lastId)}"]`,
+          );
+          el?.scrollIntoView({ behavior: "smooth", block: "center" });
+        });
+      }
       toast.success(
         `Pasted ${drafts.length} row${drafts.length === 1 ? "" : "s"} as draft`,
       );
@@ -1650,6 +1719,20 @@ export default function DataGrid({
   };
 
   const handleCommit = async () => {
+    // Resolve the table structure into a local so the rest of this handler is
+    // guaranteed a non-null value. If it isn't loaded yet (a restored draft
+    // mounted before the fetch landed, or the user committed mid-load), fetch
+    // it on demand instead of refusing — `structure` below now binds to this
+    // local, not the component state.
+    let structure = structureRef.current;
+    if (!structure) {
+      try {
+        structure = await ensureTableStructure(connectionId, schema, tableName);
+        setStructure(structure);
+      } catch {
+        // fall through to the unavailable error below
+      }
+    }
     if (!structure) {
       toast.error("Cannot commit: table structure unavailable");
       return;
@@ -1887,6 +1970,14 @@ export default function DataGrid({
       setIsCommitting(false);
     }
   };
+
+  // Always-fresh handle to `handleCommit`. `commitWithFlush` is memoized and
+  // would otherwise capture a STALE `handleCommit` whose closure predates the
+  // just-flushed cell edit (editedCells doesn't change while a cell is being
+  // typed, so the memo isn't invalidated), making Commit silently no-op after
+  // an inline edit. Calling through this ref runs the latest closure.
+  const handleCommitRef = useRef(handleCommit);
+  handleCommitRef.current = handleCommit;
 
   // Persist edits the user made directly in the JSON Tree editor. The view
   // is currently Mongo-only and shows raw documents (no synthetic
@@ -2499,12 +2590,12 @@ export default function DataGrid({
       }
       setTimeout(() => {
         if (hasPendingRef.current && !isCommittingRef.current)
-          void handleCommit();
+          void handleCommitRef.current();
       }, 0);
       return;
     }
     if (!hasPendingRef.current) return;
-    void handleCommit();
+    void handleCommitRef.current();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [commitActiveEdit, cancelActiveEdit]);
 
@@ -3471,6 +3562,14 @@ export default function DataGrid({
         onUndoRowDelete={undoRowDelete}
         onDiscardInsert={discardInsert}
         onSetNull={(rowId, col) => handleCellEdit(rowId, col, "NULL")}
+        onDuplicateRow={(rowId) => {
+          // If the right-clicked row is part of a multi-selection, duplicate
+          // the whole selection; otherwise just that row.
+          const ids = selectedRows.has(rowId)
+            ? Array.from(selectedRows)
+            : [rowId];
+          duplicateRows(ids);
+        }}
       />
     </div>
   );
