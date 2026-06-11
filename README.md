@@ -12,10 +12,46 @@ One app for **MySQL, PostgreSQL, SQLite, MongoDB, Redis**, built with [Tauri](ht
 
 ---
 
+## Install
+
+### macOS (Homebrew)
+
+```bash
+brew install --cask tofikhidayatxyz/tap/table-relay
+```
+
+This taps `tofikhidayatxyz/homebrew-tap` and installs **Table Relay.app** into `/Applications`. The cask clears the Gatekeeper quarantine flag for you on install, so the app opens without the "damaged" warning that unsigned builds normally trigger.
+
+To upgrade later:
+
+```bash
+brew update
+brew upgrade --cask table-relay
+```
+
+To uninstall:
+
+```bash
+brew uninstall --cask table-relay
+# add --zap to also remove app-data, caches, and preferences:
+brew uninstall --zap --cask table-relay
+```
+
+> The cask points at the same ad-hoc-signed (not notarized) `.dmg` attached to each GitHub release, and is published automatically by the release workflow.
+
+### Other platforms
+
+Download the installer for your OS from the [latest release](https://github.com/tofikhidayatxyz/Table-relay/releases/latest):
+
+- **macOS** (without Homebrew): the `.dmg` (arm64 or x86_64). See [Installing a downloaded release](#installing-a-downloaded-release) for the one-time Gatekeeper step.
+- **Windows**: the `.msi` or `-setup.exe`.
+
+---
+
 ## Features
 
 - **Data grid**: browse, filter, sort, and inline-edit rows. Editable JSON tree view for MongoDB documents.
-- **SQL editor**: Monaco-based editor with schema-aware autocompletion, multi-statement execution, a query log, and a destructive-query warning before you run a `DELETE`, `UPDATE`, or `DROP`.
+- **SQL editor**: Monaco-based editor with schema-aware autocompletion, multi-statement execution, a query log, and a destructive-query warning before you run a `DELETE`, `UPDATE`, or `DROP`. Run the statement under the cursor or run all (Cmd/Ctrl+Enter / Cmd/Ctrl+Shift+Enter), format SQL/JSON, and load or save the query buffer to a file from the native **File** menu (Cmd/Ctrl+I to load, Cmd/Ctrl+S to save, Cmd/Ctrl+Shift+S to save as).
 - **Schema editor**: create and alter tables, columns, indexes, and foreign keys. The app emits dialect-correct DDL per driver, with per-column data types and collation, searchable type/collation pickers, and table-level encoding/collation.
 - **Diagrams**: auto-laid-out entity-relationship diagrams from your schema.
 - **Realtime**: publish/subscribe against Redis Pub/Sub and Postgres `LISTEN`/`NOTIFY`.
@@ -24,7 +60,7 @@ One app for **MySQL, PostgreSQL, SQLite, MongoDB, Redis**, built with [Tauri](ht
   - **Import connections** from other clients so you do not re-enter every server by hand. Supported sources include TablePlus, DBeaver, Navicat, HeidiSQL, and another Table Relay export. A password prompt fills in any secrets the source file does not carry.
   - **Import data** from a `.sql`, `.csv`, or `.json` file.
   - **Export** a query result or a whole connection to CSV, TSV, JSON, NDJSON, Excel, or SQL INSERT statements, with a progress dialog and cancellation for large exports.
-- **AI assistant**: chat about your schema and data with OpenAI, Anthropic, Google Gemini, any OpenAI-compatible endpoint (Ollama, Groq, LM Studio), a **fully local on-device model**, or a **CLI provider** (Claude Code or Codex CLI) that runs against the agent you already have logged in on your machine.
+- **AI assistant**: chat about your schema and data with OpenAI, Anthropic, Google Gemini, any OpenAI-compatible endpoint (Ollama, Groq, LM Studio), a **fully local on-device model**, or a **CLI provider** (Claude Code, Codex, Gemini CLI, opencode, Kilo, or Antigravity) that runs against the coding agent you already have installed and logged in on your machine. Conversations and the chosen model/provider are saved per conversation and restored across restarts, and you can manage or bulk-delete chat history.
   - For the local model, Table Relay runs `llama.cpp` (`llama-server`) for you, with a built-in downloader for curated GGUF models (Qwen2.5-Coder 3B/7B/14B), so you can use the assistant offline with no API key and no data leaving your machine.
   - The assistant inspects schema freely, but **every query it runs is gated by an approval prompt**. With **per-operation permissions** you can auto-allow individually (Read, Write, Create/DDL, Delete) while destructive statements (no-`WHERE` deletes, `DROP`, `TRUNCATE`) always ask.
   - The tool loop auto-retries transient provider failures (network timeouts, rate limits, upstream 5xx) with backoff, and guards against runaway repeat calls.
@@ -64,7 +100,7 @@ npm run tauri:dev
 
 The first Rust build compiles all five database adapters and can take several minutes; subsequent builds are incremental.
 
-> **AI is optional and configured in-app, not via environment variables.** For a hosted provider, open **Settings > AI Providers**, add a credential, and activate it (keys are stored locally on your machine, see [Security](#security)). For a **local model** you need no key at all: pick **Local Llama**, download a GGUF model from the built-in catalog, and Table Relay runs it on-device via `llama.cpp` (install the open-source [`llama.cpp`](https://github.com/ggerganov/llama.cpp) `llama-server` CLI first, for example `brew install llama.cpp`). For a **CLI provider**, log in to Claude Code or Codex CLI in your terminal as usual; Table Relay only invokes the binary you already authenticated and bills under your own account. There is no required `.env` file to run the app.
+> **AI is optional and configured in-app, not via environment variables.** For a hosted provider, open **Settings > AI Providers**, add a credential, and activate it (keys are stored locally on your machine, see [Security](#security)). For a **local model** you need no key at all: pick **Local Llama**, download a GGUF model from the built-in catalog, and Table Relay runs it on-device via `llama.cpp` (install the open-source [`llama.cpp`](https://github.com/ggerganov/llama.cpp) `llama-server` CLI first, for example `brew install llama.cpp`). For a **CLI provider**, log in to your coding agent (Claude Code, Codex, Gemini CLI, opencode, Kilo, or Antigravity) in your terminal as usual; Table Relay only invokes the binary you already authenticated and bills under your own account. There is no required `.env` file to run the app.
 
 ### Installing a downloaded release
 
