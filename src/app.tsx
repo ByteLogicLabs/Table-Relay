@@ -93,6 +93,20 @@ function UnlockedApp() {
     return () => { void unsub.then(fn => fn()); };
   }, []);
 
+  // Import / Export Connections opens Settings → Import / Export. Handled here
+  // in the always-mounted root (not WorkspaceView) so it works on the home /
+  // welcome screen too, where the workspace and its menu listeners aren't
+  // mounted. The Settings dialog lives inside both Welcome and Workspace and
+  // listens for this same window event.
+  useEffect(() => {
+    const unsub = listen<void>('menu-connection-transfer', () => {
+      window.dispatchEvent(
+        new CustomEvent('tablerelay:open-settings', { detail: { section: 'data' } }),
+      );
+    });
+    return () => { void unsub.then(fn => fn()); };
+  }, []);
+
   useEffect(() => {
     const onChanged = () => { void reload(); };
     window.addEventListener('tablerelay:connections-changed', onChanged);

@@ -17,6 +17,7 @@ import ImportSqlDialog from "../connections/import-sql-dialog";
 import ConnectionExportDialog from "../connections/connection-export-dialog";
 import ChatPanel from "../ai-chat/chat-panel";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import {
   connectAndLoad,
   refreshSchemas,
@@ -241,6 +242,17 @@ export default function WorkspaceView({
   useEffect(() => {
     connectionsRef.current = connections;
   }, [connections]);
+  // Grey out the connection-dependent native menu items (Edit Current / Open
+  // Database / Import Data / Export Data) whenever no connection is focused.
+  // They all act on the focused connection, so on the home screen they would
+  // only toast an error — disabling them is the honest affordance.
+  useEffect(() => {
+    void invoke("set_connection_menu_enabled", {
+      enabled: focusedConnectionId != null,
+    }).catch(() => {
+      /* menu state is best-effort; the listeners still guard with a toast */
+    });
+  }, [focusedConnectionId]);
   const openEditConnection = (
     connection: ConnectionProfile,
     returnToManager = false,
@@ -408,14 +420,8 @@ export default function WorkspaceView({
         window.dispatchEvent(new CustomEvent("tablerelay:menu-open-database"));
       },
     );
-    // Import / Export connections live in Settings → Import / Export.
-    const unlistenConnectionTransfer = listen<void>(
-      "menu-connection-transfer",
-      () =>
-        window.dispatchEvent(
-          new CustomEvent("tablerelay:open-settings", { detail: { section: "data" } }),
-        ),
-    );
+    // Import / Export connections (menu-connection-transfer) is handled in the
+    // always-mounted root (app.tsx) so it also works on the home screen.
     // Database-level import/export for the focused connection.
     const unlistenImportDb = listen<void>("menu-connection-import_db", () => {
       const id = menuCtxRef.current.focusedConnectionId;
@@ -441,7 +447,6 @@ export default function WorkspaceView({
       void unlistenAiChat.then((fn) => fn());
       void unlistenConnectionPicker.then((fn) => fn());
       void unlistenConnectionNew.then((fn) => fn());
-      void unlistenConnectionTransfer.then((fn) => fn());
       void unlistenImportDb.then((fn) => fn());
       void unlistenExportDb.then((fn) => fn());
       void unlistenConnectionEditCurrent.then((fn) => fn());
