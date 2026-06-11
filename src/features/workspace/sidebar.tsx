@@ -1267,7 +1267,10 @@ export default function Sidebar({
 
       {/* Body: Tables / Views / Routines */}
       <ScrollArea className="flex-1 min-h-0">
-        <div className="py-2 space-y-1 px-1">
+        {/* min-w-max: size the tree to its widest row so long table names
+            extend the content (and the horizontal scrollbar can reveal them)
+            instead of being truncated. */}
+        <div className="py-2 space-y-1 px-1 min-w-max">
           {/* Connect-failed state. The rail tile keeps its focus on a profile
               even when the connect attempt fails, so without this the sidebar
               silently shows an empty table list — which looks like every
@@ -1448,7 +1451,7 @@ export default function Sidebar({
                               }
                             >
                               <TableIcon className={iconCls(active)} />
-                              <span className="flex-1 truncate">{t.name}</span>
+                              <span className="flex-1 whitespace-nowrap">{t.name}</span>
                             </div>
                           </ContextMenuTrigger>
                           <ContextMenuContent className="w-52">
@@ -1570,7 +1573,7 @@ export default function Sidebar({
                             }
                           >
                             <LayoutTemplate className={iconCls(active)} />
-                            <span className="flex-1 truncate">{v.name}</span>
+                            <span className="flex-1 whitespace-nowrap">{v.name}</span>
                             {v.isUpdatable && (
                               <span className="text-[9px] text-muted-foreground/70">
                                 upd
@@ -1678,7 +1681,7 @@ export default function Sidebar({
                             }}
                           >
                             <FunctionSquare className={iconCls(active)} />
-                            <span className="flex-1 truncate">{r.name}</span>
+                            <span className="flex-1 whitespace-nowrap">{r.name}</span>
                             <span
                               className={`text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
                             >
@@ -1793,7 +1796,7 @@ export default function Sidebar({
                             }
                           >
                             <Zap className={iconCls(active)} />
-                            <span className="flex-1 truncate">{t.name}</span>
+                            <span className="flex-1 whitespace-nowrap">{t.name}</span>
                             <span
                               className={`text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
                             >
