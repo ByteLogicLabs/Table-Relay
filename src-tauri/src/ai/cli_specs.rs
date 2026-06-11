@@ -173,6 +173,15 @@ impl CliSpec for ClaudeCliSpec {
         }
         v
     }
+    fn extra_env(&self) -> Vec<(String, String)> {
+        // Our DB tools block on the in-app approval prompt (can be minutes).
+        // Claude Code's MCP startup/tool timeouts (ms) default low and would
+        // cancel the call before the user approves — raise both to 10 min.
+        vec![
+            ("MCP_TIMEOUT".into(), "600000".into()),
+            ("MCP_TOOL_TIMEOUT".into(), "600000".into()),
+        ]
+    }
     fn build_args(&self, prompt: &str, model: &str, mcp_config_path: Option<&str>) -> Vec<String> {
         let mut a = vec![
             "-p".into(),
@@ -259,7 +268,20 @@ impl CliSpec for CodexCliSpec {
     }
     fn build_args(&self, prompt: &str, model: &str, _mcp: Option<&str>) -> Vec<String> {
         // MCP for Codex is config.toml-based (registered out-of-band), so no flag.
-        let mut a = vec!["exec".into(), "--json".into()];
+        //
+        // `-c approval_policy="never"`: in non-interactive `exec` there's no one
+        // to answer codex's own approval prompt, so it auto-CANCELS any tool
+        // call that would need approval — which is why our MCP `call_query`
+        // returned "The query was cancelled" before ever reaching the app. With
+        // `never`, codex runs tools without prompting; our DB tools stay gated by
+        // the app's own approval UI (via the MCP bridge). Shell stays sandboxed
+        // (default read-only), so this doesn't grant codex unsandboxed exec.
+        let mut a = vec![
+            "exec".into(),
+            "--json".into(),
+            "-c".into(),
+            "approval_policy=\"never\"".into(),
+        ];
         if !model.is_empty() {
             a.push("-m".into());
             a.push(model.into());
@@ -529,7 +551,14 @@ impl CliSpec for AgySpec {
     }
     fn build_args(&self, prompt: &str, model: &str, _mcp: Option<&str>) -> Vec<String> {
         // `-p`/`--print` takes the prompt as its value and prints the response.
-        let mut a: Vec<String> = Vec::new();
+        // MCP servers come from ~/.gemini/config/mcp_config.json (registered
+        // out-of-band). agy has no granular tool allow-list flag — only
+        // `--dangerously-skip-permissions` — so we pass it to let our MCP DB
+        // tools run in non-interactive print mode (otherwise agy would block on
+        // a permission prompt with no TTY to answer). Our DB tools stay gated by
+        // the app's own approval UI (the MCP bridge routes every call through
+        // `dispatch()` → approval), so this only skips agy's redundant prompt.
+        let mut a: Vec<String> = vec!["--dangerously-skip-permissions".into()];
         if !model.is_empty() {
             a.push("--model".into());
             a.push(model.into());

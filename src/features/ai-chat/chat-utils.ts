@@ -58,7 +58,11 @@ export const PROVIDERS: ProviderOption[] = [
   { kind: 'openai_compatible', label: 'OpenAI-compatible', sublabel: 'Ollama / Groq / LM Studio', available: true, needsKey: false, optionalKey: true, needsBaseUrl: true, defaultModel: 'llama3.1' },
   { kind: 'llama_local', label: 'Local Llama', sublabel: 'GGUF · on-device', available: true, needsKey: false },
   { kind: 'claude_cli', label: 'Claude Code CLI', sublabel: 'your installed `claude`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'claude', defaultModel: 'sonnet' },
-  { kind: 'codex_cli', label: 'Codex CLI', sublabel: 'your installed `codex`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'codex', defaultModel: 'gpt-5-codex' },
+  // No default model: `gpt-5-codex` isn't valid for ChatGPT-account logins, and
+  // model availability is account-dependent. Empty → we don't pass `-m`, so
+  // codex uses its own configured default (config.toml). Pick one from the live
+  // catalog (`codex debug models`) to override.
+  { kind: 'codex_cli', label: 'Codex CLI', sublabel: 'your installed `codex`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'codex' },
   { kind: 'gemini_cli', label: 'Gemini CLI', sublabel: 'your installed `gemini`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'gemini', defaultModel: 'gemini-2.5-pro' },
   { kind: 'opencode', label: 'opencode', sublabel: 'your installed `opencode`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'opencode' },
   { kind: 'kilo', label: 'Kilo CLI', sublabel: 'your installed `kilo`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'kilo' },
