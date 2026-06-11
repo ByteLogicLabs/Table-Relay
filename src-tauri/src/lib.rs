@@ -7,9 +7,18 @@ mod store;
 
 use std::sync::Arc;
 
-use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
-use tauri::{Emitter, Manager};
+use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::{Emitter, Manager, Wry};
 use tokio::sync::RwLock;
+
+/// Native-menu items that only make sense when at least one connection is open.
+/// Stored in managed state so the frontend can grey them out (via the
+/// `set_connection_menu_enabled` command) whenever the connection count changes.
+/// Edit/Open/Import/Export all act on the *focused* connection, so with none
+/// open they would only ever toast an error — better to disable them outright.
+struct ConnectionMenuItems {
+    items: Vec<MenuItem<Wry>>,
+}
 
 use crate::ai::download::DownloadRegistry;
 use crate::ai::session::SessionSlot;
@@ -232,6 +241,22 @@ pub fn run() {
                 .build()?;
             app.set_menu(menu)?;
 
+            // Items that act on the focused connection start disabled — there's
+            // no connection open at launch. The frontend re-enables them once a
+            // connection exists, via `set_connection_menu_enabled`.
+            let connection_menu_items = ConnectionMenuItems {
+                items: vec![
+                    connection_edit_current.clone(),
+                    connection_open_database.clone(),
+                    connection_import_db.clone(),
+                    connection_export_db.clone(),
+                ],
+            };
+            for item in &connection_menu_items.items {
+                let _ = item.set_enabled(false);
+            }
+            app.manage(connection_menu_items);
+
             // Route menu item clicks to the webview via Tauri events.
             // Frontend listens for `menu-file-import` / `menu-file-export`.
             // We log every menu event so a silent miss (e.g. a typo in
@@ -266,6 +291,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Frontend → log bridge (writes fe:<tag> lines into logs/app.log)
             crate::log::frontend_log,
+            // Native-menu state: grey out connection-dependent items at home.
+            set_connection_menu_enabled,
             // Security / encrypted app store
             commands::security::security_status,
             commands::security::security_remove_backup,
@@ -367,6 +394,22 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Enable or disable the connection-dependent native menu items (Edit Current /
+/// Open Database / Import Data / Export Data). The frontend calls this whenever
+/// the saved-connection count changes: `true` once at least one connection
+/// exists, `false` when there are none (so the items grey out on the home
+/// screen instead of toasting "open a connection first").
+#[tauri::command]
+fn set_connection_menu_enabled(
+    enabled: bool,
+    items: tauri::State<'_, ConnectionMenuItems>,
+) -> Result<(), String> {
+    for item in &items.items {
+        item.set_enabled(enabled).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// One-time carry-forward of the local store after a bundle-identifier change
