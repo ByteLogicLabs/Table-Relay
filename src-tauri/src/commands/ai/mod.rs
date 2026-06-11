@@ -722,9 +722,15 @@ fn register_cli_mcp(
             }
             None
         }
-        // Antigravity (agy) has no MCP-config flag/file we can write; it exposes
-        // tools via its own plugin system. Runs as a chat provider without our
-        // DB tools for now.
+        // Antigravity (agy) reads MCP servers from ~/.gemini/config/mcp_config.json.
+        ProviderKind::Antigravity => {
+            if let Some(h) = &home {
+                if let Err(e) = mcp_server::register_antigravity(h, &exe, port, token) {
+                    crate::log_line!("mcp", "antigravity register failed: {e}");
+                }
+            }
+            None
+        }
         _ => None,
     }
 }

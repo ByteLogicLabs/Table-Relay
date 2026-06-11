@@ -174,6 +174,19 @@ pub fn register_gemini(home: &std::path::Path, exe: &str, port: u16, token: &str
     merge_json_config(&path, "mcpServers", MCP_SERVER_NAME, entry)
 }
 
+/// Register the MCP server for Antigravity (`agy`). The binary reads MCP
+/// servers from `~/.gemini/config/mcp_config.json` (`{ "mcpServers": { … } }`,
+/// same `command`/`args` shape as Gemini). Verified against the `agy` binary's
+/// embedded config schema + the empty `mcp_config.json` it creates.
+pub fn register_antigravity(home: &std::path::Path, exe: &str, port: u16, token: &str) -> std::io::Result<()> {
+    let path = home.join(".gemini/config/mcp_config.json");
+    let entry = gemini_mcp_fragment(exe, port, token)
+        .get(MCP_SERVER_NAME)
+        .cloned()
+        .unwrap_or(json!({}));
+    merge_json_config(&path, "mcpServers", MCP_SERVER_NAME, entry)
+}
+
 /// Register the MCP server into opencode's config JSON. opencode follows XDG:
 /// `$XDG_CONFIG_HOME/opencode/opencode.json`, falling back to
 /// `~/.config/opencode/...` on Unix and `%APPDATA%\opencode\...` on Windows.
@@ -278,9 +291,15 @@ pub fn gemini_mcp_fragment(exe: &str, port: u16, token: &str) -> Value {
 }
 
 /// Codex config.toml `[mcp_servers.tablerelay]` block as a string.
+///
+/// `tool_timeout_sec` is large because our DB tools block on the in-app
+/// approval prompt — codex's default tool timeout is short and would cancel the
+/// call ("The query was cancelled") before the user clicks Approve.
+/// `startup_timeout_sec` is bumped so launching our (debug) MCP-server
+/// subprocess + connecting back to the bridge isn't cut off either.
 pub fn codex_mcp_toml(exe: &str, port: u16, token: &str) -> String {
     format!(
-        "[mcp_servers.{name}]\ncommand = {exe:?}\nargs = [\"__mcp-server\", \"--port\", \"{port}\", \"--token\", \"{token}\"]\n",
+        "[mcp_servers.{name}]\ncommand = {exe:?}\nargs = [\"__mcp-server\", \"--port\", \"{port}\", \"--token\", \"{token}\"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 600\n",
         name = MCP_SERVER_NAME,
         exe = exe,
         port = port,
