@@ -181,13 +181,27 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Manual clone instead of actions/checkout so a brand-new, EMPTY tap repo
+      # (no commits / no default branch yet) doesn't fail the job — checkout
+      # errors with "couldn't find remote ref refs/heads/main" on an empty repo.
+      # If the clone yields no branch, we initialize `main` so the first release
+      # bootstraps the tap.
       - name: Checkout tap repo
         if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: tofikhidayatxyz/homebrew-tap
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
-          path: tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/tofikhidayatxyz/homebrew-tap.git" tap || {
+            echo "Clone failed — does tofikhidayatxyz/homebrew-tap exist?" >&2
+            exit 1
+          }
+          cd tap
+          # Empty repo: no HEAD yet. Start a main branch so commit/push works.
+          if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "Tap repo is empty — bootstrapping a 'main' branch."
+            git checkout -b main
+          fi
 
       - name: Generate cask
         if: steps.gate.outputs.enabled == 'true'
@@ -259,5 +273,6 @@ jobs:
             echo "Cask already up to date — nothing to commit."
           else
             git commit -m "table-relay ${TAG}"
-            git push
+            # -u sets upstream on the first push to a freshly bootstrapped main.
+            git push -u origin HEAD
           fi
