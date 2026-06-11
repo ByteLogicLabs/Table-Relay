@@ -207,14 +207,40 @@ jobs:
         if: steps.gate.outputs.enabled == 'true'
         env:
           TAG: ${{ github.event.release.tag_name }}
+          # GITHUB_TOKEN can read this repo's release assets via the API.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          # Strip a leading "v" from the tag to get the bare version (v0.2.0 -> 0.2.0).
-          version="${TAG#v}"
-          repo="${{ github.repository }}"   # tofikhidayatxyz/db-table
+          repo="${{ github.repository }}"   # e.g. tofikhidayatxyz/Table-relay
           base="https://github.com/${repo}/releases/download/${TAG}"
-          arm_dmg="Table_Relay_${version}_aarch64.dmg"
-          intel_dmg="Table_Relay_${version}_x86_64.dmg"
+          # Cask version: strip a leading "v" from the tag (v0.2.0 -> 0.2.0).
+          version="${TAG#v}"
+
+          # Resolve the actual DMG asset NAMES from the release instead of
+          # guessing them from the tag. The DMG filenames embed the package.json
+          # version, which can differ from the tag (e.g. tag "beta-0.1.8" but DMG
+          # "Table_Relay_0.1.8_*.dmg") — deriving from the tag produced 404 URLs.
+          assets_json=$(curl -fsSL \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${repo}/releases/tags/${TAG}")
+
+          pick_dmg() {  # $1 = filename suffix to match
+            printf '%s' "$assets_json" | python3 -c \
+              "import json,sys; a=json.load(sys.stdin).get('assets',[]); m=[x['name'] for x in a if x['name'].endswith('$1')]; print(m[0] if m else '')"
+          }
+          arm_dmg=$(pick_dmg "aarch64.dmg")
+          intel_dmg=$(pick_dmg "x86_64.dmg")
+
+          if [ -z "$arm_dmg" ] || [ -z "$intel_dmg" ]; then
+            echo "::error::Could not find both DMG assets on release ${TAG}." >&2
+            echo "Assets present on the release:" >&2
+            printf '%s' "$assets_json" | python3 -c \
+              "import json,sys; [print(' -',x['name']) for x in json.load(sys.stdin).get('assets',[])]" >&2
+            exit 1
+          fi
+          echo "Using arm DMG:   $arm_dmg"
+          echo "Using intel DMG: $intel_dmg"
 
           mkdir -p tap/Casks
           # Build the cask with printf (no heredoc) so YAML indentation can't
