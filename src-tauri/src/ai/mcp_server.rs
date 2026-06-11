@@ -187,6 +187,20 @@ pub fn register_opencode(home: &std::path::Path, exe: &str, port: u16, token: &s
     merge_json_config(&path, "mcp", MCP_SERVER_NAME, entry)
 }
 
+/// Register the MCP server into Kilo's config. Kilo is opencode-compatible and
+/// uses the same `mcp` schema. We write `<config>/kilo/kilo.json` (plain JSON);
+/// we deliberately do NOT touch a user-authored `kilo.jsonc` (comments would
+/// fail to round-trip through a JSON merge and we'd clobber their config).
+pub fn register_kilo(home: &std::path::Path, exe: &str, port: u16, token: &str) -> std::io::Result<()> {
+    let base = config_home(home);
+    let path = base.join("kilo").join("kilo.json");
+    let entry = opencode_mcp_fragment(exe, port, token)
+        .get(MCP_SERVER_NAME)
+        .cloned()
+        .unwrap_or(json!({}));
+    merge_json_config(&path, "mcp", MCP_SERVER_NAME, entry)
+}
+
 /// The XDG-style config base dir: `$XDG_CONFIG_HOME` if set, else `~/.config`
 /// on Unix and `%APPDATA%` on Windows.
 fn config_home(home: &std::path::Path) -> std::path::PathBuf {

@@ -26,7 +26,7 @@ use tauri::State;
 
 use crate::ai::anthropic::AnthropicProvider;
 use crate::ai::cli_provider::{resolve_binary, CliProvider, CliSpec};
-use crate::ai::cli_specs::{ClaudeCliSpec, CodexCliSpec, GeminiCliSpec, OpencodeSpec};
+use crate::ai::cli_specs::{AgySpec, ClaudeCliSpec, CodexCliSpec, GeminiCliSpec, KiloSpec, OpencodeSpec};
 use crate::ai::download::{self, DownloadRegistry, LocalModelInfo};
 use crate::ai::echo::EchoProvider;
 use crate::ai::gemini::GeminiProvider;
@@ -161,7 +161,9 @@ pub async fn ai_start(
         ProviderKind::ClaudeCli
         | ProviderKind::CodexCli
         | ProviderKind::GeminiCli
-        | ProviderKind::Opencode => {
+        | ProviderKind::Opencode
+        | ProviderKind::Kilo
+        | ProviderKind::Antigravity => {
             // Lazily bind the MCP bridge so the CLI can call our DB tools, then
             // register it with this CLI. Bridge/registration failures are
             // non-fatal — the CLI still runs as a chat provider without tools.
@@ -299,11 +301,11 @@ pub async fn ai_list_models(input: ListModelsInput) -> Result<Vec<String>, AiErr
             "opus".into(),
             "haiku".into(),
         ]),
-        ProviderKind::CodexCli => Ok(vec![
-            "gpt-5-codex".into(),
-            "gpt-5".into(),
-            "o4-mini".into(),
-        ]),
+        // Codex has no `models` subcommand, but it maintains a refreshed catalog
+        // at `~/.codex/models_cache.json` (the `slug`s are exactly what `-m`
+        // takes). Read that instead of hardcoding; the picker's free-text entry
+        // covers the case where the cache hasn't been written yet.
+        ProviderKind::CodexCli => Ok(codex_models().await.unwrap_or_default()),
         ProviderKind::GeminiCli => Ok(vec![
             "gemini-2.5-pro".into(),
             "gemini-2.5-flash".into(),
@@ -311,17 +313,78 @@ pub async fn ai_list_models(input: ListModelsInput) -> Result<Vec<String>, AiErr
         // opencode knows its own catalog (`opencode models`, provider/model
         // strings). Ask the binary so the picker reflects what's actually
         // configured/authed; fall back to empty (= let opencode pick) on error.
-        ProviderKind::Opencode => Ok(opencode_models().await.unwrap_or_default()),
+        ProviderKind::Opencode => Ok(cli_models(ProviderKind::Opencode).await.unwrap_or_default()),
+        // Kilo is opencode-compatible — `kilo models` prints provider/model ids.
+        ProviderKind::Kilo => Ok(cli_models(ProviderKind::Kilo).await.unwrap_or_default()),
+        // Antigravity's `agy models` lists its model ids.
+        ProviderKind::Antigravity => {
+            Ok(cli_models(ProviderKind::Antigravity).await.unwrap_or_default())
+        }
     }
 }
 
-/// Run `opencode models` and return its `provider/model` lines. Best-effort:
-/// returns `None` if the binary can't be found or run. Logs the reason on
-/// failure so an empty picker isn't a silent mystery.
-async fn opencode_models() -> Option<Vec<String>> {
-    let spec = cli_spec_for(ProviderKind::Opencode);
+/// Ask Codex for its model catalog via the documented `codex debug models`
+/// command ("Render the raw model catalog as JSON"). Returns the selectable
+/// model `slug`s — exactly what `codex -m` accepts. No hardcoding; returns
+/// `None` if the command is unavailable/unparseable, in which case the picker
+/// falls back to free-text entry.
+async fn codex_models() -> Option<Vec<String>> {
+    let spec = cli_spec_for(ProviderKind::CodexCli);
+    let bin = resolve_binary(spec.as_ref())?;
+    let mut cmd = crate::ai::cli_provider::build_command(
+        &bin,
+        &["debug".to_string(), "models".to_string()],
+    );
+    cmd.stdin(std::process::Stdio::null());
+    augment_path_env(&mut cmd, &bin);
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            crate::log_line!("cli", "codex_models: spawn failed: {e}");
+            return None;
+        }
+        Err(_) => {
+            crate::log_line!("cli", "codex_models: timed out after 20s");
+            return None;
+        }
+    };
+    // The catalog is JSON on stdout; tolerate any leading log line by slicing
+    // from the first `{`.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = stdout.get(stdout.find('{').unwrap_or(0)..).unwrap_or(&stdout);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).ok()?;
+    let list: Vec<String> = v
+        .get("models")?
+        .as_array()?
+        .iter()
+        // Keep models the user can actually pick (`visibility == "list"`, or no
+        // visibility field). Drops internal/hidden entries like auto-review.
+        .filter(|m| {
+            m.get("visibility")
+                .and_then(|x| x.as_str())
+                .map(|s| s == "list")
+                .unwrap_or(true)
+        })
+        .filter_map(|m| m.get("slug").and_then(|s| s.as_str()))
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if list.is_empty() {
+        None
+    } else {
+        Some(list)
+    }
+}
+
+/// Run `<cli> models` and return its `provider/model` lines. Works for any CLI
+/// whose `models` subcommand prints one id per line (opencode, kilo, agy).
+/// Best-effort: returns `None` if the binary can't be found or run. Logs the
+/// reason on failure so an empty picker isn't a silent mystery.
+async fn cli_models(kind: ProviderKind) -> Option<Vec<String>> {
+    let spec = cli_spec_for(kind);
+    let name = kind.as_str();
     let Some(bin) = resolve_binary(spec.as_ref()) else {
-        crate::log_line!("cli", "opencode_models: binary not resolved");
+        crate::log_line!("cli", "{name}_models: binary not resolved");
         return None;
     };
     // Route through the cross-platform builder so a Windows `.cmd` shim runs via
@@ -332,36 +395,60 @@ async fn opencode_models() -> Option<Vec<String>> {
     let mut cmd = crate::ai::cli_provider::build_command(&bin, &["models".to_string()]);
     cmd.stdin(std::process::Stdio::null());
     augment_path_env(&mut cmd, &bin);
-    let output = match cmd.output().await {
-        Ok(o) => o,
-        Err(e) => {
-            crate::log_line!("cli", "opencode_models: spawn failed: {e}");
+    // `opencode`/`kilo models` fetch a REMOTE catalog — bound the wait so a slow
+    // or unreachable network can't hang the model picker forever (the frontend
+    // shows "Loading…" until this resolves). On timeout we return None and the
+    // picker falls back to free-text entry.
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output()).await
+    {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            crate::log_line!("cli", "{name}_models: spawn failed: {e}");
+            return None;
+        }
+        Err(_) => {
+            crate::log_line!("cli", "{name}_models: timed out after 20s");
             return None;
         }
     };
-    if !output.status.success() {
+    // Don't early-return on a non-zero exit: some CLIs (agy) print a usable
+    // model list to stdout yet exit non-zero. Parse stdout regardless; only
+    // treat it as a failure if nothing usable comes back.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Per-CLI line shape:
+    //   • opencode / kilo → `provider/model` ids (single token, has a
+    //     separator) so we can skip ASCII banners/footers.
+    //   • antigravity (agy) → free-form display names with spaces, e.g.
+    //     "Gemini 3.5 Flash (Medium)", which is exactly what `--model` accepts.
+    let keep = |l: &str| -> bool {
+        if l.is_empty() || !l.chars().any(|c| c.is_ascii_alphanumeric()) {
+            return false;
+        }
+        match kind {
+            ProviderKind::Antigravity => true,
+            _ => {
+                !l.chars().any(char::is_whitespace)
+                    && l.chars().any(|c| c == '/' || c == '-' || c == '.')
+            }
+        }
+    };
+    let list: Vec<String> = stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| keep(l))
+        .collect();
+    if list.is_empty() {
         let err = String::from_utf8_lossy(&output.stderr);
         crate::log_line!(
             "cli",
-            "opencode_models: exit {} stderr: {}",
+            "{name}_models: no models parsed (exit {}) stderr: {}",
             output.status,
             err.chars().take(300).collect::<String>()
         );
         return None;
     }
-    // Keep only lines shaped like `provider/model` (skip any banner/footer the
-    // CLI might print). This is the only validation — we never hardcode the list.
-    let list: Vec<String> = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty() && l.contains('/') && !l.contains(' '))
-        .collect();
-    crate::log_line!("cli", "opencode_models: {} models parsed", list.len());
-    if list.is_empty() {
-        None
-    } else {
-        Some(list)
-    }
+    crate::log_line!("cli", "{name}_models: {} models parsed", list.len());
+    Some(list)
 }
 
 /// Augment a child command's `PATH` with the resolved binary's own directory plus
@@ -374,6 +461,7 @@ fn augment_path_env(cmd: &mut tokio::process::Command, bin: &std::path::Path) {
     }
     if let Some(home) = crate::ai::cli_specs::home() {
         dirs.push(home.join(".opencode/bin"));
+        dirs.push(home.join(".kilo/bin"));
         dirs.push(home.join(".bun/bin"));
         dirs.push(home.join(".local/bin"));
     }
@@ -519,6 +607,8 @@ fn cli_spec_for(kind: ProviderKind) -> Arc<dyn CliSpec> {
         ProviderKind::CodexCli => Arc::new(CodexCliSpec),
         ProviderKind::GeminiCli => Arc::new(GeminiCliSpec { system_md: None }),
         ProviderKind::Opencode => Arc::new(OpencodeSpec),
+        ProviderKind::Kilo => Arc::new(KiloSpec),
+        ProviderKind::Antigravity => Arc::new(AgySpec),
         _ => unreachable!("cli_spec_for called with non-CLI kind"),
     }
 }
@@ -622,6 +712,19 @@ fn register_cli_mcp(
             }
             None
         }
+        // Kilo is opencode-compatible — same MCP config shape, written to
+        // kilo's own config file.
+        ProviderKind::Kilo => {
+            if let Some(h) = &home {
+                if let Err(e) = mcp_server::register_kilo(h, &exe, port, token) {
+                    crate::log_line!("mcp", "kilo register failed: {e}");
+                }
+            }
+            None
+        }
+        // Antigravity (agy) has no MCP-config flag/file we can write; it exposes
+        // tools via its own plugin system. Runs as a chat provider without our
+        // DB tools for now.
         _ => None,
     }
 }

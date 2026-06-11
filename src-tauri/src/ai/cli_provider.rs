@@ -72,6 +72,13 @@ pub trait CliSpec: Send + Sync + 'static {
     }
     /// Parse one line of stdout into an event.
     fn parse_line(&self, line: &str) -> LineEvent;
+    /// Whether a non-zero process exit should be ignored when the CLI already
+    /// produced output. Some CLIs (e.g. `agy`) exit non-zero even on a
+    /// successful run, which would otherwise append a spurious "[CLI exited with
+    /// an error]" after a perfectly good reply. Defaults to false.
+    fn tolerate_nonzero_exit(&self) -> bool {
+        false
+    }
 }
 
 /// Resolve the CLI binary: PATH first (via `which`, cross-platform), then the
@@ -215,6 +222,8 @@ impl AiProvider for CliProvider {
             ProviderKind::CodexCli => "Codex CLI",
             ProviderKind::GeminiCli => "Gemini CLI",
             ProviderKind::Opencode => "opencode",
+            ProviderKind::Kilo => "Kilo CLI",
+            ProviderKind::Antigravity => "Antigravity CLI",
             _ => "CLI",
         };
         if self.model.is_empty() {
@@ -421,6 +430,10 @@ impl AiProvider for CliProvider {
             // Stream ended without an explicit Done/Failed/Stop — decide based on
             // exit status, so a non-zero exit (even AFTER partial output) is
             // surfaced as an error instead of a silently-truncated "success".
+            // Some CLIs exit non-zero even on success (agy). If this spec opts
+            // in AND we already streamed a reply, don't treat the non-zero exit
+            // as a failure — the user got their answer.
+            let exit_ok = exit_ok || (spec.tolerate_nonzero_exit() && emitted_any);
             if !finished {
                 if !exit_ok {
                     // Process failed. Show its stderr (the real reason) appended

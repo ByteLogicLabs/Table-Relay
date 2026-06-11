@@ -100,11 +100,37 @@ pub fn delete(conn: &Connection, id: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Delete every conversation (and its messages). Messages are removed
+/// explicitly rather than relying on `ON DELETE CASCADE`, since SQLite only
+/// enforces FKs when `PRAGMA foreign_keys = ON`.
+pub fn delete_all(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute("DELETE FROM ai_messages", [])?;
+    conn.execute("DELETE FROM ai_conversations", [])?;
+    Ok(())
+}
+
 pub fn update_title(conn: &Connection, id: &str, title: &str) -> Result<(), StoreError> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "UPDATE ai_conversations SET title = ?1, updated_at = ?2 WHERE id = ?3",
         params![title, now, id],
+    )?;
+    Ok(())
+}
+
+/// Update the provider/model a conversation is bound to. Called when the user
+/// swaps model/provider mid-conversation so reopening it later resumes with the
+/// last-used model, not the one it was created with.
+pub fn update_provider_model(
+    conn: &Connection,
+    id: &str,
+    provider_kind: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), StoreError> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE ai_conversations SET provider_kind = ?1, model = ?2, updated_at = ?3 WHERE id = ?4",
+        params![provider_kind, model, now, id],
     )?;
     Ok(())
 }

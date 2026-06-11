@@ -52,6 +52,11 @@ pub enum ProviderKind {
     CodexCli,
     GeminiCli,
     Opencode,
+    /// Kilo CLI — an opencode-compatible agent CLI (`kilo run --format json`).
+    Kilo,
+    /// Antigravity CLI (`agy`) — Google Antigravity's headless agent
+    /// (`agy -p <prompt> --model M`), plain-text output.
+    Antigravity,
 }
 
 impl ProviderKind {
@@ -67,6 +72,8 @@ impl ProviderKind {
             ProviderKind::CodexCli => "codex_cli",
             ProviderKind::GeminiCli => "gemini_cli",
             ProviderKind::Opencode => "opencode",
+            ProviderKind::Kilo => "kilo",
+            ProviderKind::Antigravity => "antigravity",
         }
     }
 
@@ -78,6 +85,8 @@ impl ProviderKind {
                 | ProviderKind::CodexCli
                 | ProviderKind::GeminiCli
                 | ProviderKind::Opencode
+                | ProviderKind::Kilo
+                | ProviderKind::Antigravity
         )
     }
 }
@@ -257,6 +266,24 @@ pub trait AiProvider: Send + Sync {
         Err(AiError::InvalidModel(
             "this provider doesn't support tool use".into(),
         ))
+    }
+
+    /// Streaming variant of `complete_once`: yields content deltas as they
+    /// arrive so the UI can render tokens live, then a terminal `Done` event
+    /// with the fully-assembled `ToolTurn`. Returns:
+    ///   - `Ok(Some(stream))` — provider streams this turn; consume the stream.
+    ///   - `Ok(None)` — provider doesn't stream tool turns; caller should fall
+    ///     back to `complete_once`.
+    ///   - `Err(_)` — a pre-stream failure (auth, HTTP error). Callers may
+    ///     degrade to `complete_once`, which applies its own retry policy.
+    ///
+    /// Default: `Ok(None)` (no streaming) so providers opt in.
+    async fn complete_once_stream(
+        &self,
+        _history: &[ChatMessage],
+        _tools: Option<&[tools::ToolDef]>,
+    ) -> Result<Option<BoxStream<'static, Result<openai::ToolStreamEvent, AiError>>>, AiError> {
+        Ok(None)
     }
 
     /// Does this provider support OpenAI-style tool calls? Checked before

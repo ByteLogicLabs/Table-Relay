@@ -61,7 +61,25 @@ export const PROVIDERS: ProviderOption[] = [
   { kind: 'codex_cli', label: 'Codex CLI', sublabel: 'your installed `codex`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'codex', defaultModel: 'gpt-5-codex' },
   { kind: 'gemini_cli', label: 'Gemini CLI', sublabel: 'your installed `gemini`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'gemini', defaultModel: 'gemini-2.5-pro' },
   { kind: 'opencode', label: 'opencode', sublabel: 'your installed `opencode`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'opencode' },
+  { kind: 'kilo', label: 'Kilo CLI', sublabel: 'your installed `kilo`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'kilo' },
+  { kind: 'antigravity', label: 'Antigravity CLI', sublabel: 'your installed `agy`', available: true, needsKey: false, requiresLocalCli: true, cliBinary: 'agy' },
 ];
+
+/**
+ * Human-friendly label for a provider kind. Prefers the canonical label from
+ * `PROVIDERS` (e.g. `openai` → "OpenAI", `openai_compatible` → "OpenAI-compatible");
+ * falls back to title-casing the raw kind — underscores become spaces and each
+ * word is upper-first — so an unknown/new kind never shows as raw snake_case.
+ */
+export function providerKindLabel(kind: string): string {
+  const known = PROVIDERS.find(p => p.kind === kind);
+  if (known) return known.label;
+  return kind
+    .split('_')
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
+}
 
 /** Open the Settings dialog, optionally landing on a specific section
  *  (e.g. 'ai' for AI providers + local-model downloads). */

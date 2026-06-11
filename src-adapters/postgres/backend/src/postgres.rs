@@ -1663,13 +1663,26 @@ pub(crate) fn column_to_json(row: &PgRow, idx: usize, type_name: &str) -> JsonVa
     }
 
     if let Ok(v) = row.try_get::<Option<String>, _>(idx) {
-        return v.map(JsonValue::String).unwrap_or(JsonValue::Null);
+        // A "text" column can still hold binary (bytes shoved into text/varchar).
+        // Show hex when it does, so the cell isn't blank/garbled.
+        return v
+            .map(|s| {
+                if adapter_api::looks_binary(s.as_bytes()) {
+                    JsonValue::String(adapter_api::bytes_to_hex_upper(s.as_bytes()))
+                } else {
+                    JsonValue::String(s)
+                }
+            })
+            .unwrap_or(JsonValue::Null);
     }
     if let Ok(v) = row.try_get::<Option<Vec<u8>>, _>(idx) {
         return v
-            .map(|bytes| match std::str::from_utf8(&bytes) {
-                Ok(s) => JsonValue::String(s.to_string()),
-                Err(_) => json!({ "__binary__": true, "bytes": bytes.len() }),
+            .map(|bytes| {
+                if adapter_api::looks_binary(&bytes) {
+                    JsonValue::String(adapter_api::bytes_to_hex_upper(&bytes))
+                } else {
+                    JsonValue::String(String::from_utf8_lossy(&bytes).into_owned())
+                }
             })
             .unwrap_or(JsonValue::Null);
     }

@@ -195,13 +195,14 @@ export const EMPTY_DATA: GridData = { cols: [], rows: [] };
 // names (which can include `-` via backticked identifiers).
 export const KEY_SEP = "\x1f";
 
-// Maximum characters we render inside a single cell. Large TEXT/JSON/BLOB
-// values have been observed to freeze the grid when the browser tries to
-// layout thousands of characters per cell across hundreds of rows — the
-// truncation keeps rendering bounded while the full value stays reachable
-// via context menu (Copy Value / Copy Row as JSON) and the cell editor,
-// both of which read from the underlying row, not the display string.
-export const CELL_MAX_RENDER_CHARS = 1024;
+// Maximum characters we render inside a single cell. We only show a short
+// preview — long TEXT/JSON/BLOB (e.g. hex-rendered binary) would otherwise
+// bloat the DOM and can render blank when the browser struggles to lay out a
+// huge single-line string across many rows. The full value stays reachable on
+// DOUBLE-CLICK (the cell editor receives the untruncated value) and via the
+// context menu (Copy Value / Copy Row as JSON) — both read the underlying row,
+// not this display string.
+export const CELL_MAX_RENDER_CHARS = 200;
 // BLOB-ish types show a placeholder instead of rendering raw binary.
 export const BLOB_TYPE_RE = /^(blob|tinyblob|mediumblob|longblob|varbinary|binary)\b/i;
 

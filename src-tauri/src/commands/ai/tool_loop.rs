@@ -3,12 +3,40 @@
 
 use std::sync::Arc;
 
+use futures::StreamExt;
 use tauri::{Emitter, State};
 
+use crate::ai::openai::{ToolStreamEvent, ToolTurn};
 use crate::ai::session::SessionSlot;
+use crate::ai::tools::ToolDef;
 use crate::ai::{AiError, AiProvider, ChatMessage, ChatRole};
 
 use super::chat::{ChunkEvent, DoneEvent};
+
+/// One non-streaming round-trip with bounded auto-retry for transient errors.
+/// Used directly when a provider doesn't stream tool turns, and as the safe
+/// fallback when a stream fails before emitting any content.
+async fn complete_once_with_retry(
+    provider: &Arc<dyn AiProvider>,
+    history: &[ChatMessage],
+    tools: &[ToolDef],
+) -> Result<ToolTurn, AiError> {
+    const MAX_RETRIES: u32 = 3;
+    const BACKOFF_MS: [u64; 3] = [800, 2_000, 5_000];
+    let mut attempt = 0u32;
+    loop {
+        match provider.complete_once(history, Some(tools)).await {
+            Ok(t) => return Ok(t),
+            Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
+                let wait = BACKOFF_MS[attempt as usize];
+                attempt += 1;
+                crate::log_chat!("error", "{} (retry {attempt}/{MAX_RETRIES} after {wait}ms)", e);
+                tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 
 /// Whether a provider error is worth auto-retrying. Transient infrastructure
 /// failures (timeouts, upstream 5xx, rate limits) usually succeed on a retry;
@@ -110,36 +138,86 @@ pub(super) async fn run_tool_loop(
             )
         };
 
-        // A transient blip to the provider shouldn't kill the whole turn.
-        // Auto-retry retryable errors (network timeout, upstream 5xx, rate
-        // limit) a few times with exponential backoff. Non-retryable errors
-        // (auth, invalid model, context-too-long, canceled) fail fast — they
-        // need user action and retrying just wastes time.
-        let turn = {
-            const MAX_RETRIES: u32 = 3;
-            const BACKOFF_MS: [u64; 3] = [800, 2_000, 5_000];
-            let mut attempt = 0u32;
-            loop {
-                match provider.complete_once(&history, Some(&tools_catalog)).await {
-                    Ok(t) => break t,
-                    Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
-                        let wait = BACKOFF_MS[attempt as usize];
-                        attempt += 1;
-                        crate::log_chat!(
-                            "error",
-                            "{} (retry {attempt}/{MAX_RETRIES} after {wait}ms)",
-                            e
-                        );
-                        tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
-                        continue;
+        // Acquire the next turn. Prefer streaming so the user sees tokens live;
+        // fall back to a non-streaming round-trip (with retry) when the provider
+        // doesn't stream tool turns or the stream fails before emitting anything.
+        // A transient blip shouldn't kill the whole turn — `complete_once_with_retry`
+        // backs off and retries retryable errors (timeouts, 5xx, rate limit);
+        // non-retryable errors (auth, bad model, cancel) fail fast.
+        //
+        // `streamed` tracks whether content reached the UI as deltas, so the
+        // final-answer block below doesn't re-emit it as a duplicate chunk.
+        let mut streamed = false;
+        let turn = match provider
+            .complete_once_stream(&history, Some(&tools_catalog))
+            .await
+        {
+            Ok(Some(mut stream)) => {
+                let mut done_turn: Option<ToolTurn> = None;
+                let mut emitted = false;
+                let mut stream_err: Option<AiError> = None;
+                while let Some(item) = stream.next().await {
+                    match item {
+                        Ok(ToolStreamEvent::Delta(delta)) => {
+                            if !delta.is_empty() {
+                                emitted = true;
+                                let _ = app.emit(
+                                    "ai://chat/chunk",
+                                    ChunkEvent {
+                                        request_id: request_id.clone(),
+                                        delta,
+                                    },
+                                );
+                            }
+                        }
+                        Ok(ToolStreamEvent::Done(t)) => done_turn = Some(t),
+                        Err(e) => {
+                            stream_err = Some(e);
+                            break;
+                        }
                     }
-                    Err(e) => return Err(e),
                 }
+                // A stream is only trustworthy if it produced a real turn:
+                // some content, or a tool call. A `Done` with nothing AND no
+                // deltas means the endpoint accepted `stream:true` but returned
+                // an empty/non-SSE body (some "OpenAI-compatible" proxies do
+                // this) — treat it like an unsupported stream and fall back.
+                let usable = done_turn.as_ref().is_some_and(|t| {
+                    emitted || !t.content.is_empty() || !t.tool_calls.is_empty()
+                });
+                if usable {
+                    streamed = true;
+                    done_turn.expect("usable implies Some")
+                } else {
+                    if let Some(e) = &stream_err {
+                        crate::log_chat!("error", "stream failed ({e}); falling back to non-streaming");
+                    } else {
+                        crate::log_chat!("error", "stream produced no usable output; falling back to non-streaming");
+                    }
+                    // Safe regardless of any partial deltas already shown: the
+                    // frontend reconciles the bubble to `done.content` (and
+                    // finalizes cleanly on error), so a transient partial never
+                    // persists. Falling back keeps a flaky/incompatible stream
+                    // from failing a turn the non-streaming path can complete.
+                    complete_once_with_retry(&provider, &history, &tools_catalog).await?
+                }
+            }
+            // Provider doesn't stream tool turns → non-streaming with retry.
+            Ok(None) => complete_once_with_retry(&provider, &history, &tools_catalog).await?,
+            // Pre-stream failure (auth/HTTP/etc.) → degrade to the non-streaming
+            // path, which applies retry for transient errors and surfaces the
+            // rest unchanged.
+            Err(e) => {
+                crate::log_chat!("error", "stream setup failed, falling back to non-streaming: {e}");
+                complete_once_with_retry(&provider, &history, &tools_catalog).await?
             }
         };
 
         if turn.tool_calls.is_empty() {
-            // Final answer. Commit + emit as one chunk + done.
+            // Final answer. Commit + emit done. If we streamed the content as
+            // deltas already, skip the one-shot chunk (the frontend reconciles
+            // the bubble to `done.content` regardless); otherwise emit it as a
+            // single chunk so the non-streaming path still renders.
             let content = turn.content.clone();
             crate::log_chat!("assistant", "{}", content);
             {
@@ -150,13 +228,15 @@ pub(super) async fn run_tool_loop(
                         .push(ChatMessage::text(ChatRole::Assistant, content.clone()));
                 }
             }
-            let _ = app.emit(
-                "ai://chat/chunk",
-                ChunkEvent {
-                    request_id: request_id.clone(),
-                    delta: content.clone(),
-                },
-            );
+            if !streamed {
+                let _ = app.emit(
+                    "ai://chat/chunk",
+                    ChunkEvent {
+                        request_id: request_id.clone(),
+                        delta: content.clone(),
+                    },
+                );
+            }
             let _ = app.emit(
                 "ai://chat/done",
                 DoneEvent {
@@ -287,9 +367,11 @@ pub(super) async fn run_tool_loop(
             // let a weak model see that nudge a few times and course-correct
             // before killing the whole turn. Cap of 3 was too tight: a model
             // that re-listed schemas twice after a good result had its entire
-            // request (e.g. "analyze this db and make dummy data") aborted. 6
-            // gives ~4 dedup nudges to recover while still bounding the loop.
-            const SHAPE_REPEAT_CAP: u32 = 6;
+            // request (e.g. "analyze this db and make dummy data") aborted. 10
+            // gives ~8 dedup nudges to recover while still bounding the loop —
+            // the dedup short-circuit makes each repeat cheap (no DB round-trip),
+            // so a higher cap costs tokens but not latency.
+            const SHAPE_REPEAT_CAP: u32 = 10;
             // The SAME `call_query` with byte-identical args returns the same
             // rows every time — re-issuing it is never progress. Weak models do
             // this dozens of times; with the old budget of 50 the upstream HTTP

@@ -367,6 +367,10 @@ export default function WorkspaceView({
     const unlistenCloseTab = listen<void>("menu-file-close_tab", () => {
       menuCtxRef.current.closeActiveTab();
     });
+    // AI → AI Chat (⌘⇧A) opens the chat panel.
+    const unlistenAiChat = listen<void>("menu-ai-chat", () => {
+      setChatOpen(true);
+    });
     const unlistenConnectionPicker = listen<void>(
       "menu-connection-picker",
       () => {
@@ -434,6 +438,7 @@ export default function WorkspaceView({
       void unlistenImport.then((fn) => fn());
       void unlistenExport.then((fn) => fn());
       void unlistenCloseTab.then((fn) => fn());
+      void unlistenAiChat.then((fn) => fn());
       void unlistenConnectionPicker.then((fn) => fn());
       void unlistenConnectionNew.then((fn) => fn());
       void unlistenConnectionTransfer.then((fn) => fn());

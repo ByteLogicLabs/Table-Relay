@@ -58,6 +58,10 @@ export interface ConnectionChat {
 
 interface AiState {
   status: SessionStatus;
+  /** True while a model/provider swap is mid-flight (end → start). The session
+   *  briefly goes `inactive` during teardown; this flag lets the panel keep the
+   *  active chat view rendered instead of flickering to the StartScreen. */
+  swapping?: boolean;
   providerKind?: AiProviderKind;
   model?: string;
   /** Most recent top-level (non-chat) error string — e.g. start-up
@@ -482,6 +486,12 @@ export async function syncStatus() {
   await ensureWired();
 }
 
+/** Mark a swap (model/provider) in progress so the panel keeps the active view
+ *  rendered across the brief `inactive` window between `end()` and `start()`. */
+export function setSwapping(v: boolean) {
+  mutate(s => ({ ...s, swapping: v }));
+}
+
 export async function start(input: StartInput) {
   await ensureWired();
   mutate(s => ({ ...s, status: 'starting', lastError: undefined }));
@@ -507,6 +517,17 @@ export async function start(input: StartInput) {
       providerKind: status.providerKind,
       model: status.model,
     }));
+    // If the focused connection already has an open conversation, re-bind it to
+    // the (possibly new) provider/model so resuming it later continues with what
+    // the user is actually using now — not the model it was created with. No-op
+    // for a fresh session (no conversation yet) or a resume (same value).
+    const convId =
+      state.byConnection[state.focusedConnectionId ?? GLOBAL_KEY]?.conversationId;
+    if (convId) {
+      void ai
+        .conversationSetModel(convId, status.providerKind, status.model)
+        .catch(() => {});
+    }
   } catch (e) {
     mutate(s => ({ ...s, status: 'inactive', lastError: errMsg(e) }));
     throw e;
@@ -657,6 +678,12 @@ export async function listConversations(limit?: number) {
 /** Delete a saved conversation. */
 export async function deleteConversation(id: string) {
   return ai.conversationDelete(id);
+}
+
+/** Delete every saved conversation (and its messages). Does not touch the live
+ *  in-memory session; the next message just starts a fresh conversation. */
+export async function deleteAllConversations() {
+  return ai.conversationDeleteAll();
 }
 
 export async function end(opts?: { awaitBackend?: boolean; keepTranscript?: boolean }) {

@@ -11,12 +11,14 @@ export type AiProviderKind =
   | 'claude_cli'
   | 'codex_cli'
   | 'gemini_cli'
-  | 'opencode';
+  | 'opencode'
+  | 'kilo'
+  | 'antigravity';
 
 /** The subprocess-CLI providers — authenticated via the installed binary, not
  *  an API key, and never represented by a saved credential profile. */
 export const CLI_PROVIDER_KINDS: readonly AiProviderKind[] = [
-  'claude_cli', 'codex_cli', 'gemini_cli', 'opencode',
+  'claude_cli', 'codex_cli', 'gemini_cli', 'opencode', 'kilo', 'antigravity',
 ];
 
 export function isCliProviderKind(kind: string | undefined): kind is AiProviderKind {
@@ -619,8 +621,17 @@ export const ai = {
   conversationDelete: (id: string) =>
     invoke<void>('ai_conversation_delete', { id }),
 
+  /** Delete every saved conversation (and its messages). */
+  conversationDeleteAll: () =>
+    invoke<void>('ai_conversation_delete_all'),
+
   conversationUpdateTitle: (id: string, title: string) =>
     invoke<void>('ai_conversation_update_title', { id, title }),
+
+  /** Re-bind a conversation to a provider/model — used when the user swaps
+   *  model mid-conversation so resuming it later continues with that model. */
+  conversationSetModel: (id: string, providerKind?: string, model?: string) =>
+    invoke<void>('ai_conversation_set_model', { id, providerKind, model }),
 
   conversationSaveMessage: (
     conversationId: string,

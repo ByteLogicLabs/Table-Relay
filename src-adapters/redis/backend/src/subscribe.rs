@@ -11,7 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use adapter_api::log_line;
 use adapter_api::{AdapterError, SubscribeEvent, SubscribeRequest, SubscriptionHandle};
 use futures::StreamExt;
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::redis::map_err;
@@ -89,9 +89,10 @@ pub(crate) async fn subscribe(
 }
 
 fn decode_payload(bytes: &[u8]) -> JsonValue {
-    match std::str::from_utf8(bytes) {
-        Ok(s) => JsonValue::String(s.to_string()),
-        Err(_) => json!({ "__binary__": true, "bytes": bytes.len() }),
+    if adapter_api::looks_binary(bytes) {
+        JsonValue::String(adapter_api::bytes_to_hex_upper(bytes))
+    } else {
+        JsonValue::String(String::from_utf8_lossy(bytes).into_owned())
     }
 }
 
