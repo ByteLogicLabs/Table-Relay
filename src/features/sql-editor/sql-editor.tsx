@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, FileDown, FileUp, Download } from 'lucide-react';
+import { Play, FastForward, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, WandSparkles } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -54,6 +54,7 @@ import { lintSql } from './sql-lint';
 import { pageableSelect, buildPagedSql } from './query-paging';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { copyText } from '../../lib/clipboard';
+import { listen } from '@tauri-apps/api/event';
 
 interface LogQueryOptions {
   source?: 'editor' | 'grid' | 'system';
@@ -64,6 +65,12 @@ interface LogQueryOptions {
 
 interface SqlEditorProps {
   tabId?: string;
+  /**
+   * Whether this tab is the visible/active one. Query tabs stay mounted while
+   * hidden, so window-level shortcuts (Save/Load) gate on this to avoid every
+   * mounted editor reacting to the same keypress.
+   */
+  isActive?: boolean;
   initialQuery?: string;
   connection: ConnectionProfile;
   /**
@@ -79,7 +86,7 @@ interface SqlEditorProps {
   onQueryChange?: (query: string) => void;
 }
 
-export default function SqlEditor({ tabId, initialQuery = '', connection, defaultSchema, onLogQuery, onQueryChange }: SqlEditorProps) {
+export default function SqlEditor({ tabId, isActive = true, initialQuery = '', connection, defaultSchema, onLogQuery, onQueryChange }: SqlEditorProps) {
   const settings = useSettings();
   const effectiveSchema = defaultSchema ?? connection.database ?? undefined;
   const manifests = useAdapterManifests();
@@ -127,6 +134,9 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   // before typing. A Monaco content-widget placeholder below renders the
   // scaffold text as a hint when the buffer is empty.
   const [query, setQuery] = useState(initialQuery ?? '');
+  // Path of the file this buffer is bound to (set on Save As or Load). Cmd+S
+  // writes back here silently; with none set it falls back to a Save As dialog.
+  const [savedFilePath, setSavedFilePath] = useState<string | null>(null);
 
   // Persist query edits to the owning tab on a short debounce so we don't
   // thrash localStorage on every keystroke. The ref pattern keeps the latest
@@ -220,6 +230,12 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   const handleRunRef = useRef<() => void>(() => {});
   // Same ref pattern for the run-all command (Cmd/Ctrl+Shift+Enter).
   const handleRunAllRef = useRef<() => void>(() => {});
+  // Same ref pattern for Save (Cmd/Ctrl+S) and Load (Cmd/Ctrl+I) the query
+  // buffer to/from a file. Kept fresh below so the mount-time commands always
+  // see the current handlers and editor state.
+  const handleSaveQueryRef = useRef<() => void>(() => {});
+  const handleSaveAsQueryRef = useRef<() => void>(() => {});
+  const handleLoadQueryRef = useRef<() => void>(() => {});
   // Direct handle to the Monaco editor instance. Needed so external writes
   // (`write_query_tab` from the AI) can update the buffer in place without
   // a full remount — remounting caused a visible flicker and dropped
@@ -235,6 +251,8 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyMod.Shift | monaco.KeyCode.Enter, () => {
       void handleRunAllRef.current();
     });
+    // Save (Cmd/Ctrl+S) and Load (Cmd/Ctrl+I) are handled by a window-level
+    // capture listener below so they also work when focus is outside Monaco.
   };
 
   // Ensure schema metadata is present for autocomplete in query tabs too, not
@@ -856,28 +874,35 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
   handleRunRef.current = () => { handleRunCurrent(); };
   handleRunAllRef.current = () => { void handleRun(); };
 
-  // Export the current editor buffer to a .sql file on disk. Mongo's editor
-  // holds JS-shaped queries, so we offer a .js default there. The native save
-  // dialog lets the user pick the location/name.
-  const handleExportQuery = async () => {
+  // Save the editor buffer to a file. Mongo's editor holds JS-shaped queries,
+  // so we offer a .js default there.
+  //   - Save (Cmd/Ctrl+S): writes back to the bound file silently. With no file
+  //     bound yet (never saved/loaded), it behaves like Save As.
+  //   - Save As (Cmd/Ctrl+Shift+S): always prompts for a location, then binds
+  //     the buffer to the chosen file.
+  const handleExportQuery = async (saveAs = false) => {
     const body = query;
     if (!body.trim()) {
-      toast.error('Nothing to export — the editor is empty');
+      toast.error('Nothing to save — the editor is empty');
       return;
     }
     try {
-      const ext = isDocumentStore ? 'js' : 'sql';
-      const path = await saveDialog({
-        defaultPath: `query.${ext}`,
-        filters: isDocumentStore
-          ? [{ name: 'JavaScript', extensions: ['js'] }, { name: 'All files', extensions: ['*'] }]
-          : [{ name: 'SQL', extensions: ['sql'] }, { name: 'All files', extensions: ['*'] }],
-      });
-      if (!path) return; // user cancelled
+      let path = savedFilePath;
+      if (saveAs || !path) {
+        const ext = isDocumentStore ? 'js' : 'sql';
+        path = await saveDialog({
+          defaultPath: savedFilePath ?? `query.${ext}`,
+          filters: isDocumentStore
+            ? [{ name: 'JavaScript', extensions: ['js'] }, { name: 'All files', extensions: ['*'] }]
+            : [{ name: 'SQL', extensions: ['sql'] }, { name: 'All files', extensions: ['*'] }],
+        });
+        if (!path) return; // user cancelled
+        setSavedFilePath(path);
+      }
       await writeTextFile(path, body);
-      toast.success('Query exported');
+      toast.success('Query saved');
     } catch (err) {
-      toast.error(`Export failed: ${err instanceof Error ? err.message : String(err)}`);
+      toast.error(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -897,7 +922,8 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
       const editor = editorRef.current;
       const model = editor?.getModel();
       const current = model?.getValue() ?? query;
-      const next = current.trim() ? `${current.replace(/\s*$/, '')}\n\n${text}` : text;
+      const wasEmpty = !current.trim();
+      const next = wasEmpty ? text : `${current.replace(/\s*$/, '')}\n\n${text}`;
       if (editor && model) {
         // executeEdits keeps the undo stack intact (vs setValue which wipes it).
         editor.executeEdits('import-query', [
@@ -905,11 +931,36 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
         ]);
       }
       setQuery(next);
-      toast.success('Query imported');
+      // Bind the buffer to the loaded file only when it replaced an empty editor
+      // — so Cmd+S writes back to it. If we appended to existing content, the
+      // buffer is a mix and shouldn't silently overwrite the source file.
+      setSavedFilePath(wasEmpty ? picked : null);
+      toast.success('Query loaded');
     } catch (err) {
-      toast.error(`Import failed: ${err instanceof Error ? err.message : String(err)}`);
+      toast.error(`Load failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
+  // Keep the mount-time shortcut commands pointed at the current handlers.
+  handleSaveQueryRef.current = () => void handleExportQuery(false);
+  handleSaveAsQueryRef.current = () => void handleExportQuery(true);
+  handleLoadQueryRef.current = () => void handleImportQuery();
+
+  // Save (⌘S), Save As (⌘⇧S) and Load (⌘I) are driven by the native File-menu
+  // accelerators, which emit the events below. The menu items are only visible
+  // while a query tab is active (see tabs-shell), so the accelerators don't
+  // fire on other tabs — that also leaves ⌘S free for the data grid's commit.
+  // Gated on `isActive` so only the visible query tab acts on the event.
+  useEffect(() => {
+    if (!isActive) return;
+    const unlistens = [
+      listen<void>('menu-file-load_query', () => handleLoadQueryRef.current()),
+      listen<void>('menu-file-save_query', () => handleSaveQueryRef.current()),
+      listen<void>('menu-file-save_query_as', () => handleSaveAsQueryRef.current()),
+    ];
+    return () => {
+      for (const u of unlistens) void u.then((fn) => fn());
+    };
+  }, [isActive]);
 
   // Export the ACTIVE result (the currently-shown Execution tab) to a file in
   // the chosen format. The result is already in memory, so we serialize the
@@ -990,41 +1041,29 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
           Run Current
           <kbd className="inline-flex h-4 items-center rounded border border-white/30 bg-white/15 px-1 text-[10px] font-medium font-sans">{RUN_SHORTCUT}</kbd>
         </Button>
-        <Button variant="outline" size="sm" onClick={() => { void handleRun(); }} disabled={isExecuting} title="Run all statements in the editor">
+        <Button variant="outline" size="sm" onClick={() => { void handleRun(); }} disabled={isExecuting} className="border-emerald-600/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-700 dark:hover:text-emerald-300" title="Run all statements in the editor">
           <FastForward className="w-3.5 h-3.5" />
           Run All
-          <kbd className="inline-flex h-4 items-center rounded border border-border bg-muted px-1 text-[10px] font-medium font-sans">{RUN_ALL_SHORTCUT}</kbd>
+          <kbd className="inline-flex h-4 items-center rounded border border-current/30 bg-current/10 px-1 text-[10px] font-medium font-sans">{RUN_ALL_SHORTCUT}</kbd>
         </Button>
         <div className="w-px h-4 bg-border mx-1" />
-        <Button variant="ghost" size="sm" onClick={handleFormat}>
-          <AlignLeft className="w-4 h-4 mr-2" />
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleFormat}
+          className="text-violet-600 dark:text-violet-400 hover:bg-violet-500/10 hover:text-violet-600 dark:hover:text-violet-300"
+          title="Format / beautify the editor contents"
+        >
+          <WandSparkles className="w-3.5 h-3.5" />
           {isDocumentStore ? 'Format JSON' : 'Format SQL'}
         </Button>
-        <div className="w-px h-4 bg-border mx-1" />
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => void handleImportQuery()}
-          title="Import a query from a file"
-        >
-          <FileUp className="w-4 h-4 mr-2" />
-          Import
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => void handleExportQuery()}
-          disabled={!query.trim()}
-          title="Export the current query to a file"
-        >
-          <FileDown className="w-4 h-4 mr-2" />
-          Export
-        </Button>
+        {/* Load / Save / Save As live in the native File menu (and ⌘I / ⌘S /
+            ⌘⇧S shortcuts) rather than the toolbar. */}
         <div className="ml-auto" />
         <Button
-          variant="ghost"
           size="sm"
           title="Ask AI"
+          className="bg-linear-to-r from-violet-600 to-fuchsia-600 text-white hover:from-violet-500 hover:to-fuchsia-500 border-0"
           onClick={() => {
             const trimmed = query.trim();
             // If the editor has content, ask AI to explain it; otherwise
@@ -1036,7 +1075,7 @@ export default function SqlEditor({ tabId, initialQuery = '', connection, defaul
             }
           }}
         >
-          <Sparkles className="w-4 h-4 mr-2 text-primary" />
+          <Sparkles className="w-4 h-4" />
           AI
         </Button>
       </div>
