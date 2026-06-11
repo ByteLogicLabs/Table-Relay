@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
+import { invoke } from '@tauri-apps/api/core';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
 import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Zap, Radio, Loader2 } from 'lucide-react';
 import { copyText } from '../../lib/clipboard';
@@ -88,6 +89,21 @@ export default function TabsShell({
         ?? undefined)
     : undefined;
   
+  // Show the query File-menu items (Load / Save / Save Query As) only while a
+  // query tab is active. They're inserted/removed from the native File menu and
+  // hiding them frees ⌘S for the data grid's commit shortcut on other tabs.
+  const isQueryTabActive = activeTab?.type === 'query';
+  useEffect(() => {
+    void invoke('set_query_menu_visible', { visible: isQueryTabActive }).catch(() => {
+      /* best-effort menu state */
+    });
+    // Hide on unmount (e.g. back to the home screen, where TabsShell isn't
+    // rendered) so the items don't linger when no query tab can be open.
+    return () => {
+      void invoke('set_query_menu_visible', { visible: false }).catch(() => {});
+    };
+  }, [isQueryTabActive]);
+
   // Scroll the active tab into view whenever it changes. Matters when a new
   // tab is appended beyond the visible range — without this, the selection
   // moves off-screen and feels broken.
@@ -425,6 +441,7 @@ export default function TabsShell({
               <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
                 <SqlEditor
                   tabId={tab.id}
+                  isActive={isActive}
                   initialQuery={tab.query}
                   connection={tabConnection}
                   defaultSchema={tabSchema}

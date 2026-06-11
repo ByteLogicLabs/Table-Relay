@@ -7,7 +7,9 @@ mod store;
 
 use std::sync::Arc;
 
-use tauri::menu::{MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem, SubmenuBuilder};
+use tauri::menu::{
+    IsMenuItem, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder,
+};
 use tauri::{Emitter, Manager, Wry};
 use tokio::sync::RwLock;
 
@@ -18,6 +20,20 @@ use tokio::sync::RwLock;
 /// open they would only ever toast an error — better to disable them outright.
 struct ConnectionMenuItems {
     items: Vec<MenuItem<Wry>>,
+}
+
+/// File-menu items that act on the query editor (Load / Save / Save Query As),
+/// plus the separator that follows them. Shown only while a query tab is active.
+/// Tauri 2 has no `set_visible`, so we genuinely insert/remove the items from
+/// the File submenu instead — removing them also deactivates their ⌘S/⌘⇧S/⌘I
+/// accelerators, freeing ⌘S for the data grid's "commit edits" on other tabs.
+/// The frontend toggles this via `set_query_menu_visible`.
+struct QueryMenuItems {
+    file_menu: Submenu<Wry>,
+    items: Vec<MenuItem<Wry>>,
+    separator: PredefinedMenuItem<Wry>,
+    /// Tracks current state so repeated toggles don't double-insert / error.
+    shown: std::sync::Mutex<bool>,
 }
 
 use crate::ai::download::DownloadRegistry;
@@ -102,11 +118,26 @@ pub fn run() {
             // routing failures in practice — we keep the separator
             // between "namespace" and "action" as an underscore and
             // parse it back in `on_menu_event`.
-            let import_sql = MenuItemBuilder::with_id("file_import", "Import…")
+            let import_sql = MenuItemBuilder::with_id("file_import", "Import Data…")
                 .accelerator("CmdOrCtrl+Shift+I")
                 .build(handle)?;
-            let export_data = MenuItemBuilder::with_id("file_export", "Export…")
+            let export_data = MenuItemBuilder::with_id("file_export", "Export Data…")
                 .accelerator("CmdOrCtrl+Shift+E")
+                .build(handle)?;
+            // Query-buffer file actions. These carry real accelerators so they
+            // render natively (right-aligned shortcut column). ⌘S is shared with
+            // the data grid's commit: the webview routes `menu-file-save_query`
+            // context-aware — a query tab saves to file, a data-grid tab commits
+            // pending edits. ⌘I is bound here (load query) and is distinct from
+            // ⌘⇧I (Import Data, below).
+            let load_query = MenuItemBuilder::with_id("file_load_query", "Load Query…")
+                .accelerator("CmdOrCtrl+I")
+                .build(handle)?;
+            let save_query = MenuItemBuilder::with_id("file_save_query", "Save Query")
+                .accelerator("CmdOrCtrl+S")
+                .build(handle)?;
+            let save_query_as = MenuItemBuilder::with_id("file_save_query_as", "Save Query As…")
+                .accelerator("CmdOrCtrl+Shift+S")
                 .build(handle)?;
             // "Close Tab" menu entry. We deliberately DON'T bind it to
             // `CmdOrCtrl+W` here: the webview already owns ⌘W via a guarded
@@ -118,6 +149,10 @@ pub fn run() {
             // emitted `menu-file-close_tab` event as a no-accelerator fallback.
             let close_tab = MenuItemBuilder::with_id("file_close_tab", "Close Tab")
                 .build(handle)?;
+            // The query items + their separator are NOT added here — they start
+            // hidden and are inserted at the top of this submenu only while a
+            // query tab is active (see `set_query_menu_visible`).
+            let query_menu_separator = PredefinedMenuItem::separator(handle)?;
             let mut file_builder = SubmenuBuilder::new(handle, "File")
                 .item(&import_sql)
                 .item(&export_data)
@@ -257,6 +292,17 @@ pub fn run() {
             }
             app.manage(connection_menu_items);
 
+            // Query file actions start hidden — no query tab is open at launch.
+            // They were intentionally left out of the File submenu above; the
+            // frontend inserts them (via `set_query_menu_visible`) only while a
+            // query tab is active, which also gates their ⌘S/⌘⇧S/⌘I accelerators.
+            app.manage(QueryMenuItems {
+                file_menu: file_menu.clone(),
+                items: vec![load_query, save_query, save_query_as],
+                separator: query_menu_separator,
+                shown: std::sync::Mutex::new(false),
+            });
+
             // Route menu item clicks to the webview via Tauri events.
             // Frontend listens for `menu-file-import` / `menu-file-export`.
             // We log every menu event so a silent miss (e.g. a typo in
@@ -293,6 +339,8 @@ pub fn run() {
             crate::log::frontend_log,
             // Native-menu state: grey out connection-dependent items at home.
             set_connection_menu_enabled,
+            // Native-menu state: show query file actions only on query tabs.
+            set_query_menu_visible,
             // Security / encrypted app store
             commands::security::security_status,
             commands::security::security_remove_backup,
@@ -409,6 +457,49 @@ fn set_connection_menu_enabled(
     for item in &items.items {
         item.set_enabled(enabled).map_err(|e| e.to_string())?;
     }
+    Ok(())
+}
+
+/// Show or hide the query-editor File-menu items (Load Query / Save Query / Save
+/// Query As) plus their trailing separator. The frontend calls this with `true`
+/// when a query tab becomes active and `false` otherwise. We insert/remove the
+/// items rather than disable them (Tauri 2 has no `set_visible`), so they truly
+/// appear/disappear — and removing them deactivates their ⌘S/⌘⇧S/⌘I
+/// accelerators, freeing ⌘S for the data grid's commit shortcut on other tabs.
+#[tauri::command]
+fn set_query_menu_visible(
+    visible: bool,
+    state: tauri::State<'_, QueryMenuItems>,
+) -> Result<(), String> {
+    let mut shown = state.shown.lock().map_err(|e| e.to_string())?;
+    if *shown == visible {
+        return Ok(()); // already in the requested state — nothing to do
+    }
+    if visible {
+        // Insert at the top of the File submenu: items 0..n, then a separator.
+        for (i, item) in state.items.iter().enumerate() {
+            state
+                .file_menu
+                .insert(item as &dyn IsMenuItem<Wry>, i)
+                .map_err(|e| e.to_string())?;
+        }
+        state
+            .file_menu
+            .insert(&state.separator as &dyn IsMenuItem<Wry>, state.items.len())
+            .map_err(|e| e.to_string())?;
+    } else {
+        for item in &state.items {
+            state
+                .file_menu
+                .remove(item as &dyn IsMenuItem<Wry>)
+                .map_err(|e| e.to_string())?;
+        }
+        state
+            .file_menu
+            .remove(&state.separator as &dyn IsMenuItem<Wry>)
+            .map_err(|e| e.to_string())?;
+    }
+    *shown = visible;
     Ok(())
 }
 

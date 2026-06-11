@@ -59,6 +59,9 @@ export const IS_MAC = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test
 export const MOD_KEY = IS_MAC ? '⌘' : 'Ctrl';
 export const RUN_SHORTCUT = `${MOD_KEY}↵`;
 export const RUN_ALL_SHORTCUT = IS_MAC ? '⌘⇧↵' : 'Ctrl+Shift+↵';
+export const SAVE_SHORTCUT = IS_MAC ? '⌘S' : 'Ctrl+S';
+export const SAVE_AS_SHORTCUT = IS_MAC ? '⌘⇧S' : 'Ctrl+Shift+S';
+export const LOAD_SHORTCUT = IS_MAC ? '⌘I' : 'Ctrl+I';
 
 /** Split a multi-statement SQL string on `;` respecting quotes and comments. */
 export function splitSqlStatements(sql: string): string[] {

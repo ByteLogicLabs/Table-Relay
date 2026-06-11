@@ -1191,6 +1191,10 @@ export default function DataGrid({
   // the user is typing in an input or editing a cell.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // Only the visible grid reacts — grids on inactive tabs stay mounted and
+      // would otherwise all fire on the same keypress (and now ⌘S would clash
+      // with the active query tab's Save).
+      if (!isActive) return;
       const target = e.target as HTMLElement | null;
       const tag = target?.tagName;
       const inEditable =
@@ -1248,6 +1252,7 @@ export default function DataGrid({
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    isActive,
     selectedRows,
     viewMode,
     structure,
