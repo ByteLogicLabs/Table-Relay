@@ -21,6 +21,17 @@ export default defineConfig(({mode}) => {
       },
     },
     clearScreen: false,
+    build: {
+      // No production sourcemaps: a packaged desktop app never ships them, and
+      // generating them is a major memory consumer during `vite build` (the
+      // build was OOMing on CI's default ~2 GB Node heap). Keeping them off plus
+      // the raised heap in the `build` script keeps CI builds reliable.
+      sourcemap: false,
+      // Monaco alone pushes the main bundle past 5 MB, so the default 500 kB
+      // warning is just noise here. Split further with manualChunks if startup
+      // size becomes a concern.
+      chunkSizeWarningLimit: 6000,
+    },
     server: {
       port: 1420,
       strictPort: true,
