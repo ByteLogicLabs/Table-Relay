@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, FastForward, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, WandSparkles } from 'lucide-react';
+import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -1047,23 +1047,17 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
           <kbd className="inline-flex h-4 items-center rounded border border-current/30 bg-current/10 px-1 text-[10px] font-medium font-sans">{RUN_ALL_SHORTCUT}</kbd>
         </Button>
         <div className="w-px h-4 bg-border mx-1" />
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={handleFormat}
-          className="text-violet-600 dark:text-violet-400 hover:bg-violet-500/10 hover:text-violet-600 dark:hover:text-violet-300"
-          title="Format / beautify the editor contents"
-        >
-          <WandSparkles className="w-3.5 h-3.5" />
+        <Button variant="ghost" size="sm" onClick={handleFormat}>
+          <AlignLeft className="w-4 h-4 mr-2" />
           {isDocumentStore ? 'Format JSON' : 'Format SQL'}
         </Button>
         {/* Load / Save / Save As live in the native File menu (and ⌘I / ⌘S /
             ⌘⇧S shortcuts) rather than the toolbar. */}
         <div className="ml-auto" />
         <Button
+          variant="ghost"
           size="sm"
           title="Ask AI"
-          className="bg-linear-to-r from-violet-600 to-fuchsia-600 text-white hover:from-violet-500 hover:to-fuchsia-500 border-0"
           onClick={() => {
             const trimmed = query.trim();
             // If the editor has content, ask AI to explain it; otherwise
@@ -1075,7 +1069,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             }
           }}
         >
-          <Sparkles className="w-4 h-4" />
+          <Sparkles className="w-4 h-4 mr-2 text-primary" />
           AI
         </Button>
       </div>
