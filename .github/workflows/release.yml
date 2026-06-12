@@ -194,11 +194,6 @@ jobs:
             echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # Source-of-truth cask lives in this repo so the published file matches it.
-      - name: Checkout app repo
-        if: steps.gate.outputs.enabled == 'true'
-        uses: actions/checkout@v4
-
       # Manual clone (not actions/checkout) so a brand-new EMPTY tap repo doesn't
       # fail on a missing default branch; bootstrap `main` if needed.
       - name: Checkout tap repo
@@ -217,12 +212,56 @@ jobs:
             git checkout -b main
           fi
 
-      - name: Copy cask into tap
+      # Generate the cask inline (printf, no heredoc so YAML indentation can't
+      # corrupt it). Self-contained: does not depend on a cask file existing in
+      # this repo. This is the static `version :latest` cask that resolves the
+      # newest release via GitHub's /releases/latest/download/ redirect.
+      - name: Generate cask
         if: steps.gate.outputs.enabled == 'true'
         run: |
           set -euo pipefail
           mkdir -p tap/Casks
-          cp homebrew-tap/Casks/table-relay.rb tap/Casks/table-relay.rb
+          printf '%s\n' \
+            "cask \"table-relay\" do" \
+            "  version :latest" \
+            "  sha256 :no_check" \
+            "" \
+            "  on_arm do" \
+            "    url \"https://github.com/ByteLogicLabs/Table-Relay/releases/latest/download/Table_Relay_aarch64.dmg\"," \
+            "        verified: \"github.com/ByteLogicLabs/Table-Relay/\"" \
+            "  end" \
+            "  on_intel do" \
+            "    url \"https://github.com/ByteLogicLabs/Table-Relay/releases/latest/download/Table_Relay_x86_64.dmg\"," \
+            "        verified: \"github.com/ByteLogicLabs/Table-Relay/\"" \
+            "  end" \
+            "" \
+            "  name \"Table Relay\"" \
+            "  desc \"Desktop database client (MySQL, PostgreSQL, SQLite, MongoDB, Redis)\"" \
+            "  homepage \"https://github.com/ByteLogicLabs/Table-Relay\"" \
+            "" \
+            "  livecheck do" \
+            "    url \"https://api.github.com/repos/ByteLogicLabs/Table-Relay/releases/latest\"" \
+            "    strategy :json do |json|" \
+            "      json[\"tag_name\"]&.sub(/^[^0-9]*/, \"\")" \
+            "    end" \
+            "  end" \
+            "" \
+            "  app \"Table Relay.app\"" \
+            "" \
+            "  postflight do" \
+            "    system_command \"/usr/bin/xattr\"," \
+            "                   args: [\"-dr\", \"com.apple.quarantine\", \"#{appdir}/Table Relay.app\"]," \
+            "                   sudo: false" \
+            "  end" \
+            "" \
+            "  zap trash: [" \
+            "    \"~/Library/Application Support/me.bytelogic.tablerelay\"," \
+            "    \"~/Library/Caches/me.bytelogic.tablerelay\"," \
+            "    \"~/Library/Preferences/me.bytelogic.tablerelay.plist\"," \
+            "    \"~/Library/Saved Application State/me.bytelogic.tablerelay.savedState\"," \
+            "  ]" \
+            "end" \
+            > tap/Casks/table-relay.rb
           echo "----- cask -----"
           cat tap/Casks/table-relay.rb
 
