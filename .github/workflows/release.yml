@@ -167,9 +167,9 @@ jobs:
           gh release upload "${{ github.event.release.tag_name }}" "$stable" --clobber
 
   # Homebrew: there is intentionally NO job here. The cask in the
-  # `tofikhidayatxyz/homebrew-tap` repo is self-maintaining — it auto-fetches the
-  # latest release from the GitHub API via a `livecheck` block and resolves the
-  # DMG URLs from the tag, so it never needs a per-release push (and no PAT). See
-  # `homebrew-tap/Casks/table-relay.rb` in this repo for the source of that cask.
-  # Just keep the DMG asset naming (`Table_Relay_<version>_{aarch64,x86_64}.dmg`)
-  # stable, which the macOS steps above already do.
+  # `ByteLogicLabs/homebrew-tap` repo is self-maintaining. It uses `version
+  # :latest` with `/releases/latest/download/` URLs, so install/reinstall/upgrade
+  # all fetch the newest release with no per-release push (and no PAT). It relies
+  # on the version-less DMG copies uploaded above
+  # (`Table_Relay_{aarch64,x86_64}.dmg`). See `homebrew-tap/Casks/table-relay.rb`
+  # in this repo for the source of that cask.

@@ -17,19 +17,27 @@ One app for **MySQL, PostgreSQL, SQLite, MongoDB, Redis**, built with [Tauri](ht
 ### macOS (Homebrew)
 
 ```bash
-brew install --cask tofikhidayatxyz/tap/table-relay
+brew install --cask ByteLogicLabs/tap/table-relay
 ```
 
-This taps `tofikhidayatxyz/homebrew-tap` and installs **Table Relay.app** into `/Applications`. The cask clears the Gatekeeper quarantine flag for you on install, so the app opens without the "damaged" warning that unsigned builds normally trigger.
+This taps `ByteLogicLabs/homebrew-tap` and installs **Table Relay.app** into `/Applications`. The cask clears the Gatekeeper quarantine flag for you on install, so the app opens without the "damaged" warning that unsigned builds normally trigger.
 
-To upgrade later:
+The cask always points at the newest release (it uses `version :latest` against the GitHub releases), so **install, reinstall, and upgrade all fetch the latest version** with no manual updates to the cask.
+
+**Upgrade to the latest:**
 
 ```bash
-brew update
-brew upgrade --cask table-relay
+brew update                          # refresh the tap
+brew upgrade --cask table-relay      # upgrade if a newer release exists
 ```
 
-To uninstall:
+If `brew upgrade` reports nothing to do but you want to force the newest build, reinstall (this always pulls the current latest):
+
+```bash
+brew reinstall --cask table-relay
+```
+
+**Uninstall:**
 
 ```bash
 brew uninstall --cask table-relay
@@ -37,11 +45,11 @@ brew uninstall --cask table-relay
 brew uninstall --zap --cask table-relay
 ```
 
-> The cask points at the same ad-hoc-signed (not notarized) `.dmg` attached to each GitHub release, and is published automatically by the release workflow.
+> The cask is a small self-maintaining file in [`ByteLogicLabs/homebrew-tap`](https://github.com/ByteLogicLabs/homebrew-tap); it resolves the latest GitHub release on its own, so no per-release publishing step is needed. Builds are ad-hoc signed but not notarized.
 
 ### Other platforms
 
-Download the installer for your OS from the [latest release](https://github.com/tofikhidayatxyz/Table-relay/releases/latest):
+Download the installer for your OS from the [latest release](https://github.com/ByteLogicLabs/Table-Relay/releases/latest):
 
 - **macOS** (without Homebrew): the `.dmg` (arm64 or x86_64). See [Installing a downloaded release](#installing-a-downloaded-release) for the one-time Gatekeeper step.
 - **Windows**: the `.msi` or `-setup.exe`.
@@ -103,6 +111,8 @@ The first Rust build compiles all five database adapters and can take several mi
 > **AI is optional and configured in-app, not via environment variables.** For a hosted provider, open **Settings > AI Providers**, add a credential, and activate it (keys are stored locally on your machine, see [Security](#security)). For a **local model** you need no key at all: pick **Local Llama**, download a GGUF model from the built-in catalog, and Table Relay runs it on-device via `llama.cpp` (install the open-source [`llama.cpp`](https://github.com/ggerganov/llama.cpp) `llama-server` CLI first, for example `brew install llama.cpp`). For a **CLI provider**, log in to your coding agent (Claude Code, Codex, Gemini CLI, opencode, Kilo, or Antigravity) in your terminal as usual; Table Relay only invokes the binary you already authenticated and bills under your own account. There is no required `.env` file to run the app.
 
 ### Installing a downloaded release
+
+This section is for **manual** downloads. If you installed via Homebrew (above), you can skip it: the cask clears the macOS quarantine flag for you.
 
 Release builds are **not code-signed or notarized**, so the OS will warn you the first time you open the app.
 
