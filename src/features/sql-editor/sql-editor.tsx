@@ -45,6 +45,7 @@ import {
   formatElapsed,
   RUN_SHORTCUT,
   RUN_ALL_SHORTCUT,
+  IS_MAC,
   statementAtCursor,
   stripCodeComments,
   EDITOR_FONT_FAMILY,
@@ -945,11 +946,21 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
   handleSaveAsQueryRef.current = () => void handleExportQuery(true);
   handleLoadQueryRef.current = () => void handleImportQuery();
 
-  // Save (⌘S), Save As (⌘⇧S) and Load (⌘I) are driven by the native File-menu
-  // accelerators, which emit the events below. The menu items are only visible
-  // while a query tab is active (see tabs-shell), so the accelerators don't
-  // fire on other tabs — that also leaves ⌘S free for the data grid's commit.
-  // Gated on `isActive` so only the visible query tab acts on the event.
+  // Save (⌘/Ctrl+S), Save As (⌘/Ctrl+⇧S) and Load (⌘/Ctrl+I) reach us two ways:
+  //
+  //  1. Native File-menu accelerators, which emit the `menu-file-*` events
+  //     below. This is the path that shows the shortcut in the OS menu.
+  //  2. A window-level keydown handler (below). This is REQUIRED on Windows:
+  //     the query menu items are inserted into the File menu dynamically (only
+  //     while a query tab is active), and on Windows accelerators for items
+  //     added after the menu is first set are not reliably registered, so the
+  //     native shortcut silently does nothing. The keydown handler makes the
+  //     shortcuts work identically on every platform.
+  //
+  // Both are gated on `isActive` so only the visible query tab reacts, and the
+  // keydown handler runs in the capture phase before Monaco/the browser. The
+  // data grid's own ⌘/Ctrl+S (commit) is likewise gated on its `isActive`, and
+  // only one tab is active at a time, so the two never fight over the key.
   useEffect(() => {
     if (!isActive) return;
     const unlistens = [
@@ -957,8 +968,27 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
       listen<void>('menu-file-save_query', () => handleSaveQueryRef.current()),
       listen<void>('menu-file-save_query_as', () => handleSaveAsQueryRef.current()),
     ];
+    // On macOS the native accelerator fires reliably AND the OS consumes the
+    // key, so a keydown fallback would double-fire (saving twice). Only add the
+    // fallback off macOS, where the dynamic-menu accelerator doesn't register.
+    const onKey = (e: KeyboardEvent) => {
+      if (!e.ctrlKey || e.metaKey || e.altKey) return;
+      // `e.code` is keyboard-layout independent (KeyS regardless of layout).
+      if (e.code === 'KeyS') {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.shiftKey) handleSaveAsQueryRef.current();
+        else handleSaveQueryRef.current();
+      } else if (e.code === 'KeyI' && !e.shiftKey) {
+        e.preventDefault();
+        e.stopPropagation();
+        handleLoadQueryRef.current();
+      }
+    };
+    if (!IS_MAC) window.addEventListener('keydown', onKey, { capture: true });
     return () => {
       for (const u of unlistens) void u.then((fn) => fn());
+      if (!IS_MAC) window.removeEventListener('keydown', onKey, { capture: true });
     };
   }, [isActive]);
 
