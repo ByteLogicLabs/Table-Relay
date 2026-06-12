@@ -152,6 +152,20 @@ jobs:
           echo "Uploading $dmg"
           gh release upload "${{ github.event.release.tag_name }}" "$dmg" --clobber
 
+          # Also upload a VERSION-LESS copy (Table_Relay_<arch>.dmg) so the
+          # Homebrew cask can use a stable "/releases/latest/download/" URL.
+          # That makes `brew install` / `reinstall` always fetch the newest
+          # release, not just `brew upgrade`. The versioned DMG stays too.
+          case "$dmg" in
+            *_aarch64.dmg) arch="aarch64" ;;
+            *_x86_64.dmg)  arch="x86_64" ;;
+            *) echo "Unexpected DMG name '$dmg'; skipping version-less copy"; exit 0 ;;
+          esac
+          stable="Table_Relay_${arch}.dmg"
+          cp "$dmg" "$stable"
+          echo "Uploading $stable"
+          gh release upload "${{ github.event.release.tag_name }}" "$stable" --clobber
+
   # Homebrew: there is intentionally NO job here. The cask in the
   # `tofikhidayatxyz/homebrew-tap` repo is self-maintaining — it auto-fetches the
   # latest release from the GitHub API via a `livecheck` block and resolves the
