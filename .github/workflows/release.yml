@@ -166,10 +166,79 @@ jobs:
           echo "Uploading $stable"
           gh release upload "${{ github.event.release.tag_name }}" "$stable" --clobber
 
-  # Homebrew: there is intentionally NO job here. The cask in the
-  # `ByteLogicLabs/homebrew-tap` repo is self-maintaining. It uses `version
-  # :latest` with `/releases/latest/download/` URLs, so install/reinstall/upgrade
-  # all fetch the newest release with no per-release push (and no PAT). It relies
-  # on the version-less DMG copies uploaded above
-  # (`Table_Relay_{aarch64,x86_64}.dmg`). See `homebrew-tap/Casks/table-relay.rb`
-  # in this repo for the source of that cask.
+  # Push the Homebrew cask to ByteLogicLabs/homebrew-tap on each release so the
+  # tap stays in sync (and bootstraps on the first run). The cask itself is a
+  # static `version :latest` file that resolves the newest release via GitHub's
+  # `/releases/latest/download/` redirect, so it barely changes between releases;
+  # the push just keeps the tap authoritative. Needs the version-less DMGs
+  # uploaded above.
+  #
+  # One-time setup:
+  #   1. Create repo ByteLogicLabs/homebrew-tap (empty is fine).
+  #   2. Add a PAT with write access to it as the HOMEBREW_TAP_TOKEN secret here.
+  # Self-skips (no failure) if the secret is absent.
+  homebrew-cask:
+    name: Publish Homebrew Cask
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for tap token
+        id: gate
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "${TAP_TOKEN}" ]; then
+            echo "HOMEBREW_TAP_TOKEN not set, skipping cask publish."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Source-of-truth cask lives in this repo so the published file matches it.
+      - name: Checkout app repo
+        if: steps.gate.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+
+      # Manual clone (not actions/checkout) so a brand-new EMPTY tap repo doesn't
+      # fail on a missing default branch; bootstrap `main` if needed.
+      - name: Checkout tap repo
+        if: steps.gate.outputs.enabled == 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone "https://x-access-token:${TAP_TOKEN}@github.com/ByteLogicLabs/homebrew-tap.git" tap || {
+            echo "Clone failed. Does ByteLogicLabs/homebrew-tap exist?" >&2
+            exit 1
+          }
+          cd tap
+          if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+            echo "Tap repo is empty, bootstrapping a 'main' branch."
+            git checkout -b main
+          fi
+
+      - name: Copy cask into tap
+        if: steps.gate.outputs.enabled == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p tap/Casks
+          cp homebrew-tap/Casks/table-relay.rb tap/Casks/table-relay.rb
+          echo "----- cask -----"
+          cat tap/Casks/table-relay.rb
+
+      - name: Commit and push cask
+        if: steps.gate.outputs.enabled == 'true'
+        working-directory: tap
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Casks/table-relay.rb
+          if git diff --staged --quiet; then
+            echo "Cask already up to date, nothing to commit."
+          else
+            git commit -m "table-relay ${TAG}"
+            git push -u origin HEAD
+          fi
