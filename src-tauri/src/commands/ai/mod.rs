@@ -131,32 +131,28 @@ pub async fn ai_start(
             let p = LlamaLocalProvider::start(input.model.clone(), model_path).await?;
             Arc::new(p)
         }
+        // Hosted providers: we DON'T block session start on a network probe.
+        // The probe only validates key/model, and waiting on a round-trip made
+        // "Start" feel slow. We open the session optimistically; the first
+        // `ai_chat_send` hits the API and surfaces any auth/model error then.
         ProviderKind::Openai => {
             let key = require_key(&input.api_key)?;
-            let p = OpenAiProvider::openai(key, input.model.clone());
-            p.probe().await?;
-            Arc::new(p)
+            Arc::new(OpenAiProvider::openai(key, input.model.clone()))
         }
         ProviderKind::Anthropic => {
             let key = require_key(&input.api_key)?;
-            let p = AnthropicProvider::new(key, input.model.clone());
-            p.probe().await?;
-            Arc::new(p)
+            Arc::new(AnthropicProvider::new(key, input.model.clone()))
         }
         ProviderKind::Gemini => {
             let key = require_key(&input.api_key)?;
-            let p = GeminiProvider::new(key, input.model.clone());
-            p.probe().await?;
-            Arc::new(p)
+            Arc::new(GeminiProvider::new(key, input.model.clone()))
         }
         ProviderKind::OpenaiCompatible => {
             let key = input.api_key.clone().unwrap_or_default();
             let base = input.base_url.clone().ok_or_else(|| {
                 AiError::InvalidModel("base_url is required for openai_compatible".into())
             })?;
-            let p = OpenAiProvider::compatible(base, key, input.model.clone());
-            p.probe().await?;
-            Arc::new(p)
+            Arc::new(OpenAiProvider::compatible(base, key, input.model.clone()))
         }
         ProviderKind::ClaudeCli
         | ProviderKind::CodexCli

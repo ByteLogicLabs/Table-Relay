@@ -71,6 +71,7 @@ impl GeminiProvider {
         Ok(ids)
     }
 
+    #[allow(dead_code)] // kept for explicit key validation; not on start path
     pub async fn probe(&self) -> Result<(), AiError> {
         let user = vec![GeminiContent {
             role: "user",

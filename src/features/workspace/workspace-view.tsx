@@ -20,7 +20,9 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import {
   connectAndLoad,
+  getActiveDatabase,
   refreshSchemas,
+  switchConnectionDatabase,
   useConnections,
 } from "../../state/connections";
 import {
@@ -577,7 +579,32 @@ export default function WorkspaceView({
     activeConnections[0] ??
     null;
   const focusedTileServerId = focusedTile?.serverId ?? null;
+  const focusedTileDatabaseName = focusedTile?.databaseName ?? null;
   const focusedConnectionIdForAutoConnect = focusedConnection?.id ?? null;
+
+  // Postgres selects the database at the CONNECTION level: one pool targets one
+  // database, and `"public"."t"` resolves against whichever database the pool is
+  // bound to. So focusing a different database tile must re-point the pool.
+  //
+  // NOT keyed on `databasePicker` (MySQL and Mongo set that too): MySQL
+  // qualifies every query as `\`db\`.\`tbl\`` and Mongo addresses
+  // `client.database(name)` per call, so both already route to the right
+  // database from the request and need no pool rebuild. Only Postgres leaks.
+  const isConnectionScopedDb = (conn: ConnectionProfile | undefined): boolean =>
+    resolveManifest(adapterManifests, conn?.driver)?.capabilities.sqlDialect ===
+    "postgres";
+
+  // The PG database a new tab on `connectionId` belongs to, for stamping onto
+  // the tab so it stays bound to the right database after a switch. Undefined
+  // for non-Postgres (schema already identifies the DB) and when the focused
+  // tile isn't this connection (can't infer which DB the caller meant).
+  const scopedDbFor = (connectionId: string): string | undefined => {
+    const conn = connectionsRef.current.find((c) => c.id === connectionId);
+    if (!isConnectionScopedDb(conn)) return undefined;
+    return focusedTile?.serverId === connectionId
+      ? focusedTile.databaseName
+      : undefined;
+  };
 
   useEffect(() => {
     const id = focusedTileServerId;
@@ -589,12 +616,26 @@ export default function WorkspaceView({
     void (async () => {
       try {
         await connectAndLoad(id);
+        // Restore path: the pool opens on the saved profile's default database.
+        // For connection-scoped selection (Postgres) the persisted focused tile
+        // may name a different database — re-point the pool before its tree
+        // loads, or it would show the default database's tables under this tile.
+        const target = focusedTileDatabaseName?.trim();
+        const conn = connectionsRef.current.find((c) => c.id === id);
+        if (target && isConnectionScopedDb(conn)) {
+          const active = getActiveDatabase(id);
+          if (active == null || active.toLowerCase() !== target.toLowerCase()) {
+            await switchConnectionDatabase(id, target);
+            await refreshSchemas(id, { silent: true });
+          }
+        }
       } catch (err) {
         toast.error(isDbError(err) ? err.message : String(err));
       }
     })();
   }, [
     focusedTileServerId,
+    focusedTileDatabaseName,
     focusedConnectionIdForAutoConnect,
     connState.activeById,
     connState.connectingIds,
@@ -629,12 +670,36 @@ export default function WorkspaceView({
     if (nonEmpty) return nonEmpty.name;
     return schemas[0]?.name ?? db;
   }, [focusedTile, connState.schemasById]);
+  // For connection-scoped adapters (Postgres) the focused tile's PG database;
+  // undefined elsewhere. Tabs carry the same value so same-named tables in
+  // different PG databases (all `public`) don't bleed across tiles.
+  const focusedTileScopedDb =
+    focusedTile && isConnectionScopedDb(focusedConnection ?? undefined)
+      ? focusedTile.databaseName
+      : undefined;
   const visibleTabs = focusedConnection
     ? tabs.filter((t) => {
         if (t.connectionId !== focusedConnection.id) return false;
         if (!t.schema) return true; // connection-scoped query tab
-        // Match the tab's schema against either the tile's raw database name
-        // (MySQL/SQLite) or the resolved effective schema (Postgres).
+        // Postgres: a tab belongs to a specific PG database. Databases all
+        // share a `public` schema, so the database must match too — otherwise
+        // DB-A's `public.users` tab would surface under DB-B's tile.
+        if (focusedTileScopedDb != null) {
+          // Object tabs (data/structure/erd/routine/trigger) carry the PG
+          // database explicitly post-fix — match it directly.
+          if (t.database != null) return t.database === focusedTileScopedDb;
+          // Query/import tabs store the PG database in `schema` (they prepend
+          // `USE`/scope autocomplete with it), so match the tile's database.
+          if (t.type === "query" || t.type === "realtime")
+            return t.schema === focusedTileScopedDb;
+          // Legacy object tab persisted before databases were tracked: fall
+          // back to the effective-schema match so it still shows somewhere.
+          return (
+            focusedTileEffectiveSchema != null &&
+            t.schema === focusedTileEffectiveSchema
+          );
+        }
+        // MySQL/SQLite/Mongo: schema identifies the database.
         return (
           scopeKey === `${t.connectionId}::${t.schema}` ||
           (focusedTileEffectiveSchema != null &&
@@ -697,30 +762,54 @@ export default function WorkspaceView({
     };
   });
 
+  // Re-point a connection-scoped (Postgres) pool at the tile's database before
+  // showing its tree. See `isConnectionScopedDb` above for why only Postgres
+  // needs this. The rail pins a tile per database; without the re-point the
+  // sidebar would show the previously-targeted database's tables under the new
+  // tile and browsing/editing would hit the wrong database entirely.
+  const ensureTileDatabase = async (tile: RailTile): Promise<void> => {
+    const target = tile.databaseName?.trim();
+    if (!target) return; // pending placeholder tile — nothing to point at yet
+    const conn = connectionsRef.current.find((c) => c.id === tile.serverId);
+    if (!isConnectionScopedDb(conn)) return;
+    const active = getActiveDatabase(tile.serverId);
+    if (active != null && active.toLowerCase() === target.toLowerCase()) return;
+    await switchConnectionDatabase(tile.serverId, target);
+    // Drop the previous database's cached grid rows so a remount can't read
+    // them. (switchConnectionDatabase also fires `tablerelay:reload`, which
+    // makes any still-mounted grid refetch against the new pool.)
+    const tabIds = new Set(
+      tabs.filter((t) => t.connectionId === tile.serverId).map((t) => t.id),
+    );
+    clearCachedGridsWhere((tid) => tabIds.has(tid));
+  };
+
   const handleFocusTile = (tile: RailTile) => {
     setFocusedTileId(tile.id);
-    if (!connState.activeById.has(tile.serverId)) {
-      // Not connected yet — connect in the background (skeleton shows via
-      // `connectingIds`). Detached so focus is instant, not gated on connect.
-      void (async () => {
-        try {
+    void (async () => {
+      try {
+        if (!connState.activeById.has(tile.serverId)) {
+          // Not connected yet — connect in the background (skeleton shows via
+          // `connectingIds`). Detached so focus is instant, not gated on connect.
           await connectAndLoad(tile.serverId);
           onConnect(tile.serverId);
-        } catch (err) {
-          toast.error(isDbError(err) ? err.message : String(err));
+          // connectAndLoad opens the pool on the saved profile's default
+          // database; re-point it at the focused tile's database if different.
+          await ensureTileDatabase(tile);
+          await refreshSchemas(tile.serverId, { silent: true });
+        } else {
+          // Already active. Re-point the pool first when the tile names a
+          // different database than the pool currently targets, then revalidate.
+          // The refresh also issues a real query through `with_retry`, which
+          // transparently rebuilds a socket the server dropped while idle
+          // (wait_timeout, NAT drop, laptop sleep) — the old ⌘+R-only hang.
+          await ensureTileDatabase(tile);
+          await refreshSchemas(tile.serverId, { silent: true });
         }
-      })();
-    } else {
-      // Already "active" — but if the connection sat idle for minutes its
-      // socket may be dead (server wait_timeout, NAT drop, laptop sleep).
-      // Switching back used to do nothing here, leaving a stale tree and a
-      // dead socket: the next query hangs until the reconnect supervisor
-      // notices, which felt like a hang that only ⌘+R could clear. Fire a
-      // background `refreshSchemas` so we issue a real query through
-      // `with_retry` — that revalidates the socket and transparently rebuilds
-      // a dead one, exactly like ⌘+R, with no manual refresh.
-      void refreshSchemas(tile.serverId, { silent: true });
-    }
+      } catch (err) {
+        toast.error(isDbError(err) ? err.message : String(err));
+      }
+    })();
   };
 
   // Track pending placeholder tile ids by serverId so handlePinDatabase can
@@ -782,27 +871,41 @@ export default function WorkspaceView({
     }
   };
 
+  // A data tab's identity includes its PG database (`scopedDbFor`) so the same
+  // `public.users` in two PG databases doesn't dedupe to one tab. Undefined for
+  // non-PG, where schema already identifies the database.
+  const findDataTab = (
+    connectionId: string,
+    schema: string,
+    tableName: string,
+    db: string | undefined,
+  ): AppTab | undefined =>
+    tabs.find(
+      (t) =>
+        t.type === "data" &&
+        t.table === tableName &&
+        t.schema === schema &&
+        t.connectionId === connectionId &&
+        (t.database ?? undefined) === db,
+    );
+
   const handleOpenTable = (
     connectionId: string,
     schema: string,
     tableName: string,
   ) => {
-    const existingTab = tabs.find(
-      (t) =>
-        t.type === "data" &&
-        t.table === tableName &&
-        t.schema === schema &&
-        t.connectionId === connectionId,
-    );
+    const db = scopedDbFor(connectionId);
+    const existingTab = findDataTab(connectionId, schema, tableName, db);
     if (existingTab) {
       setActiveTabId(existingTab.id);
     } else {
       const newTab: AppTab = {
-        id: `data-${connectionId}-${schema}.${tableName}-${Date.now()}`,
+        id: `data-${connectionId}-${db ?? schema}.${tableName}-${Date.now()}`,
         title: tableName,
         type: "data",
         connectionId,
         schema,
+        database: db,
         table: tableName,
       };
       setTabs((prev) => [...prev, newTab]);
@@ -819,13 +922,8 @@ export default function WorkspaceView({
     // its internal view mode to 'schema'. That way the user gets one tab per
     // table with Data / Schema / Diagram toggles in the toolbar instead of
     // a separate structure tab duplicating the same SchemaView.
-    const existingTab = tabs.find(
-      (t) =>
-        t.type === "data" &&
-        t.table === tableName &&
-        t.schema === schema &&
-        t.connectionId === connectionId,
-    );
+    const db = scopedDbFor(connectionId);
+    const existingTab = findDataTab(connectionId, schema, tableName, db);
     if (existingTab) {
       setTabs((prev) =>
         prev.map((t) =>
@@ -835,11 +933,12 @@ export default function WorkspaceView({
       setActiveTabId(existingTab.id);
     } else {
       const newTab: AppTab = {
-        id: `data-${connectionId}-${schema}.${tableName}-${Date.now()}`,
+        id: `data-${connectionId}-${db ?? schema}.${tableName}-${Date.now()}`,
         title: tableName,
         type: "data",
         connectionId,
         schema,
+        database: db,
         table: tableName,
         dataViewMode: "schema",
       };
@@ -1031,15 +1130,21 @@ export default function WorkspaceView({
     title: string,
     sql: string,
   ) => {
-    // Stable id derived from the (connection, object) pair so re-opening the
-    // same view / routine focuses the existing tab instead of creating a new
-    // one. Dropping Date.now() here is the whole point of taking `key`.
-    const id = `def-${connectionId}-${key}`;
+    // Stable id derived from the (connection, database, object) pair so
+    // re-opening the same view / routine focuses the existing tab instead of
+    // creating a new one. The PG database is in the id so the same object name
+    // in two databases gets separate tabs. Dropping Date.now() here is the
+    // whole point of taking `key`.
+    const db = scopedDbFor(connectionId);
+    const id = `def-${connectionId}-${db ? `${db}-` : ""}${key}`;
     const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTabId(existing.id);
       return;
     }
+    // No `database` field: like other query tabs this stays connection-scoped
+    // (visible on every tile of the connection). The db-prefixed id alone keeps
+    // the same object name in two databases from collapsing into one tab.
     const newTab: AppTab = {
       id,
       title: `Edit: ${title}`,
@@ -1057,7 +1162,8 @@ export default function WorkspaceView({
     name: string,
     kind: "function" | "procedure",
   ) => {
-    const id = `routine-${connectionId}-${schema}.${name}`;
+    const db = scopedDbFor(connectionId);
+    const id = `routine-${connectionId}-${db ? `${db}.` : ""}${schema}.${name}`;
     const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTabId(existing.id);
@@ -1069,6 +1175,7 @@ export default function WorkspaceView({
       type: "routine",
       connectionId,
       schema,
+      database: db,
       routine: { schema, name, kind },
     };
     setTabs((prev) => [...prev, newTab]);
@@ -1083,6 +1190,7 @@ export default function WorkspaceView({
       type: "structure",
       connectionId,
       schema,
+      database: scopedDbFor(connectionId),
       table: "(new)",
       isNew: true,
     };
@@ -1102,6 +1210,7 @@ export default function WorkspaceView({
       type: "routine",
       connectionId,
       schema,
+      database: scopedDbFor(connectionId),
       routine: { schema, name: "(new)", kind },
       isNew: true,
     };
@@ -1117,6 +1226,7 @@ export default function WorkspaceView({
       type: "routine",
       connectionId,
       schema,
+      database: scopedDbFor(connectionId),
       routine: { schema, name: "(new)", kind: "view" },
       isNew: true,
     };
@@ -1129,7 +1239,8 @@ export default function WorkspaceView({
     schema: string,
     name: string,
   ) => {
-    const id = `trigger-${connectionId}-${schema}.${name}`;
+    const db = scopedDbFor(connectionId);
+    const id = `trigger-${connectionId}-${db ? `${db}.` : ""}${schema}.${name}`;
     const existing = tabs.find((t) => t.id === id);
     if (existing) {
       setActiveTabId(existing.id);
@@ -1141,6 +1252,7 @@ export default function WorkspaceView({
       type: "trigger",
       connectionId,
       schema,
+      database: db,
       trigger: { schema, name },
     };
     setTabs((prev) => [...prev, newTab]);
@@ -1155,6 +1267,7 @@ export default function WorkspaceView({
       type: "trigger",
       connectionId,
       schema,
+      database: scopedDbFor(connectionId),
       trigger: { schema, name: "(new)", isNew: true },
     };
     setTabs((prev) => [...prev, newTab]);
@@ -1203,6 +1316,7 @@ export default function WorkspaceView({
           type: "trigger",
           connectionId: targetConn,
           schema,
+          database: scopedDbFor(targetConn),
           trigger: {
             schema,
             name: objName ?? "(new)",
@@ -1235,17 +1349,12 @@ export default function WorkspaceView({
     schemaName: string,
     tableName?: string,
   ) => {
+    const db = scopedDbFor(connectionId);
     if (tableName) {
       // Table-scoped ERD: reuse the table's data tab and flip its internal
       // view mode to 'diagram'. Mirrors how "Open Schema" reuses the data
       // tab — one tab per table with Data / Schema / Diagram toggles.
-      const existingTab = tabs.find(
-        (t) =>
-          t.type === "data" &&
-          t.table === tableName &&
-          t.schema === schemaName &&
-          t.connectionId === connectionId,
-      );
+      const existingTab = findDataTab(connectionId, schemaName, tableName, db);
       if (existingTab) {
         setTabs((prev) =>
           prev.map((t) =>
@@ -1255,11 +1364,12 @@ export default function WorkspaceView({
         setActiveTabId(existingTab.id);
       } else {
         const newTab: AppTab = {
-          id: `data-${connectionId}-${schemaName}.${tableName}-${Date.now()}`,
+          id: `data-${connectionId}-${db ?? schemaName}.${tableName}-${Date.now()}`,
           title: tableName,
           type: "data",
           connectionId,
           schema: schemaName,
+          database: db,
           table: tableName,
           dataViewMode: "diagram",
         };
@@ -1269,8 +1379,9 @@ export default function WorkspaceView({
       return;
     }
 
-    // Schema-scoped ERD stays as its own dedicated tab.
-    const id = `erd-${connectionId}-${schemaName}`;
+    // Schema-scoped ERD stays as its own dedicated tab. The id carries the PG
+    // database so the same schema name in two databases gets separate ERD tabs.
+    const id = `erd-${connectionId}-${db ?? schemaName}-${schemaName}`;
     const title = `ERD: ${schemaName}`;
     const newTab: AppTab = {
       id,
@@ -1278,6 +1389,7 @@ export default function WorkspaceView({
       type: "erd",
       connectionId,
       schema: schemaName,
+      database: db,
       schemaName,
     };
     if (!tabs.find((t) => t.id === newTab.id)) {
@@ -1287,10 +1399,16 @@ export default function WorkspaceView({
   };
 
   // Two pins on the same server are distinct workspaces, so tab scope keys
-  // always include the schema — only connection-scoped query tabs (no schema)
-  // fall back to the raw connection id.
-  const tabScopeKey = (t: AppTab): string =>
-    t.schema ? `${t.connectionId}::${t.schema}` : t.connectionId;
+  // always include the database/schema — only connection-scoped query tabs
+  // (no schema) fall back to the raw connection id. For Postgres the workspace
+  // boundary is the PG database (the rail tile's `databaseName`), which the tab
+  // carries in `database`; this lines the key up with the focused tile's
+  // `scopeKey` (also `conn::databaseName`). For MySQL/SQLite schema == database,
+  // so the schema is the boundary.
+  const tabScopeKey = (t: AppTab): string => {
+    if (t.database) return `${t.connectionId}::${t.database}`;
+    return t.schema ? `${t.connectionId}::${t.schema}` : t.connectionId;
+  };
 
   const handleCloseTab = (id: string) => {
     // Drop the data-cache entry for this tab — the grid snapshot is only

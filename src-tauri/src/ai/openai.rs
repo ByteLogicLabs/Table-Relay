@@ -106,12 +106,16 @@ impl OpenAiProvider {
     /// first user turn. Called from `ai_start` before the session is installed.
     /// Do not cap output here: reasoning models can fail the request before
     /// producing any text if the completion budget is too small.
+    /// Validate the key/model with a 1-token request. Not on the session-start
+    /// path anymore (we start optimistically); kept for an explicit "test key"
+    /// action and key-validation in Settings.
+    #[allow(dead_code)]
     pub async fn probe(&self) -> Result<(), AiError> {
         let body = ChatRequest {
             model: &self.model,
             messages: &[ChatMsg { role: "user", content: "hi" }],
             stream: false,
-            max_tokens: None,
+            max_tokens: Some(1),
             max_completion_tokens: None,
             temperature: None,
         };
@@ -129,12 +133,14 @@ impl OpenAiProvider {
             let body = res.text().await.unwrap_or_else(|e| format!("(could not read error body: {e})"));
             log_upstream_error("probe", &self.model, &self.base_url, status, &body);
             if Self::should_retry_with_max_completion_tokens(status, &body) {
+                // Retry for models that reject `max_tokens` (need
+                // `max_completion_tokens`). Still 1 token — it's only a probe.
                 let retry_body = ChatRequest {
                     model: &self.model,
                     messages: &[ChatMsg { role: "user", content: "hi" }],
                     stream: false,
                     max_tokens: None,
-                    max_completion_tokens: Some(DEFAULT_TOOL_MAX_TOKENS),
+                    max_completion_tokens: Some(1),
                     temperature: None,
                 };
                 let retry = http

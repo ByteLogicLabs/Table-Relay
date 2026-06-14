@@ -28,6 +28,17 @@ const cancelledConnects = new Set<string>();
 // `db_list_schemas` round-trips per login over SSH.
 const inflightSchemas = new Map<string, Promise<void>>();
 
+// Per-connection "schema epoch", bumped whenever the connection's target
+// database changes (a switch). A `refreshSchemas` call captures the epoch before
+// its await and discards its result if the epoch moved meanwhile — so a slow
+// `list_schemas` issued against the PREVIOUS database (e.g. the one
+// `connectAndLoad` fires automatically) can't land its stale tree on top of a
+// fresh post-switch fetch. Without this the final tree depended on a race.
+const schemaEpoch = new Map<string, number>();
+function bumpSchemaEpoch(connectionId: string): void {
+  schemaEpoch.set(connectionId, (schemaEpoch.get(connectionId) ?? 0) + 1);
+}
+
 type Listener = () => void;
 
 let state: State = {
@@ -157,6 +168,10 @@ export async function disconnect(connectionId: string): Promise<void> {
     // Even if the backend says "not active", clear our client-side state so the
     // UI recovers from drift.
   }
+  // Invalidate any in-flight schema fetch so a late result can't repopulate the
+  // tree after the user disconnected.
+  bumpSchemaEpoch(connectionId);
+  inflightSchemas.delete(connectionId);
   mutate(s => {
     const activeById = new Map(s.activeById);
     activeById.delete(connectionId);
@@ -189,6 +204,63 @@ export function markConnectionLost(connectionId: string): void {
 
 function structureCacheKey(schema: string, table: string): string {
   return `${schema.toLowerCase()}.${table.toLowerCase()}`;
+}
+
+/** The database the connection's live pool is currently pointed at, as
+ *  reported by the last handshake (`ServerInfo.defaultSchema`). Used to decide
+ *  whether focusing a rail tile needs to re-point the pool. Undefined when the
+ *  connection isn't active. */
+export function getActiveDatabase(connectionId: string): string | null | undefined {
+  return state.activeById.get(connectionId)?.server.defaultSchema;
+}
+
+/**
+ * Re-point a live connection's pool at `database` and sync client state.
+ *
+ * Multi-database servers (Postgres/Mongo) keep ONE pool per connection that
+ * can only target one database at a time. The rail pins a tile per database,
+ * so focusing a different tile must rebuild the pool — otherwise the sidebar
+ * keeps showing the previously-targeted database's tables under the new tile
+ * and browsing/editing silently hits the wrong database.
+ *
+ * Updates `activeById` with the rebuilt meta and drops the per-connection
+ * table-structure cache (a `public.users` in database A is unrelated to one
+ * in database B). The caller refreshes the schema tree afterwards.
+ */
+export async function switchConnectionDatabase(
+  connectionId: string,
+  database: string,
+): Promise<ConnectionMeta> {
+  const meta = await db.switchDatabase(connectionId, database);
+  // Drop any schema fetch already in flight against the PREVIOUS database, plus
+  // the cached tree and structures, before updating meta. Otherwise a
+  // background `refreshSchemas` started by `connectAndLoad` (which targeted the
+  // default database) would satisfy the caller's post-switch refresh via the
+  // in-flight dedupe and leave the wrong database's tree on screen.
+  inflightSchemas.delete(connectionId);
+  // Invalidate any list_schemas already mid-flight against the old database so
+  // its result is discarded instead of clobbering the post-switch fetch.
+  bumpSchemaEpoch(connectionId);
+  mutate(s => {
+    const activeById = new Map(s.activeById);
+    activeById.set(connectionId, meta);
+    const schemasById = new Map(s.schemasById);
+    schemasById.delete(connectionId);
+    const loadedSchemasById = new Set(s.loadedSchemasById);
+    loadedSchemasById.delete(connectionId);
+    return { ...s, activeById, schemasById, loadedSchemasById };
+  });
+  invalidateAllTableStructures(connectionId);
+  // Tell any mounted data grid for this connection to refetch against the new
+  // pool. The visible grid reloads now; hidden grids mark themselves stale and
+  // reload when next shown. Without this a grid already mounted from the old
+  // database keeps showing its cached rows after the switch.
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
+    );
+  }
+  return meta;
 }
 
 /** Synchronous read from the cache — returns undefined on miss. */
@@ -357,6 +429,9 @@ export async function refreshSchemas(
   const hasCache = (getSnapshot().schemasById.get(connectionId)?.length ?? 0) > 0;
   const silent = opts.silent === true && hasCache;
 
+  // Snapshot the epoch now; if a database switch bumps it during the await, the
+  // result we get back is for the previous database and must be discarded.
+  const epoch = schemaEpoch.get(connectionId) ?? 0;
   const p = (async () => {
     if (!silent) {
       mutate(s => {
@@ -367,6 +442,16 @@ export async function refreshSchemas(
     }
     try {
       const schemas = await db.listSchemas(connectionId);
+      if ((schemaEpoch.get(connectionId) ?? 0) !== epoch) {
+        // A switch happened while this fetch was in flight — its tree belongs to
+        // the old database. Drop it; the switch's own refresh is authoritative.
+        mutate(s => {
+          const loadingSchemasById = new Set(s.loadingSchemasById);
+          loadingSchemasById.delete(connectionId);
+          return { ...s, loadingSchemasById };
+        });
+        return;
+      }
       mutate(s => {
         const schemasById = new Map(s.schemasById);
         schemasById.set(connectionId, schemas);

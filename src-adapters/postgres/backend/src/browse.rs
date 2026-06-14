@@ -26,12 +26,40 @@ pub(crate) async fn browse(
     let page_size = req.page.size.max(1);
     let offset = (page_number as u64 - 1) * (page_size as u64);
 
+    // Real column types, so we can cast binary-only types (pgvector, ranges,
+    // network, geometric, exotic arrays) to text in the projection — otherwise
+    // sqlx can't decode them and the cells render blank. Map: name → type.
+    let col_types = column_types(driver, &req.schema, &req.table).await;
+    let type_of = |name: &str| -> Option<&str> {
+        col_types
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, t)| t.as_str())
+    };
+    // Build `"col"` or `"col"::text AS "col"` per column. For `SELECT *` we
+    // expand to the real column list (when known) so casts can be applied.
+    let project_col = |name: &str| -> String {
+        match type_of(name) {
+            Some(t) if needs_text_cast(t) => {
+                format!("{c}::text AS {c}", c = quote_ident(name))
+            }
+            _ => quote_ident(name),
+        }
+    };
     let projection = if req.columns.is_empty() {
-        "*".to_string()
+        if col_types.is_empty() {
+            "*".to_string()
+        } else {
+            col_types
+                .iter()
+                .map(|(n, _)| project_col(n))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
     } else {
         req.columns
             .iter()
-            .map(|c| quote_ident(c))
+            .map(|c| project_col(c))
             .collect::<Vec<_>>()
             .join(", ")
     };
@@ -92,13 +120,18 @@ pub(crate) async fn browse(
     let rows: Vec<PgRow> = rows_res?;
     let total_records = count_res?;
 
+    // Prefer the real catalog type for `type_hint` (a cast column reports TEXT
+    // from the result metadata, which would hide that it's really vector/inet/…).
     let columns: Vec<ColumnMeta> = if let Some(first) = rows.first() {
         first
             .columns()
             .iter()
-            .map(|c: &PgColumn| ColumnMeta {
-                name: c.name().to_string(),
-                type_hint: c.type_info().name().to_string(),
+            .map(|c: &PgColumn| {
+                let name = c.name().to_string();
+                let type_hint = type_of(&name)
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| c.type_info().name().to_string());
+                ColumnMeta { name, type_hint }
             })
             .collect()
     } else {
@@ -166,6 +199,90 @@ pub(crate) async fn count_records(
     count_inner(driver, &req.schema, &req.table, &req.filters).await
 }
 
+/// Fetch each column's real type name (via `format_type`) for a table, in
+/// definition order. Used to build a projection that casts binary-only types
+/// (pgvector, ranges, geometric, …) to text so they render at all. Cheap
+/// catalog query; failures are non-fatal (caller falls back to `SELECT *`).
+pub(crate) async fn column_types(
+    driver: &PostgresDriver,
+    schema: &str,
+    table: &str,
+) -> Vec<(String, String)> {
+    let rows = sqlx::query(
+        "SELECT a.attname, format_type(a.atttypid, a.atttypmod) AS typ
+         FROM pg_attribute a
+         JOIN pg_class c ON c.oid = a.attrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relname = $2
+           AND a.attnum > 0 AND NOT a.attisdropped
+         ORDER BY a.attnum",
+    )
+    .bind(schema)
+    .bind(table)
+    .fetch_all(&driver.pool)
+    .await
+    .unwrap_or_default();
+    rows.iter()
+        .filter_map(|r| {
+            let name: String = r.try_get("attname").ok()?;
+            let typ: String = r.try_get("typ").ok()?;
+            Some((name, typ))
+        })
+        .collect()
+}
+
+/// Whether a column of this `format_type` must be cast to `text` to render
+/// (sqlx has no binary decoder for it, so it would come back blank). Base-names
+/// the type (strips `[]`, args, schema) and matches a known exotic set plus
+/// arrays whose element we don't decode in `decode_array`.
+pub(crate) fn needs_text_cast(format_type: &str) -> bool {
+    let lower = format_type.trim().to_ascii_lowercase();
+    let is_array = lower.ends_with("[]");
+    // Strip array suffix, any `(...)` modifier, and a schema prefix.
+    let mut base = lower.trim_end_matches("[]").trim();
+    if let Some(p) = base.find('(') {
+        base = base[..p].trim_end();
+    }
+    let base = base.rsplit('.').next().unwrap_or(base);
+
+    // Types with NO sqlx decoder (binary form ≠ text) — always cast.
+    const EXOTIC: &[&str] = &[
+        "vector", "halfvec", "sparsevec",          // pgvector
+        "hstore", "tsvector", "tsquery", "ltree",  // extensions / FTS
+        "inet", "cidr", "macaddr", "macaddr8",     // network
+        "point", "line", "lseg", "box", "path", "polygon", "circle", // geometric
+        "money", "bit", "varbit", "interval", "xml",
+        "int4range", "int8range", "numrange", "tsrange", "tstzrange", "daterange",
+        "int4multirange", "int8multirange", "nummultirange",
+        "tsmultirange", "tstzmultirange", "datemultirange",
+    ];
+    if EXOTIC.contains(&base) {
+        return true;
+    }
+    // Arrays whose element type we don't decode natively in `decode_array`
+    // (numeric/temporal/etc.) — cast to text. The scalars we DO decode
+    // (bool/int/float/text/uuid/json) are left as-is.
+    if is_array {
+        const NATIVE_ARRAY_ELEMS: &[&str] = &[
+            "boolean", "smallint", "integer", "bigint", "real", "double precision",
+            "text", "character varying", "character", "name", "uuid", "json", "jsonb",
+        ];
+        return !NATIVE_ARRAY_ELEMS.contains(&base);
+    }
+    false
+}
+
+/// Cast type for a SET/INSERT param of `format_type` (e.g. `vector`), or `None`
+/// for a bare placeholder. The exotic types are bound as text and need this
+/// text→type coercion on write.
+pub(crate) fn cast_for_write(format_type: &str) -> Option<String> {
+    if needs_text_cast(format_type) {
+        Some(format_type.trim().to_string())
+    } else {
+        None
+    }
+}
+
 async fn count_inner(
     driver: &PostgresDriver,
     schema: &str,
@@ -180,28 +297,15 @@ async fn count_inner(
     let (where_sql, filter_values) = build_where(filters, 1)?;
     sql.push_str(&where_sql);
 
-    let mut q = sqlx::query_scalar::<_, i64>(&sql);
+    // Bind via the shared `bind_json` so COUNT and the page query coerce
+    // identically (arrays/objects as jsonb, not text) — otherwise a jsonb
+    // filter could match in one and error/mismatch in the other.
+    let mut q = sqlx::query(&sql);
     for v in &filter_values {
-        q = match v {
-            JsonValue::Null => q.bind(Option::<String>::None),
-            JsonValue::Bool(b) => q.bind(*b),
-            JsonValue::Number(n) => {
-                if let Some(i) = n.as_i64() {
-                    q.bind(i)
-                } else if let Some(f) = n.as_f64() {
-                    q.bind(f)
-                } else {
-                    q.bind(n.to_string())
-                }
-            }
-            JsonValue::String(s) => q.bind(s.clone()),
-            JsonValue::Array(_) | JsonValue::Object(_) => {
-                q.bind(serde_json::to_string(v).unwrap_or_default())
-            }
-        };
+        q = crate::postgres::bind_json(q, v);
     }
-
-    let n: i64 = q.fetch_one(&driver.pool).await.map_err(AdapterError::from)?;
+    let row = q.fetch_one(&driver.pool).await.map_err(AdapterError::from)?;
+    let n: i64 = row.try_get::<i64, _>(0).unwrap_or(0);
     Ok(Some(n.max(0) as u64))
 }
 

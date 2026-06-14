@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
-import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Zap, Radio, Loader2 } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Zap, Radio, Loader2, Sparkles } from 'lucide-react';
 import { copyText } from '../../lib/clipboard';
 import { Button } from '../../components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '../../components/ui/context-menu';
@@ -196,14 +196,20 @@ export default function TabsShell({
   }, [onCloseTab]);
   
   if (tabs.length === 0) {
+    const openChat = () =>
+      window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'));
     if (noDatabaseSelected) {
       return (
-        <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground bg-background px-6 text-center">
+        <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground bg-background px-6 text-center gap-4">
           <p className="text-sm">
             No database selected, press{' '}
             <kbd className="px-1.5 py-0.5 rounded border border-border bg-muted text-[11px] font-mono">⌘ + K</kbd>{' '}
             to select a database
           </p>
+          <Button variant="outline" size="sm" onClick={openChat}>
+            <Sparkles className="w-4 h-4 mr-2 text-primary" />
+            Ask AI
+          </Button>
         </div>
       );
     }
@@ -213,11 +219,17 @@ export default function TabsShell({
           <DatabaseIcon className="w-8 h-8 opacity-50" />
         </div>
         <p className="text-lg font-medium mb-2">No open tabs</p>
-        <p className="text-sm mb-6">Select a table from the sidebar or open a new query.</p>
-        <Button onClick={handleCreateNewQuery}>
-          <Plus className="w-4 h-4 mr-2" />
-          New Query
-        </Button>
+        <p className="text-sm mb-6">Select a table from the sidebar, open a new query, or ask the AI.</p>
+        <div className="flex items-center gap-2">
+          <Button onClick={handleCreateNewQuery}>
+            <Plus className="w-4 h-4 mr-2" />
+            New Query
+          </Button>
+          <Button variant="outline" onClick={openChat}>
+            <Sparkles className="w-4 h-4 mr-2 text-primary" />
+            Ask AI
+          </Button>
+        </div>
       </div>
     );
   }

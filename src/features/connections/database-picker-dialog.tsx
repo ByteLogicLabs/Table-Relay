@@ -13,7 +13,7 @@ import {
   SelectValue,
 } from '../../components/ui/select';
 import { ConnectionProfile } from '../../types';
-import { useConnections, refreshSchemas } from '../../state/connections';
+import { useConnections, refreshSchemas, switchConnectionDatabase } from '../../state/connections';
 import { db, isDbError } from '../../lib/db';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 
@@ -178,7 +178,11 @@ export default function DatabasePickerDialog({
       // not an actual schema).
       setSwitching(true);
       try {
-        await db.switchDatabase(connection.id, name);
+        // Routes through the shared helper so it also updates the active-meta
+        // (which `getActiveDatabase` reads) and drops the structure cache —
+        // otherwise focusing this tile later would re-switch needlessly and a
+        // same-named table from the previous database could be read stale.
+        await switchConnectionDatabase(connection.id, name);
         await refreshSchemas(connection.id);
       } catch (err) {
         toast.error(isDbError(err) ? err.message : String(err));

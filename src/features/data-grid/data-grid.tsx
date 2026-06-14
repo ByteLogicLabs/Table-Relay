@@ -78,7 +78,11 @@ import {
   patchCachedGridDraft,
   clearCachedGrid,
 } from "../../state/tab-data-cache";
-import { ensureTableStructure, useConnections } from "../../state/connections";
+import {
+  ensureTableStructure,
+  refreshTableStructure,
+  useConnections,
+} from "../../state/connections";
 import {
   useAdapterManifests,
   resolveManifest,
@@ -683,7 +687,9 @@ export default function DataGrid({
     }
   }, [editTargetKey]);
 
-  const fetchData = async (opts: { showRefresh?: boolean } = {}) => {
+  const fetchData = async (
+    opts: { showRefresh?: boolean; refetchStructure?: boolean } = {},
+  ) => {
     if (opts.showRefresh) setIsRefreshing(true);
     else setLoading(true);
     setLoadError(null);
@@ -697,6 +703,9 @@ export default function DataGrid({
       // The row fetch and structure are required; the count rides along on
       // the same request — the adapter decides whether to run it in the
       // same round-trip (it does today). Structure is independent.
+      // `refetchStructure` forces a fresh describe even when we hold one (after
+      // a reload / Postgres database switch the held structure may be stale).
+      const reuse = opts.refetchStructure ? null : structureRef.current;
       const [browseRes, structureRes] = await Promise.all([
         db.browse(connectionId, {
           schema,
@@ -714,9 +723,11 @@ export default function DataGrid({
           page: { number: pageN, size: limitN },
           includeTotal: true,
         }),
-        structure
-          ? Promise.resolve(structure)
-          : ensureTableStructure(connectionId, schema, tableName),
+        reuse
+          ? Promise.resolve(reuse)
+          : (opts.refetchStructure
+              ? refreshTableStructure(connectionId, schema, tableName)
+              : ensureTableStructure(connectionId, schema, tableName)),
       ]);
       setStructure(structureRes);
       // Ignore stale responses: while we were fetching the user may have
@@ -935,8 +946,12 @@ export default function DataGrid({
       }
       setEditedCells({});
       setActiveEdit(null);
+      // Force a fresh describe: a reload can follow an ALTER, or a Postgres
+      // database switch where this same `(schema, table)` now resolves to a
+      // different table — reusing the held structure would render the new rows
+      // with the old columns.
       loadedTargetRef.current = loadTargetKey();
-      void fetchData({ showRefresh: true });
+      void fetchData({ showRefresh: true, refetchStructure: true });
     };
     window.addEventListener("tablerelay:reload", onReload);
     return () => window.removeEventListener("tablerelay:reload", onReload);

@@ -46,6 +46,12 @@ export interface AppTab {
   connectionId: string;
   /** Target schema for data/structure/erd tabs. */
   schema?: string;
+  /** Connection-scoped database the tab belongs to (Postgres only, where one
+   *  pool targets one database and many databases share a `public` schema).
+   *  Disambiguates otherwise-identical `(connection, schema, table)` tabs across
+   *  databases so a `public.users` tab in DB-A isn't confused with DB-B's.
+   *  Undefined for MySQL/Mongo/SQLite where schema already identifies the DB. */
+  database?: string;
   table?: string; // For data and structure tabs
   query?: string; // For query tab
   schemaName?: string; // For erd tab (legacy alias for schema)

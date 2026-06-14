@@ -11,6 +11,7 @@ import {
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
+import { SearchableSelect } from '../../components/ui/searchable-select';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '../../components/ui/select';
@@ -951,7 +952,10 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                       </div>
                     )}
 
-                    {/* Model — native autocomplete via <datalist> */}
+                    {/* Model — searchable dropdown that shows the FULL list on
+                        open (filters only as you type), unlike a <datalist> which
+                        the browser pre-filters to the current value. `allowCustom`
+                        keeps the ability to type a model id not in the catalog. */}
                     <div className="space-y-1.5">
                       <div className="flex items-center justify-between">
                         <Label className="text-xs">Model</Label>
@@ -973,18 +977,21 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                           );
                         })()}
                       </div>
-                      <Input
-                        list={`models-${form.kind}-${form.baseUrl}`}
-                        placeholder={meta.defaultModel}
-                        value={form.model}
-                        onChange={e => patchForm({ model: e.target.value })}
-                        className="h-8 text-xs font-mono"
-                      />
-                      <datalist id={`models-${form.kind}-${form.baseUrl}`}>
-                        {(modelCache[modelCacheKey(form.kind, form.baseUrl)] ?? []).map(m => (
-                          <option key={m} value={m} />
-                        ))}
-                      </datalist>
+                      {(() => {
+                        const list = modelCache[modelCacheKey(form.kind, form.baseUrl)] ?? [];
+                        const options = list.map(m => ({ value: m, label: m }));
+                        return (
+                          <SearchableSelect
+                            value={form.model}
+                            options={options}
+                            onChange={m => patchForm({ model: m })}
+                            placeholder={meta.defaultModel || 'Select a model'}
+                            searchPlaceholder={modelLoading ? 'Loading models…' : 'Search or type a model id…'}
+                            className="h-8 text-xs font-mono"
+                            allowCustom
+                          />
+                        );
+                      })()}
                     </div>
 
                     {/* Actions */}

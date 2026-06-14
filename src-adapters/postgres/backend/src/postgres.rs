@@ -1056,16 +1056,45 @@ impl PostgresDriver {
 
         let set_cols: Vec<&str> = changes.keys().map(String::as_str).collect();
         let pk_cols: Vec<&str> = primary_key.iter().map(|pk| pk.column.as_str()).collect();
-        let sql = crate::mutate::build_update_sql(schema, table, &set_cols, &pk_cols);
 
+        // Per-column write casts for exotic types (vector/range/inet/…) that PG
+        // won't implicitly coerce from text. Their values are bound as text.
+        let col_types = crate::browse::column_types(self, schema, table).await;
+        let cast_of = |name: &str| -> Option<String> {
+            col_types
+                .iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, t)| crate::browse::cast_for_write(t))
+        };
+        let set_casts: Vec<Option<String>> = set_cols.iter().map(|c| cast_of(c)).collect();
+        let sql = crate::mutate::build_update_sql(schema, table, &set_cols, &pk_cols, &set_casts);
+
+        // Transaction so the >1-row safety check can roll back: a unique key
+        // hits exactly one row; more means the "key" isn't actually unique, so
+        // abort rather than corrupt siblings.
+        let mut tx = self.pool.begin().await?;
         let mut q = sqlx::query(&sql);
-        for v in changes.values() {
-            q = bind_json(q, v);
+        for (col, v) in changes.iter() {
+            // Exotic-cast columns take the text form (so `$N::vector` works).
+            if cast_of(col).is_some() {
+                q = bind_json_as_text(q, v);
+            } else {
+                q = bind_json(q, v);
+            }
         }
+        // PK compared via `::text` (see build_update_sql) — bind keys as text.
         for pk in primary_key {
-            q = bind_json(q, &pk.value);
+            q = bind_json_as_text(q, &pk.value);
         }
-        let res = q.execute(&self.pool).await?;
+        let res = q.execute(&mut *tx).await?;
+        if res.rows_affected() > 1 {
+            tx.rollback().await?;
+            return Err(AdapterError::Unsupported(format!(
+                "update matched {} rows — the row key is not unique; refusing to edit",
+                res.rows_affected()
+            )));
+        }
+        tx.commit().await?;
         Ok(res.rows_affected())
     }
 
@@ -1639,6 +1668,14 @@ pub(crate) fn column_to_json(row: &PgRow, idx: usize, type_name: &str) -> JsonVa
         }
     }
 
+    // User-defined enums fail the checked str compat gate (blank cell), but an
+    // enum's binary form IS its label text, so decode unchecked.
+    if matches!(row.column(idx).type_info().kind(), sqlx::postgres::PgTypeKind::Enum(_)) {
+        if let Ok(v) = row.try_get_unchecked::<Option<String>, _>(idx) {
+            return v.map(JsonValue::String).unwrap_or(JsonValue::Null);
+        }
+    }
+
     // Arrays. Postgres types come back either `_int4` / `_text` (internal
     // catalog form) or `INT4[]` / `TEXT[]` (display form) depending on
     // the code path. Handle both for the scalar element types we support
@@ -1872,6 +1909,22 @@ pub(crate) fn bind_json<'q>(
         // frontend sends parsed JSON for json-kind cells; this is the
         // matching backend half.
         JsonValue::Array(_) | JsonValue::Object(_) => q.bind(sqlx::types::Json(v.clone())),
+    }
+}
+
+/// Bind a JSON value as a TEXT param (canonical string form), for PK/WHERE
+/// comparisons written as `"col"::text = $N`.
+pub(crate) fn bind_json_as_text<'q>(
+    q: sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>,
+    v: &'q JsonValue,
+) -> sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments> {
+    match v {
+        JsonValue::Null => q.bind(Option::<String>::None),
+        JsonValue::String(s) => q.bind(s.clone()),
+        JsonValue::Bool(b) => q.bind(b.to_string()),
+        JsonValue::Number(n) => q.bind(n.to_string()),
+        // An array/object key is unusual, but render it canonically just in case.
+        other => q.bind(other.to_string()),
     }
 }
 
