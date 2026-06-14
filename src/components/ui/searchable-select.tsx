@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronsUpDown, Search } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from './popover';
 import { Input } from './input';
@@ -10,9 +10,11 @@ export interface SearchableSelectOption {
 }
 
 /**
- * A trigger-button dropdown with a filter box and a scrollable, keyboard-free
- * option list. Matches the app's Select styling but adds search — used where a
- * connection may have many databases/tables.
+ * A trigger-button dropdown with a filter box and a scrollable option list.
+ * Matches the app's Select styling but adds search and full keyboard nav
+ * (Arrow Up/Down to move, Enter to pick, Esc to close) driven from the search
+ * input — used where a connection may have many databases/tables, or to pick a
+ * model id.
  */
 export function SearchableSelect({
   value,
@@ -40,7 +42,11 @@ export function SearchableSelect({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  // Index of the keyboard-highlighted row across the combined list
+  // (filtered options first, then the optional "Use '<query>'" custom row).
+  const [activeIndex, setActiveIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const listRef = useRef<HTMLDivElement | null>(null);
 
   const selected = options.find((o) => o.value === value) ?? null;
   // A selected value not present in `options` (a custom entry) still shows in
@@ -56,6 +62,53 @@ export function SearchableSelect({
     allowCustom &&
     trimmedQuery.length > 0 &&
     !options.some((o) => o.value.toLowerCase() === trimmedQuery.toLowerCase());
+
+  // The total number of selectable rows (options + maybe the custom row).
+  const rowCount = filtered.length + (showCustom ? 1 : 0);
+
+  // Keep the highlight valid as the filtered list changes (e.g. while typing).
+  // Default to the currently-selected option when the list first shows.
+  useEffect(() => {
+    if (!open) return;
+    const selIdx = filtered.findIndex((o) => o.value === value);
+    setActiveIndex(selIdx >= 0 ? selIdx : 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+  useEffect(() => {
+    setActiveIndex((i) => Math.min(Math.max(i, 0), Math.max(rowCount - 1, 0)));
+  }, [rowCount]);
+
+  // Scroll the active row into view as it moves.
+  useEffect(() => {
+    if (!open) return;
+    const el = listRef.current?.querySelector<HTMLElement>(`[data-idx="${activeIndex}"]`);
+    el?.scrollIntoView({ block: 'nearest' });
+  }, [activeIndex, open]);
+
+  const commit = (idx: number) => {
+    if (idx < filtered.length) {
+      onChange(filtered[idx].value);
+    } else if (showCustom) {
+      onChange(trimmedQuery);
+    }
+    setOpen(false);
+  };
+
+  const onInputKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (rowCount > 0) setActiveIndex((i) => (i + 1) % rowCount);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (rowCount > 0) setActiveIndex((i) => (i - 1 + rowCount) % rowCount);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (rowCount > 0) commit(activeIndex);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setOpen(false);
+    }
+  };
 
   return (
     <Popover
@@ -90,25 +143,26 @@ export function SearchableSelect({
             ref={inputRef}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
+            onKeyDown={onInputKeyDown}
             placeholder={searchPlaceholder}
             className="h-9 pl-8 text-sm border-0 rounded-none shadow-none focus-visible:ring-0 focus-visible:border-0"
           />
         </div>
-        <div className="max-h-64 overflow-y-auto p-1">
+        <div ref={listRef} className="max-h-64 overflow-y-auto p-1">
           {filtered.length === 0 && !showCustom ? (
             <div className="py-6 text-center text-xs text-muted-foreground">No matches.</div>
           ) : (
-            filtered.map((o) => (
+            filtered.map((o, idx) => (
               <button
                 key={o.value}
                 type="button"
-                onClick={() => {
-                  onChange(o.value);
-                  setOpen(false);
-                }}
+                data-idx={idx}
+                onClick={() => commit(idx)}
+                onMouseMove={() => setActiveIndex(idx)}
                 className={cn(
                   'w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left transition-colors',
-                  o.value === value ? 'bg-primary/10 text-primary' : 'hover:bg-muted/50',
+                  idx === activeIndex && 'bg-muted/60',
+                  o.value === value ? 'text-primary' : '',
                 )}
               >
                 <Check className={cn('w-3.5 h-3.5 shrink-0', o.value === value ? 'opacity-100' : 'opacity-0')} />
@@ -119,11 +173,13 @@ export function SearchableSelect({
           {showCustom && (
             <button
               type="button"
-              onClick={() => {
-                onChange(trimmedQuery);
-                setOpen(false);
-              }}
-              className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left transition-colors hover:bg-muted/50 border-t border-border/40 mt-1"
+              data-idx={filtered.length}
+              onClick={() => commit(filtered.length)}
+              onMouseMove={() => setActiveIndex(filtered.length)}
+              className={cn(
+                'w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left transition-colors border-t border-border/40 mt-1',
+                activeIndex === filtered.length && 'bg-muted/60',
+              )}
             >
               <Check className="w-3.5 h-3.5 shrink-0 opacity-0" />
               <span className="truncate">

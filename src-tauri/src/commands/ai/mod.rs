@@ -337,6 +337,11 @@ async fn codex_models() -> Option<Vec<String>> {
     );
     cmd.stdin(std::process::Stdio::null());
     augment_path_env(&mut cmd, &bin);
+    // Run from home (not the app's cwd `/` in a Finder-launched build) to match
+    // the chat spawn and avoid any cwd-sensitive CLI behaviour.
+    if let Some(h) = crate::ai::cli_specs::home() {
+        cmd.current_dir(h);
+    }
     let output = match tokio::time::timeout(std::time::Duration::from_secs(20), cmd.output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(e)) => {
@@ -395,6 +400,9 @@ async fn cli_models(kind: ProviderKind) -> Option<Vec<String>> {
     let mut cmd = crate::ai::cli_provider::build_command(&bin, &["models".to_string()]);
     cmd.stdin(std::process::Stdio::null());
     augment_path_env(&mut cmd, &bin);
+    if let Some(h) = crate::ai::cli_specs::home() {
+        cmd.current_dir(h);
+    }
     // `opencode`/`kilo models` fetch a REMOTE catalog — bound the wait so a slow
     // or unreachable network can't hang the model picker forever (the frontend
     // shows "Loading…" until this resolves). On timeout we return None and the
@@ -459,19 +467,15 @@ fn augment_path_env(cmd: &mut tokio::process::Command, bin: &std::path::Path) {
     if let Some(parent) = bin.parent() {
         dirs.push(parent.to_path_buf());
     }
-    if let Some(home) = crate::ai::cli_specs::home() {
-        dirs.push(home.join(".opencode/bin"));
-        dirs.push(home.join(".kilo/bin"));
-        dirs.push(home.join(".bun/bin"));
-        dirs.push(home.join(".local/bin"));
-    }
-    for p in ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"] {
-        dirs.push(std::path::PathBuf::from(p));
-    }
+    // Shared runtime locations (node managers, package managers, homebrew) so a
+    // node-based CLI can resolve `node`. Same set used by the chat-spawn path.
+    dirs.extend(crate::ai::cli_specs::runtime_path_dirs());
     let existing = std::env::var_os("PATH").unwrap_or_default();
-    let mut all: Vec<std::path::PathBuf> = dirs;
-    all.extend(std::env::split_paths(&existing));
-    if let Ok(joined) = std::env::join_paths(all) {
+    dirs.extend(std::env::split_paths(&existing));
+    // Dedup while preserving first-seen order.
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|p| seen.insert(p.clone()));
+    if let Ok(joined) = std::env::join_paths(dirs) {
         cmd.env("PATH", joined);
     }
 }
@@ -663,13 +667,105 @@ async fn ensure_bridge(
 /// per-invocation `--mcp-config` file (returned here); the others register via
 /// their config files (side effects, returns `None`). All failures are logged
 /// and swallowed — MCP is best-effort on top of plain chat.
+/// The path the wrapped CLIs should spawn to reach our MCP relay
+/// (`<exe> __mcp-server ...`). In a packaged macOS build the real executable
+/// lives at `/Applications/Table Relay.app/Contents/MacOS/table-relay` — a path
+/// with a SPACE. Several MCP clients (codex among them) word-split or otherwise
+/// mishandle a spaced `command`, so the relay never starts and every DB tool
+/// fails in the .app while working fine in `cargo`/dev (whose path has no
+/// spaces). To sidestep all quoting/splitting issues we expose a space-free
+/// symlink to the real binary under `~/.tablerelay/bin` and register THAT path.
+///
+/// Falls back to the real path if the home dir itself has a space or the
+/// symlink can't be created (the consumer may still handle quoting correctly).
+fn mcp_command_path(real_exe: &std::path::Path) -> String {
+    let real = real_exe.display().to_string();
+
+    // AppImage: `current_exe()` is a per-run `/tmp/.mount_XXXX/...` path that is
+    // GONE after the app exits. Writing it into the CLIs' persistent config files
+    // would poison the user's standalone `codex`/`gemini`/... with a dead MCP
+    // server entry. $APPIMAGE points at the stable .AppImage file; re-exec it
+    // with the MCP args via a tiny wrapper under ~/.tablerelay/bin so the
+    // recorded command survives across launches.
+    #[cfg(target_os = "linux")]
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        if let Some(home) = crate::ai::cli_specs::home() {
+            let bin_dir = home.join(".tablerelay").join("bin");
+            let wrapper = bin_dir.join("table-relay-mcp");
+            let appimage = std::path::PathBuf::from(&appimage);
+            let script = format!(
+                "#!/bin/sh\nexec {:?} \"$@\"\n",
+                appimage.display().to_string()
+            );
+            if std::fs::create_dir_all(&bin_dir).is_ok()
+                && std::fs::write(&wrapper, script).is_ok()
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(
+                    &wrapper,
+                    std::fs::Permissions::from_mode(0o755),
+                );
+                if !wrapper.display().to_string().contains(' ') {
+                    return wrapper.display().to_string();
+                }
+            }
+            crate::log_line!("mcp", "AppImage wrapper write failed, using mount path");
+        }
+    }
+
+    // No space → nothing to work around.
+    if !real.contains(' ') {
+        return real;
+    }
+    let Some(home) = crate::ai::cli_specs::home() else {
+        return real;
+    };
+    let bin_dir = home.join(".tablerelay").join("bin");
+    // If even this path has a space (unusual home dir), give up on the link.
+    if bin_dir.display().to_string().contains(' ') {
+        return real;
+    }
+    // Windows binaries need the .exe extension to be spawnable by name.
+    let link_name = if cfg!(windows) { "table-relay.exe" } else { "table-relay" };
+    let link = bin_dir.join(link_name);
+    if let Err(e) = std::fs::create_dir_all(&bin_dir) {
+        crate::log_line!("mcp", "mcp link dir create failed: {e}");
+        return real;
+    }
+    // Re-create each time so it tracks app moves/updates. Ignore a remove error
+    // when it doesn't exist yet.
+    let _ = std::fs::remove_file(&link);
+
+    // Prefer a symlink (cheap, tracks the source). On Windows symlink_file needs
+    // admin/Developer Mode — most users have neither — so fall back to a HARD
+    // link (no privilege needed, same volume), then to a copy. Without this, the
+    // Windows fallback returned the raw spaced path and re-broke MCP for clients
+    // that word-split `command`.
+    #[cfg(unix)]
+    let linked = std::os::unix::fs::symlink(real_exe, &link).is_ok();
+    #[cfg(windows)]
+    let linked = std::os::windows::fs::symlink_file(real_exe, &link).is_ok()
+        || std::fs::hard_link(real_exe, &link).is_ok()
+        || std::fs::copy(real_exe, &link).is_ok();
+    #[cfg(not(any(unix, windows)))]
+    let linked = std::fs::hard_link(real_exe, &link).is_ok()
+        || std::fs::copy(real_exe, &link).is_ok();
+
+    if linked {
+        link.display().to_string()
+    } else {
+        crate::log_line!("mcp", "mcp link create failed, using real path");
+        real
+    }
+}
+
 fn register_cli_mcp(
     kind: ProviderKind,
     bridge: &crate::ai::mcp_bridge::McpBridge,
 ) -> Option<String> {
     use crate::ai::mcp_server;
     let exe = match std::env::current_exe() {
-        Ok(p) => p.display().to_string(),
+        Ok(p) => mcp_command_path(&p),
         Err(e) => {
             crate::log_line!("mcp", "current_exe failed: {e}");
             return None;
@@ -678,6 +774,15 @@ fn register_cli_mcp(
     let (port, token) = (bridge.port, bridge.token.as_str());
     // Cross-platform home (USERPROFILE on Windows, HOME elsewhere).
     let home = crate::ai::cli_specs::home();
+    if home.is_none() && !matches!(kind, ProviderKind::ClaudeCli) {
+        // Every file-based CLI registration needs HOME; without it they all
+        // silently no-op and the CLI runs with no DB tools. Make it visible.
+        crate::log_line!(
+            "mcp",
+            "HOME/USERPROFILE not resolved — cannot register MCP for {}; DB tools will be unavailable",
+            kind.as_str()
+        );
+    }
     match kind {
         ProviderKind::ClaudeCli => {
             match mcp_server::write_claude_mcp_config(&exe, port, token) {

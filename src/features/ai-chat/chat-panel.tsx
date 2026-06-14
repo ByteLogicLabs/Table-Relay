@@ -295,7 +295,32 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
             </span>
           )}
       </SelectTrigger>
-      <SelectContent className="min-w-56">
+      <SelectContent
+        className="min-w-56"
+        footer={
+          <div className="border-t border-border/60 mt-1 pt-1 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => openSettings('ai')}
+              className="flex-1 text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded flex items-center gap-2"
+            >
+              <SettingsIcon className="w-3 h-3" /> Manage API providers in Settings…
+            </button>
+            <button
+              type="button"
+              // Stop the Select from closing/selecting; just re-probe in place.
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={(e) => { e.preventDefault(); e.stopPropagation(); void refresh(); }}
+              disabled={reloading}
+              title="Reload credentials and installed CLI tools"
+              aria-label="Reload providers"
+              className="shrink-0 p-1.5 rounded text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50"
+            >
+              <RefreshCw className={`w-3 h-3 ${reloading ? 'animate-spin' : ''}`} />
+            </button>
+          </div>
+        }
+      >
         {credentials.length > 0 && (
           <div className="px-2 pt-1.5 pb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/80">
             Saved credentials
@@ -329,27 +354,6 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
             {cliPaths === null ? 'Checking…' : 'No providers found'}
           </div>
         )}
-        <div className="border-t border-border/60 mt-1 pt-1 flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => openSettings('ai')}
-            className="flex-1 text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded flex items-center gap-2"
-          >
-            <SettingsIcon className="w-3 h-3" /> Manage API providers in Settings…
-          </button>
-          <button
-            type="button"
-            // Stop the Select from closing/selecting; just re-probe in place.
-            onPointerDown={(e) => e.preventDefault()}
-            onClick={(e) => { e.preventDefault(); e.stopPropagation(); void refresh(); }}
-            disabled={reloading}
-            title="Reload credentials and installed CLI tools"
-            aria-label="Reload providers"
-            className="shrink-0 p-1.5 rounded text-muted-foreground hover:bg-muted/60 hover:text-foreground disabled:opacity-50"
-          >
-            <RefreshCw className={`w-3 h-3 ${reloading ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
       </SelectContent>
     </Select>
     </div>

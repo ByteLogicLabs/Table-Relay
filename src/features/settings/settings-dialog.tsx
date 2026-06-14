@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
-import { AlertCircle, ArrowDownUp, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Zap } from 'lucide-react';
+import { AlertCircle, ArrowDownUp, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, ScrollText, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Zap } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
+import { openUrl } from '@tauri-apps/plugin-opener';
 import PasswordPromptDialog from './password-prompt-dialog';
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle,
@@ -30,7 +31,7 @@ import {
 import ConnectionTransferDialog from '../connections/connection-transfer-dialog';
 import { LocalModelPanel } from '../ai-chat/local-model-panel';
 import { Row, Toggle, DataRow } from './settings-controls';
-import { AppearanceSettings, EditorSettings } from './settings-sections';
+import { AppearanceSettings, EditorSettings, LogsSettings } from './settings-sections';
 import {
   AI_LIMIT_UNLIMITED,
   PROVIDERS,
@@ -59,6 +60,17 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
   const [section, setSection] = useState<Section>('appearance');
   // Per-connection import/export dialog (replaces the old all-or-nothing flow).
   const [connTransfer, setConnTransfer] = useState<'export' | 'import' | null>(null);
+
+  // App version for the nav footer — read from the bundled binary (the real
+  // build the user is running), so it reflects the installed version, not just
+  // the source package.json.
+  const [appVersion, setAppVersion] = useState<string>('');
+  useEffect(() => {
+    void import('@tauri-apps/api/app')
+      .then((m) => m.getVersion())
+      .then(setAppVersion)
+      .catch(() => setAppVersion(''));
+  }, []);
 
   // Password prompt for encrypted export/import. We open it and await the
   // user's password via a stashed resolver, so the export/import helpers can
@@ -570,6 +582,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
               ['editor', SquarePen, 'Editor'],
               ['ai', Sparkles, 'AI Providers'],
               ['data', ArrowDownUp, 'Import / Export'],
+              ['logs', ScrollText, 'Logs'],
             ] as const).map(
               ([id, Icon, label]) => (
                 <button
@@ -583,6 +596,20 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                 </button>
               )
             )}
+
+            {/* Version, pinned to the bottom of the nav. Clicking opens the
+                GitHub releases page (changelog / check for updates). */}
+            <button
+              type="button"
+              onClick={() => {
+                const base = process.env.GIT_URL || 'https://github.com/ByteLogicLabs/Table-Relay';
+                void openUrl(`${base}/releases`).catch(() => {});
+              }}
+              title="View releases on GitHub"
+              className="mt-auto mx-1 px-1.5 py-1 rounded text-left text-[10px] text-muted-foreground/60 hover:text-foreground hover:bg-muted/60 transition-colors"
+            >
+              Table Relay{appVersion ? ` v${appVersion}` : ''}
+            </button>
           </div>
 
           {/* Content */}
@@ -664,6 +691,11 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
             {/* ── Editor ── */}
             {section === 'editor' && (
               <EditorSettings settings={settings} />
+            )}
+
+            {/* ── Logs ── */}
+            {section === 'logs' && (
+              <LogsSettings />
             )}
 
             {/* ── AI Providers ── */}

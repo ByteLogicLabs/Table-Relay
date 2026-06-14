@@ -154,6 +154,101 @@ fn nvm_version_bins(home: &std::path::Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Directories to PREPEND to a spawned CLI's `PATH`. A Finder/Dock-launched app
+/// inherits a minimal PATH (`/usr/bin:/bin:...`) with none of the user's node
+/// manager / package-manager shims. Node-based CLIs (e.g. `claude`) then fail
+/// with `env: node: No such file or directory` even when the CLI binary itself
+/// was found, because their `#!/usr/bin/env node` shebang can't resolve `node`.
+/// We surface every common runtime location so the child can find node + sibling
+/// tools. Best-effort and existence-filtered; order puts user installs first.
+pub(crate) fn runtime_path_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(h) = home() {
+        // node version managers (where `node` actually lives for most users).
+        dirs.extend(nvm_version_bins(&h));
+        dirs.extend(fnm_version_bins(&h));
+        if cfg!(windows) {
+            // Volta: default %LOCALAPPDATA%\Volta\bin (the `~/.volta` layout is the
+            // Unix default; only used on Windows if VOLTA_HOME points there).
+            if let Some(v) = std::env::var_os("VOLTA_HOME").map(PathBuf::from) {
+                dirs.push(v.join("bin"));
+            }
+            if let Some(la) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+                dirs.push(la.join("Volta").join("bin"));
+            }
+            dirs.push(h.join(".volta\\bin"));
+            if let Some(appdata) = std::env::var_os("APPDATA").map(PathBuf::from) {
+                dirs.push(appdata.join("npm"));
+            }
+            // The MSI installer and nvm-windows symlink node.exe here.
+            for var in ["ProgramFiles", "ProgramFiles(x86)"] {
+                if let Some(pf) = std::env::var_os(var).map(PathBuf::from) {
+                    dirs.push(pf.join("nodejs"));
+                }
+            }
+        } else {
+            dirs.push(h.join(".volta/bin"));
+            if let Some(v) = std::env::var_os("VOLTA_HOME").map(PathBuf::from) {
+                dirs.push(v.join("bin"));
+            }
+            dirs.push(h.join(".fnm")); // fnm default
+            dirs.push(h.join("Library/Application Support/fnm/aliases/default/bin"));
+            dirs.push(h.join(".local/share/fnm/aliases/default/bin")); // fnm on Linux
+            dirs.push(h.join(".asdf/shims"));
+            dirs.push(h.join(".bun/bin"));
+            dirs.push(h.join(".local/bin"));
+            dirs.push(h.join(".npm-global/bin"));
+            dirs.push(h.join("bin"));
+            // Flatpak per-user exports.
+            dirs.push(h.join(".local/share/flatpak/exports/bin"));
+            // Coding-CLI native install dirs.
+            dirs.push(h.join(".opencode/bin"));
+            dirs.push(h.join(".kilo/bin"));
+            dirs.push(h.join(".codex/bin"));
+        }
+    }
+    if !cfg!(windows) {
+        for p in [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/local/sbin",
+            "/usr/bin",
+            "/bin",
+            "/snap/bin",                          // snap-installed node/CLIs
+            "/var/lib/flatpak/exports/bin",       // system flatpak exports
+        ] {
+            dirs.push(PathBuf::from(p));
+        }
+    }
+    dirs.into_iter().filter(|p| p.is_dir()).collect()
+}
+
+/// Enumerate fnm's per-version node bin directories (best-effort). fnm stores
+/// node under `$FNM_DIR` (or `~/.local/share/fnm` on Linux, `~/.fnm` elsewhere),
+/// with each version at `node-versions/<ver>/installation/bin`. Empty if fnm
+/// isn't installed.
+fn fnm_version_bins(home: &std::path::Path) -> Vec<PathBuf> {
+    let mut bases: Vec<PathBuf> = Vec::new();
+    if let Some(d) = std::env::var_os("FNM_DIR").map(PathBuf::from) {
+        bases.push(d);
+    }
+    bases.push(home.join(".local/share/fnm"));
+    bases.push(home.join(".fnm"));
+    let mut out = Vec::new();
+    for base in bases {
+        let versions = base.join("node-versions");
+        if let Ok(entries) = std::fs::read_dir(&versions) {
+            for e in entries.flatten() {
+                let bin = e.path().join("installation").join("bin");
+                if bin.is_dir() {
+                    out.push(bin);
+                }
+            }
+        }
+    }
+    out
+}
+
 // ── Claude Code ──────────────────────────────────────────────────────────────
 
 pub struct ClaudeCliSpec;
@@ -276,9 +371,18 @@ impl CliSpec for CodexCliSpec {
         // `never`, codex runs tools without prompting; our DB tools stay gated by
         // the app's own approval UI (via the MCP bridge). Shell stays sandboxed
         // (default read-only), so this doesn't grant codex unsandboxed exec.
+        //
+        // `--skip-git-repo-check`: codex exec normally refuses to run unless its
+        // working directory is a trusted git repo ("Not inside a trusted
+        // directory and --skip-git-repo-check was not specified"). A packaged
+        // .app launched from Finder inherits cwd `/`, which is not a git repo, so
+        // every codex turn failed in prod (but worked in dev, launched from the
+        // repo). We don't use codex's repo context at all — our DB tools come via
+        // MCP — so skipping the check is correct here.
         let mut a = vec![
             "exec".into(),
             "--json".into(),
+            "--skip-git-repo-check".into(),
             "-c".into(),
             "approval_policy=\"never\"".into(),
         ];

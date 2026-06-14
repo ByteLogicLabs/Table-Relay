@@ -1,6 +1,7 @@
 pub mod ai;
 pub mod db;
 pub mod foreign_import;
+pub mod logs;
 pub mod rail;
 pub mod secure_transfer;
 pub mod security;

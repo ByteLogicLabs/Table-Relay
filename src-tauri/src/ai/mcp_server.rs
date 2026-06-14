@@ -143,11 +143,29 @@ fn merge_json_config(
         std::fs::create_dir_all(parent)?;
     }
     let mut root: Value = match std::fs::read(path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({})),
+        Ok(bytes) if bytes.is_empty() => json!({}),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                // The file exists but doesn't parse. Do NOT overwrite it with a
+                // fresh object — that would wipe the user's entire config (for
+                // Gemini's settings.json this is all their settings, not just
+                // MCP). Skip the merge and leave their file untouched.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{} is not valid JSON, leaving it untouched: {e}", path.display()),
+                ));
+            }
+        },
         Err(_) => json!({}),
     };
     if !root.is_object() {
-        root = json!({});
+        // A non-object top level (array/string/number) is also unexpected; don't
+        // clobber it.
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a JSON object, leaving it untouched", path.display()),
+        ));
     }
     let obj = root.as_object_mut().unwrap();
     let bucket = obj
@@ -290,6 +308,35 @@ pub fn gemini_mcp_fragment(exe: &str, port: u16, token: &str) -> Value {
     })
 }
 
+/// Escape a string as a TOML basic string (the part inside the double quotes).
+/// Rust's `{:?}` is NOT TOML-conformant: it emits `\u{7f}` / `\u{e9}`-style
+/// escapes (braces, variable hex width) which TOML rejects, so a Windows path
+/// under a non-ASCII username (e.g. `C:\Users\José\...`) produced an invalid
+/// config.toml that codex couldn't parse → MCP server silently dropped. TOML
+/// basic strings escape `\` and `"`, the named controls, and other control
+/// chars as `\uXXXX` (exactly 4 hex digits).
+fn toml_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{08}' => out.push_str("\\b"),
+            '\t' => out.push_str("\\t"),
+            '\n' => out.push_str("\\n"),
+            '\u{0c}' => out.push_str("\\f"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\u{:04X}", c as u32));
+            }
+            // Printable chars (incl. non-ASCII like é) are valid in a TOML basic
+            // string verbatim; only backslash/quote/controls need escaping.
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// Codex config.toml `[mcp_servers.tablerelay]` block as a string.
 ///
 /// `tool_timeout_sec` is large because our DB tools block on the in-app
@@ -299,17 +346,36 @@ pub fn gemini_mcp_fragment(exe: &str, port: u16, token: &str) -> Value {
 /// subprocess + connecting back to the bridge isn't cut off either.
 pub fn codex_mcp_toml(exe: &str, port: u16, token: &str) -> String {
     format!(
-        "[mcp_servers.{name}]\ncommand = {exe:?}\nargs = [\"__mcp-server\", \"--port\", \"{port}\", \"--token\", \"{token}\"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 600\n",
+        "[mcp_servers.{name}]\ncommand = \"{exe}\"\nargs = [\"__mcp-server\", \"--port\", \"{port}\", \"--token\", \"{token}\"]\nstartup_timeout_sec = 30\ntool_timeout_sec = 600\n",
         name = MCP_SERVER_NAME,
-        exe = exe,
+        exe = toml_escape(exe),
         port = port,
-        token = token,
+        token = toml_escape(token),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn toml_escape_handles_nasty_chars() {
+        // Backslashes doubled, quotes escaped — the Windows-path case.
+        assert_eq!(
+            toml_escape(r"C:\Users\José\Table Relay\x.exe"),
+            r#"C:\\Users\\José\\Table Relay\\x.exe"#
+        );
+        // Non-ASCII (é) stays VERBATIM in a TOML basic string — it must NOT be
+        // emitted as `\u{e9}` (the `{:?}` bug that produced invalid TOML).
+        assert_eq!(toml_escape("é"), "é");
+        // Control char → \uXXXX (4 hex digits, uppercase, no braces).
+        assert_eq!(toml_escape("\u{7f}"), "\\u007F");
+        assert_eq!(toml_escape("\t"), "\\t");
+        // The full codex block embeds the escaped path inside real quotes and
+        // contains no stray unescaped quote/backslash.
+        let block = codex_mcp_toml(r"C:\a b\x.exe", 1, "tok");
+        assert!(block.contains(r#"command = "C:\\a b\\x.exe""#), "{block}");
+    }
 
     #[test]
     fn advertised_tools_cover_dispatch_surface() {

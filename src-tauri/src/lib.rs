@@ -68,6 +68,10 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             let dir = app.path().app_data_dir().expect("app data dir unavailable");
+            // Point file logging at <app-data>/logs so it works in release
+            // builds (not just the dev source tree). Logging stays OFF until the
+            // user opts in; `apply_persisted_logging` below restores their choice.
+            crate::log::set_log_dir(&dir);
             // The bundle identifier (and thus the app-data directory) has
             // changed twice: com.dbtable.app → com.tablerelay.app →
             // me.bytelogic.tablerelay. Carry the most recent prior store +
@@ -84,6 +88,10 @@ pub fn run() {
                     Store::open(dir.clone()).expect("store open failed even after reset")
                 }),
             );
+
+            // Restore the user's file-logging preference (default OFF in
+            // release). Must come after the store opens.
+            crate::commands::logs::apply_persisted_logging(&store);
 
             // Factory registry + built-in adapters. Must run before any
             // `db_connect` command can dispatch by adapter id.
@@ -337,6 +345,12 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Frontend → log bridge (writes fe:<tag> lines into logs/app.log)
             crate::log::frontend_log,
+            // Logs panel: toggle, read, clear, reveal.
+            commands::logs::logging_get_enabled,
+            commands::logs::logging_set_enabled,
+            commands::logs::logging_read,
+            commands::logs::logging_clear,
+            commands::logs::logging_open_dir,
             // Native-menu state: grey out connection-dependent items at home.
             set_connection_menu_enabled,
             // Native-menu state: show query file actions only on query tabs.

@@ -162,6 +162,27 @@ fn cmd_quote(s: &str) -> String {
     out
 }
 
+/// Prepend the CLI binary's own directory plus the common runtime dirs
+/// (node managers, package managers, homebrew) to the child's `PATH`, then the
+/// inherited PATH. Lets a Finder-launched app (minimal PATH) run node-based CLIs
+/// that shell out to `node`/sibling tools. Deduped, order-preserving.
+fn augment_path(cmd: &mut Command, bin: &std::path::Path) {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = bin.parent() {
+        dirs.push(parent.to_path_buf());
+    }
+    dirs.extend(crate::ai::cli_specs::runtime_path_dirs());
+    dirs.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
+    // Dedup while preserving first-seen order.
+    let mut seen = std::collections::HashSet::new();
+    dirs.retain(|p| seen.insert(p.clone()));
+    if let Ok(joined) = std::env::join_paths(dirs) {
+        cmd.env("PATH", joined);
+    }
+}
+
 /// A generic CLI provider parameterized by a [`CliSpec`].
 pub struct CliProvider {
     spec: Arc<dyn CliSpec>,
@@ -272,6 +293,20 @@ impl AiProvider for CliProvider {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Run from the user's home rather than inheriting the app's cwd. A
+        // packaged .app launched from Finder has cwd `/`, which confuses some
+        // CLIs (e.g. codex's git-repo trust check). Home is always present and
+        // writable; we don't rely on the CLI's working directory for anything.
+        if let Some(home) = crate::ai::cli_specs::home() {
+            cmd.current_dir(home);
+        }
+        // Augment PATH with node-manager / package-manager dirs. A Finder-
+        // launched app inherits a minimal PATH, so node-based CLIs like `claude`
+        // (`#!/usr/bin/env node`) fail with "env: node: No such file or
+        // directory" even when the CLI binary itself was located. Prepend the
+        // common runtime locations (nvm/volta/fnm/homebrew/...) so `node` and any
+        // sibling tools resolve.
+        augment_path(&mut cmd, &self.bin);
         for (k, v) in self.spec.extra_env() {
             cmd.env(k, v);
         }
@@ -446,9 +481,16 @@ impl AiProvider for CliProvider {
                         stderr_text.clone()
                     };
                     yield TokenChunk { request_id: request_id.clone(), delta: msg, finish_reason: Some(FinishReason::Error) };
-                } else if !emitted_any && !stderr_text.is_empty() {
-                    // Clean exit but no output + stderr → surface the stderr.
-                    yield TokenChunk { request_id: request_id.clone(), delta: stderr_text, finish_reason: Some(FinishReason::Error) };
+                } else if !emitted_any {
+                    // Clean exit (or tolerated non-zero) but we streamed nothing.
+                    // Surface stderr if present, otherwise an explicit placeholder
+                    // so an empty reply is visibly distinct from a real answer
+                    // (a blank bubble reads as a hang/bug to the user).
+                    if stderr_text.is_empty() {
+                        yield TokenChunk { request_id: request_id.clone(), delta: "[no output from CLI]".into(), finish_reason: Some(FinishReason::Error) };
+                    } else {
+                        yield TokenChunk { request_id: request_id.clone(), delta: stderr_text, finish_reason: Some(FinishReason::Error) };
+                    }
                 } else {
                     yield TokenChunk { request_id: request_id.clone(), delta: String::new(), finish_reason: Some(FinishReason::Stop) };
                 }

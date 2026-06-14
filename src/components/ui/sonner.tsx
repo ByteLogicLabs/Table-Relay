@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react"
 import { useTheme } from "next-themes"
 import { Toaster as Sonner, toast, type ToasterProps } from "sonner"
-import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, OctagonXIcon, Loader2Icon, XIcon } from "lucide-react"
+import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, CircleAlertIcon, Loader2Icon, XIcon } from "lucide-react"
 
 // Distance from the viewport edge to the toast stack. We push it in a bit so
 // the "Clear all" pill can sit at the edge above (top) / below (bottom) the
@@ -28,8 +28,11 @@ const Toaster = ({ ...props }: ToasterProps) => {
           warning: (
             <TriangleAlertIcon className="size-4" />
           ),
+          // CircleAlert (circle with "!"), NOT an X-style icon: an octagon/X
+          // error icon looks like a second close button next to sonner's actual
+          // close ×, confusing users into thinking there are two close buttons.
           error: (
-            <OctagonXIcon className="size-4" />
+            <CircleAlertIcon className="size-4" />
           ),
           loading: (
             <Loader2Icon className="size-4 animate-spin" />
