@@ -2,16 +2,22 @@ import { useEffect, useState } from 'react';
 import { Shield } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
+import { Tooltip } from '../../components/ui/tooltip';
 import { Checkbox } from '../../components/ui/checkbox';
 import { ai, isAiError, type AutoApprovalFlags } from '../../lib/ai';
+import { persistAutoApprovals } from '../../lib/ai-permissions';
+import { useSettings } from '../../lib/settings-store';
 import { toast } from 'sonner';
 
 /** Permissions popover — lets the user preauthorize tools so the AI can
  *  call them without an Approve/Deny prompt every time. Flags live in the
- *  Rust `AutoApprovals` state (in-memory) and reset on app restart. */
+ *  Rust `AutoApprovals` state (in-memory); they reset on restart unless
+ *  "Remember AI permissions across restarts" is on (Settings → AI), in which
+ *  case they're mirrored to the encrypted store and restored on boot. */
 export function PermissionsButton() {
   const [flags, setFlags] = useState<AutoApprovalFlags | null>(null);
   const [open, setOpen] = useState(false);
+  const persistOn = useSettings().persistAiApprovals;
 
   useEffect(() => {
     // Fetch once on mount. We re-fetch when the popover opens to pick up
@@ -42,6 +48,8 @@ export function PermissionsButton() {
     setFlags(next);
     try {
       await ai.setAutoApprovals(next);
+      // Mirror to disk when the user opted into persistence (no-op otherwise).
+      void persistAutoApprovals(next);
     } catch (err) {
       toast.error(isAiError(err) ? err.message : String(err));
       setFlags(flags);
@@ -54,29 +62,33 @@ export function PermissionsButton() {
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger
-        render={(props) => (
-          <Button
-            {...props}
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 relative"
-            title="AI permissions — auto-approve tool calls"
-            aria-label="AI permissions"
-          >
-            <Shield className="w-3.5 h-3.5" />
-            {grantedCount > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-primary text-primary-foreground text-[8px] leading-[14px] text-center font-medium">
-                {grantedCount}
-              </span>
-            )}
-          </Button>
-        )}
-      />
+      <Tooltip content="AI permissions — auto-approve tool calls">
+        <PopoverTrigger
+          render={(props) => (
+            <Button
+              {...props}
+              variant="ghost"
+              size="icon"
+              className="h-6 w-6 relative"
+              aria-label="AI permissions"
+            >
+              <Shield className="w-3 h-3" />
+              {grantedCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-3.5 h-3.5 rounded-full bg-primary text-primary-foreground text-[8px] leading-[14px] text-center font-medium">
+                  {grantedCount}
+                </span>
+              )}
+            </Button>
+          )}
+        />
+      </Tooltip>
       <PopoverContent align="end" className="w-80 p-3 max-h-[70vh] overflow-auto">
         <div className="text-xs font-medium mb-1">AI permissions</div>
         <div className="text-[10.5px] text-muted-foreground mb-3">
-          Checked tools run without prompting. Resets when the app restarts.
+          Checked tools run without prompting.{' '}
+          {persistOn
+            ? 'Remembered across restarts (change in Settings → AI).'
+            : 'Resets when the app restarts.'}
         </div>
         {PERMISSION_GROUPS.map(group => (
           <div key={group.label} className="mb-3 last:mb-0">

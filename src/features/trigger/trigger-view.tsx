@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
-import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft } from 'lucide-react';
+import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
 import { ConnectionProfile } from '../../types';
@@ -210,11 +210,28 @@ export default function TriggerView({
     }
   };
 
+  // Re-load on `tablerelay:reload` for THIS connection. For Postgres a database
+  // switch re-points the single pool and fires reload; without re-loading, a
+  // trigger opened against the previous database would show a stale "not found".
+  const [reloadTick, setReloadTick] = useState(0);
+  const userEditedRef = useRef(userEdited);
+  userEditedRef.current = userEdited;
+  useEffect(() => {
+    const onReload = (e: Event) => {
+      const cid = (e as CustomEvent<{ connectionId?: string | null }>).detail?.connectionId;
+      if (!cid || cid === connection.id) setReloadTick((t) => t + 1);
+    };
+    window.addEventListener('tablerelay:reload', onReload);
+    return () => window.removeEventListener('tablerelay:reload', onReload);
+  }, [connection.id]);
+
   useEffect(() => {
     if (hasSeed) {
       // AI-prefilled buffer — nothing to fetch or scaffold.
       return;
     }
+    // Don't clobber unsaved edits on a reload-triggered refetch.
+    if (reloadTick > 0 && userEditedRef.current) return;
     if (isNew) {
       if (hasPersistedDraft) return; // keep the user's restored buffer
       // Re-seed the scaffold if the dialect resolves after first paint.
@@ -248,7 +265,7 @@ export default function TriggerView({
     // (we echo edits up to the tab), and re-running this effect would refetch /
     // reset on each character. We only key on the trigger's identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [connection.id, schema, name, isNew, dialect, hasSeed]);
+  }, [connection.id, schema, name, isNew, dialect, hasSeed, reloadTick]);
 
   // Only dirty after the user has made at least one explicit edit. This prevents
   // the scaffold (new trigger) or a restored persisted buffer (tab switch-back)
@@ -390,9 +407,21 @@ export default function TriggerView({
             Format SQL
           </Button>
         </div>
-        <div className="text-xs text-muted-foreground font-mono truncate">
-          TRIGGER · {schema}.{def?.name ?? (isNew ? '(new)' : name)}
-          {def?.table && <span className="opacity-70"> · on {def.table}</span>}
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="text-xs text-muted-foreground font-mono truncate">
+            TRIGGER · {schema}.{def?.name ?? (isNew ? '(new)' : name)}
+            {def?.table && <span className="opacity-70"> · on {def.table}</span>}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="shrink-0"
+            onClick={() => window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'))}
+            title="AI Chat — ask the assistant to edit this trigger"
+          >
+            <Sparkles className="w-4 h-4 mr-2" />
+            Chat
+          </Button>
         </div>
       </div>
 

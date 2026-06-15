@@ -135,6 +135,27 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// How hard the model should think on a turn. A user-facing effort preset maps
+/// to this; providers translate it to their own thinking/reasoning control
+/// (OpenAI `reasoning_effort`, Anthropic `thinking.budget_tokens`, Gemini
+/// `thinkingConfig`). Providers/models that don't support it omit it silently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+}
+
+/// Per-turn knobs shared by the tool-calling path. `max_tokens` caps the
+/// response; `reasoning_effort` requests a thinking budget where supported.
+/// Both `None` means "use the provider default" (back-compat).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TurnOptions {
+    pub max_tokens: Option<u32>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
 /// Completion request shape used by every provider. Prompt assembly happens
 /// one level up (session / chat command), so the provider only needs the
 /// finished message list.
@@ -146,6 +167,7 @@ pub struct CompletionRequest {
     pub max_tokens: Option<u32>,
     pub temperature: Option<f32>,
     pub stop: Option<Vec<String>>,
+    pub reasoning_effort: Option<ReasoningEffort>,
 }
 
 /// One streamed chunk. `delta` is the incremental text to append. `finish_reason`
@@ -262,6 +284,7 @@ pub trait AiProvider: Send + Sync {
         &self,
         _history: &[ChatMessage],
         _tools: Option<&[tools::ToolDef]>,
+        _opts: TurnOptions,
     ) -> Result<openai::ToolTurn, AiError> {
         Err(AiError::InvalidModel(
             "this provider doesn't support tool use".into(),
@@ -282,6 +305,7 @@ pub trait AiProvider: Send + Sync {
         &self,
         _history: &[ChatMessage],
         _tools: Option<&[tools::ToolDef]>,
+        _opts: TurnOptions,
     ) -> Result<Option<BoxStream<'static, Result<openai::ToolStreamEvent, AiError>>>, AiError> {
         Ok(None)
     }

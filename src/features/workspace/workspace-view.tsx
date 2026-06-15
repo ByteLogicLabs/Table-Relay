@@ -38,6 +38,7 @@ import {
   clearCachedGridsWhere,
 } from "../../state/tab-data-cache";
 import { clearQueryResultSnapshot } from "../../state/query-result-cache";
+import { recordQueryLog, clearQueryLogStore } from "../../state/query-log-store";
 import { setDebugPage } from "../../state/debug";
 import { getAppState, setAppState } from "../../lib/app-state-store";
 import {
@@ -481,6 +482,9 @@ export default function WorkspaceView({
       timestamp: entry.timestamp ?? Date.now(),
       ...entry,
     };
+    // Mirror into the module store so the AI chat can read recent activity
+    // (especially errors) to diagnose + retry.
+    recordQueryLog(full);
     setQueryLogs((prev) => {
       const existing = prev[full.connectionId] ?? [];
       const next = [...existing, full];
@@ -494,6 +498,7 @@ export default function WorkspaceView({
   };
 
   const clearQueryLog = (connectionId: string) => {
+    clearQueryLogStore(connectionId);
     setQueryLogs((prev) => ({ ...prev, [connectionId]: [] }));
   };
 
@@ -1907,7 +1912,13 @@ export default function WorkspaceView({
           <ChatPanel
             onClose={() => setChatOpen(false)}
             focusedConnectionId={focusedConnection?.id}
-            focusedSchema={focusedTile?.databaseName ?? undefined}
+            // The SQL *schema* the AI should scope to — NOT the rail tile's
+            // database name. For Postgres the tile is the database (e.g. `apex`)
+            // but tables live in a schema (`public`); passing the database name
+            // here made the model call describe_table(schema="apex") → "not
+            // found". `focusedTileEffectiveSchema` resolves it to the real
+            // schema (collapses to the db name for MySQL/SQLite).
+            focusedSchema={focusedTileEffectiveSchema ?? focusedTile?.databaseName ?? undefined}
             focusedLabel={
               focusedConnection && focusedTile
                 ? `${focusedConnection.name} / ${focusedTile.databaseName}`

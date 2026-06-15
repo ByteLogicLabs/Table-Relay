@@ -1,10 +1,13 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp, Terminal, RefreshCw } from 'lucide-react';
+import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp, Terminal, RefreshCw, SlidersHorizontal } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
+import { Tooltip } from '../../components/ui/tooltip';
+import { useSettings, saveSettings, EFFORT_LEVELS, EFFORT_LABELS, type EffortLevel } from '../../lib/settings-store';
 import { ConversationHistory } from './conversation-history';
 import { Button } from '../../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 import { SearchableSelect } from '../../components/ui/searchable-select';
-import { useAi, start, end, sendMessage, stopStreaming, syncStatus, newChat, setFocusedConnection, currentChat, restoreBackendTranscript, setSwapping as setSessionSwapping, type ChatPrefill } from '../../state/ai';
+import { useAi, start, end, sendMessage, stopStreaming, syncStatus, newChat, renameConversation, setFocusedConnection, currentChat, restoreBackendTranscript, setSwapping as setSessionSwapping, type ChatPrefill } from '../../state/ai';
 import { ai, isAiError, type AiProviderKind, type ChatFocus } from '../../lib/ai';
 import {
   type CredentialProfile,
@@ -72,21 +75,20 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
 
   return (
     <div className="h-full flex flex-col bg-background min-w-0 relative">
-      <div className="h-10 shrink-0 border-b border-border flex items-center justify-between px-3 bg-muted/10">
+      {/* Title row — the conversation's name is the primary element, like a
+          tab. Click to rename. The provider/model pickers move to the controls
+          row below so the title gets the full width. */}
+      <div className="h-10 shrink-0 border-b border-border flex items-center justify-between gap-2 px-3 bg-muted/10">
         <div className="flex items-center gap-2 min-w-0 flex-1">
           <Sparkles className="w-4 h-4 text-primary shrink-0" />
-          {/* Hide the static "AI Chat" label once a session is active — the
-              credential + model pickers need the horizontal room, and without
-              this they overflowed under the right-side action buttons. */}
-          {!showActive && <span className="text-sm font-medium truncate">AI Chat</span>}
-          {showActive && <ActiveCredentialPicker sessionKind={s.providerKind} />}
-          {showActive && <ActiveModelPicker providerKind={s.providerKind} model={s.model} />}
+          {showActive
+            ? <ChatTitle title={chat.conversationTitle} hasConversation={!!chat.conversationId} />
+            : <span className="text-sm font-medium truncate">AI Chat</span>}
         </div>
         <div className="flex items-center gap-0.5 shrink-0">
           <ConversationHistory />
           {showActive && (
             <>
-              <PermissionsButton />
               <Button
                 variant="ghost"
                 size="icon"
@@ -114,17 +116,263 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
         </div>
       </div>
 
-      {showActive
-        ? <ActiveSession
-            focusedConnectionId={focusedConnectionId}
-            focusedSchema={focusedSchema}
-            focusedLabel={focusedLabel}
-            focus={focus}
-            pendingPrefillRef={pendingPrefillRef}
-            prefillTick={prefillTick}
-          />
-        : <StartScreen pendingPrefill={pendingPrefillRef.current} prefillTick={prefillTick} />}
+      {showActive ? (
+        <ActiveSession
+          focusedConnectionId={focusedConnectionId}
+          focusedSchema={focusedSchema}
+          focusedLabel={focusedLabel}
+          focus={focus}
+          pendingPrefillRef={pendingPrefillRef}
+          prefillTick={prefillTick}
+        />
+      ) : s.status === 'starting' ? (
+        <StartingScreen kind={s.startingKind} />
+      ) : (
+        <StartScreen pendingPrefill={pendingPrefillRef.current} prefillTick={prefillTick} />
+      )}
     </div>
+  );
+}
+
+/**
+ * Editable conversation title in the header — the chat's primary identity, like
+ * a tab. Click to rename; Enter / blur saves, Esc cancels. Shows a muted "New
+ * chat" placeholder until the first message creates the conversation (the title
+ * then auto-fills from that message unless the user typed one first).
+ */
+function ChatTitle({ title, hasConversation }: { title?: string; hasConversation: boolean }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const display = title?.trim() || 'New chat';
+  const isPlaceholder = !title?.trim();
+
+  const begin = () => {
+    setDraft(title ?? '');
+    setEditing(true);
+  };
+  const commit = () => {
+    setEditing(false);
+    const next = draft.trim();
+    // Renaming before the first message is allowed: the title is stashed on the
+    // bucket and applied when the conversation is created.
+    if (next !== (title ?? '').trim()) renameConversation(next);
+  };
+  const cancel = () => setEditing(false);
+
+  useEffect(() => {
+    if (editing) {
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [editing]);
+
+  if (editing) {
+    return (
+      <input
+        ref={inputRef}
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') { e.preventDefault(); commit(); }
+          else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+        }}
+        placeholder="Conversation title"
+        maxLength={120}
+        className="min-w-0 flex-1 bg-transparent text-sm font-medium outline-none border-b border-primary/50 focus:border-primary px-0 py-0"
+      />
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={begin}
+      title={hasConversation ? 'Click to rename' : 'Name this chat'}
+      className={`min-w-0 flex-1 text-left text-sm font-medium truncate rounded px-1 -mx-1 py-0.5 hover:bg-muted/50 transition-colors ${
+        isPlaceholder ? 'text-muted-foreground' : ''
+      }`}
+    >
+      {display}
+    </button>
+  );
+}
+
+/**
+ * Session controls menu on the composer bar. A settings-icon trigger opens a
+ * popover (above the input) holding the provider/credential switcher, model
+ * switcher, and the effort slider — freeing the top bar for the conversation
+ * title while keeping the controls next to where the user types.
+ */
+function SessionMenu({ providerKind, model }: { providerKind?: AiProviderKind; model?: string }) {
+  return (
+    <Popover>
+      <Tooltip content="Session controls — provider, model, effort">
+        <PopoverTrigger
+          render={(props) => (
+            <button
+              {...props}
+              type="button"
+              className="h-6 w-6 inline-flex items-center justify-center rounded-md border border-border bg-muted/40 text-muted-foreground hover:text-foreground hover:bg-muted/70 transition-colors shrink-0"
+              aria-label="Session controls"
+            >
+              <SlidersHorizontal className="w-3 h-3" />
+            </button>
+          )}
+        />
+      </Tooltip>
+      <PopoverContent side="top" align="start" sideOffset={8} className="w-64 p-3">
+        <div className="flex flex-col gap-3">
+          {/* `[&_button]:w-full [&_button]:max-w-none` stretches the picker
+              triggers (sized for the compact header) to fill the menu column. */}
+          <div className="flex flex-col gap-1 [&>div]:w-full [&_button]:w-full [&_button]:max-w-none">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Provider
+            </span>
+            <ActiveCredentialPicker sessionKind={providerKind} />
+          </div>
+          <div className="flex flex-col gap-1 [&>div]:w-full [&_button]:w-full [&_button]:max-w-none">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Model
+            </span>
+            <ActiveModelPicker providerKind={providerKind} model={model} />
+          </div>
+          <EffortSlider />
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/**
+ * Effort slider — how hard the AI works per turn. Four discrete stops
+ * (Low / Medium / High / Extra High) mapped to a preset of concrete knobs
+ * (tool-call budget, response length, reasoning effort) in `EFFORT_PRESETS`.
+ * Persisted to settings; the next send reads it.
+ */
+function EffortSlider() {
+  const settings = useSettings();
+  const idx = Math.max(0, EFFORT_LEVELS.indexOf(settings.aiEffort));
+  const level = EFFORT_LEVELS[idx] ?? 'medium';
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Effort
+        </span>
+        <span className="text-[11px] font-medium text-primary">{EFFORT_LABELS[level]}</span>
+      </div>
+      <input
+        type="range"
+        min={0}
+        max={EFFORT_LEVELS.length - 1}
+        step={1}
+        value={idx}
+        onChange={(e) => {
+          const next = EFFORT_LEVELS[Number(e.target.value)] as EffortLevel | undefined;
+          if (next) saveSettings({ aiEffort: next });
+        }}
+        className="w-full accent-primary cursor-pointer"
+        title={`Effort: ${EFFORT_LABELS[level]}`}
+      />
+      <div className="flex justify-between text-[9px] text-muted-foreground">
+        {EFFORT_LEVELS.map((lvl) => (
+          <span
+            key={lvl}
+            className={lvl === level ? 'text-primary font-medium' : ''}
+          >
+            {EFFORT_LABELS[lvl]}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Full-panel loading screen shown while a session is starting. Replaces the
+ * StartScreen (frozen, disabled buttons) so a slow start — especially local
+ * Llama, which spawns `llama-server` and can take several seconds — reads as
+ * "working" instead of a hang.
+ */
+function StartingScreen({ kind }: { kind?: AiProviderKind }) {
+  const isLlama = kind === 'llama_local';
+  const label = kind ? providerKindLabel(kind) : 'AI';
+  return (
+    <div className="flex-1 min-h-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+      <Loader2 className="w-6 h-6 text-primary animate-spin" />
+      <div className="text-sm font-medium">Starting {label}…</div>
+      <div className="text-[11px] text-muted-foreground max-w-[15rem] leading-relaxed">
+        {isLlama
+          ? 'Loading the local model and starting llama-server. The first start can take a little while.'
+          : 'Connecting to the provider and preparing the session.'}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Queued-messages popover. The chip shows the count; clicking it lists every
+ * message waiting to send after the current turn, each editable inline and
+ * removable. FIFO order top-to-bottom. Empty list closes implicitly (the chip
+ * unmounts when the queue drains).
+ */
+function QueuePopover({
+  queue,
+  onEdit,
+  onRemove,
+}: {
+  queue: Array<{ id: string; text: string; kind?: ChatPrefill['kind'] | null }>;
+  onEdit: (id: string, text: string) => void;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <Popover>
+      <PopoverTrigger
+        render={(props) => (
+          <button
+            {...props}
+            type="button"
+            className="text-[10px] text-primary bg-primary/10 border border-primary/30 px-1.5 py-0.5 rounded-full hover:bg-primary/20 transition-colors"
+            title="View, edit, or remove queued messages"
+          >
+            {queue.length} queued
+          </button>
+        )}
+      />
+      <PopoverContent side="top" align="end" sideOffset={8} className="w-72 p-2">
+        <div className="px-1 pb-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Queued · sends after this turn
+        </div>
+        <div className="flex flex-col gap-1.5 max-h-64 overflow-y-auto">
+          {queue.map((item, i) => (
+            <div key={item.id} className="flex items-start gap-1.5">
+              <span className="mt-1.5 text-[10px] text-muted-foreground tabular-nums w-3 text-right shrink-0">
+                {i + 1}
+              </span>
+              <textarea
+                value={item.text}
+                onChange={(e) => onEdit(item.id, e.target.value)}
+                rows={1}
+                className="flex-1 min-w-0 resize-none rounded-md border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary/50 max-h-24 overflow-y-auto"
+              />
+              <button
+                type="button"
+                onClick={() => onRemove(item.id)}
+                className="mt-0.5 p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 shrink-0"
+                title="Remove from queue"
+                aria-label="Remove from queue"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 
@@ -367,38 +615,7 @@ function ActiveModelPicker({
   providerKind?: AiProviderKind;
   model?: string;
 }) {
-  const [models, setModels] = useState<string[]>([]);
-  const [loading, setLoading] = useState(false);
   const [swapping, setSwapping] = useState(false);
-  const [opened, setOpened] = useState(false);
-
-  // Fetch models on first open only — the list doesn't change between opens
-  // and re-fetching on every header click would be chatty. Tap "Refresh" to
-  // force it later if we ever add such a button.
-  useEffect(() => {
-    if (!opened || !providerKind || providerKind === 'llama_local' || models.length > 0) return;
-    let cancelled = false;
-    (async () => {
-      setLoading(true);
-      try {
-        const saved = await ai.settingsGet(providerKind);
-        const list = await ai.listModels(providerKind, {
-          apiKey: saved?.apiKey,
-          baseUrl: saved?.baseUrl,
-        });
-        if (cancelled) return;
-        // Promote the current model so it's always the selected row even
-        // when the provider's /models endpoint doesn't echo it.
-        const withCurrent = model && !list.includes(model) ? [model, ...list] : list;
-        setModels(withCurrent);
-      } catch (e) {
-        if (!cancelled) toast.error(isAiError(e) ? e.message : String(e));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => { cancelled = true; };
-  }, [opened, providerKind, model, models.length]);
 
   // CLI providers (claude/codex/gemini/opencode) authenticate via the installed
   // binary, not a stored API key — so they have no saved credentials and must
@@ -456,70 +673,38 @@ function ActiveModelPicker({
     );
   }
 
-  // Some CLIs (notably opencode) expose hundreds of `provider/model` ids — a
-  // plain dropdown is unusable there. Lazy-load on mount for the searchable
-  // variant (it has no open-driven fetch hook) and render a filterable picker
-  // when the list is large.
-  const useSearch = isCli;
-  if (useSearch) {
-    return (
-      <CliModelSearchPicker
-        providerKind={providerKind}
-        model={model}
-        onPick={swap}
-        swapping={swapping}
-      />
-    );
-  }
-
+  // Every model-switchable provider uses the same searchable picker: a filter
+  // box matters everywhere (opencode lists hundreds of `provider/model` ids;
+  // hosted catalogs run to dozens). `allowCustom` lets the user type an id the
+  // catalog doesn't return. `isCli` controls whether we fetch with saved creds.
   return (
-    <Select
-      value={model ?? ''}
-      onValueChange={swap}
-      onOpenChange={setOpened}
-      disabled={swapping}
-    >
-      <SelectTrigger
-        size="sm"
-        className="h-7 max-w-44 min-w-0 text-[11px] font-mono text-foreground bg-background border-border hover:bg-muted/40 px-2 rounded-md"
-        title="Switch model — keeps credentials, clears history"
-      >
-        {swapping
-          ? <><Loader2 className="w-3 h-3 mr-1 animate-spin" /> switching…</>
-          : <SelectValue placeholder={label} className="truncate">{label}</SelectValue>}
-      </SelectTrigger>
-      <SelectContent>
-        {loading && (
-          <div className="px-2 py-1 text-xs text-muted-foreground flex items-center gap-2">
-            <Loader2 className="w-3 h-3 animate-spin" /> Loading models…
-          </div>
-        )}
-        {!loading && models.length === 0 && (
-          <div className="px-2 py-1 text-xs text-muted-foreground">
-            No models found
-          </div>
-        )}
-        {models.map(m => (
-          <SelectItem key={m} value={m} className="text-xs font-mono">{m}</SelectItem>
-        ))}
-      </SelectContent>
-    </Select>
+    <ModelSearchPicker
+      providerKind={providerKind}
+      model={model}
+      isCli={isCli}
+      onPick={swap}
+      swapping={swapping}
+    />
   );
 }
 
 /**
- * Searchable model picker for CLI providers. opencode alone lists hundreds of
- * `provider/model` ids, so a filter box is essential. Fetches the catalog on
- * mount (the underlying SearchableSelect has no open-driven fetch hook).
+ * Searchable model picker used for every model-switchable provider (hosted +
+ * CLI). A filter box matters everywhere — opencode lists hundreds of
+ * `provider/model` ids and hosted catalogs run to dozens. Fetches the catalog
+ * on mount (the underlying SearchableSelect has no open-driven fetch hook);
+ * `isCli` decides whether the request carries saved credentials.
  */
-function CliModelSearchPicker({
+function ModelSearchPicker({
   providerKind,
   model,
+  isCli,
   onPick,
   swapping,
 }: {
   providerKind: AiProviderKind;
   model?: string;
+  isCli: boolean;
   onPick: (m: string) => void;
   swapping: boolean;
 }) {
@@ -530,7 +715,13 @@ function CliModelSearchPicker({
     let cancelled = false;
     (async () => {
       try {
-        const list = await ai.listModels(providerKind, {});
+        // CLI providers auth through the binary (no creds). Hosted providers
+        // need the saved apiKey/baseUrl so the catalog request is authorized.
+        const creds = isCli ? {} : await ai.settingsGet(providerKind).catch(() => null);
+        const list = await ai.listModels(providerKind, {
+          apiKey: creds?.apiKey,
+          baseUrl: creds?.baseUrl,
+        });
         if (cancelled) return;
         const withCurrent = model && !list.includes(model) ? [model, ...list] : list;
         setModels(withCurrent);
@@ -541,7 +732,7 @@ function CliModelSearchPicker({
       }
     })();
     return () => { cancelled = true; };
-  }, [providerKind, model]);
+  }, [providerKind, model, isCli]);
 
   const options = models.map(m => ({ value: m, label: m }));
   // When no model is set, the CLI uses its own configured default — say so
@@ -562,7 +753,7 @@ function CliModelSearchPicker({
       disabled={swapping}
       placeholder={placeholder}
       searchPlaceholder="Search or type a model id…"
-      className="h-7 max-w-44 text-[11px] font-mono"
+      className="h-8 text-[11px] font-mono"
       allowCustom
     />
   );
@@ -924,8 +1115,11 @@ function ActiveSession({
   const [stickyKind, setStickyKind] = useState<ChatPrefill['kind'] | null>(null);
   // Outgoing message queue. The textarea stays editable while a turn is in
   // flight; pressing Send mid-stream enqueues the text and it fires
-  // automatically once the current turn finishes. FIFO.
-  const [queue, setQueue] = useState<Array<{ text: string; kind?: ChatPrefill['kind'] | null }>>([]);
+  // automatically once the current turn finishes. FIFO. Each item carries a
+  // stable `id` so the queue popover can edit / remove a specific entry.
+  const [queue, setQueue] = useState<
+    Array<{ id: string; text: string; kind?: ChatPrefill['kind'] | null }>
+  >([]);
 
   // Auto-scroll to bottom as messages stream in.
   useEffect(() => {
@@ -973,7 +1167,7 @@ function ActiveSession({
     // If a turn is already in flight, queue this one. The drain effect fires
     // it the moment the current turn finishes.
     if (streaming) {
-      setQueue(q => [...q, { text: outgoing, kind }]);
+      setQueue(q => [...q, { id: crypto.randomUUID(), text: outgoing, kind }]);
       return;
     }
 
@@ -992,6 +1186,11 @@ function ActiveSession({
     }
   };
 
+  // Queue management (from the queued-count popover).
+  const removeQueued = (id: string) => setQueue(q => q.filter(item => item.id !== id));
+  const editQueued = (id: string, text: string) =>
+    setQueue(q => q.map(item => (item.id === id ? { ...item, text } : item)));
+
   // Drain the queue: when a turn finishes (streaming → false) and there's a
   // queued message, send the next one. One at a time, FIFO.
   useEffect(() => {
@@ -999,6 +1198,9 @@ function ActiveSession({
     if (queue.length === 0) return;
     const [next, ...rest] = queue;
     setQueue(rest);
+    // An item edited down to empty is a no-op — drop it and let the effect
+    // re-run on the shortened queue instead of sending a blank turn.
+    if (!next.text.trim()) return;
     void sendMessage(next.text, {
       connectionId: focusedConnectionId,
       schema: focusedSchema,
@@ -1042,7 +1244,7 @@ function ActiveSession({
         )}
       </div>
 
-      <div className="shrink-0 border-t border-border p-2 bg-muted/5">
+      <div className="shrink-0 border-t border-border p-1.5 bg-muted/5">
         <div className="rounded-2xl border border-border bg-background focus-within:border-primary/40 transition-colors overflow-hidden">
           <textarea
             ref={textareaRef}
@@ -1067,19 +1269,35 @@ function ActiveSession({
             // Height is driven by the auto-grow effect (rows={1} = single line
             // baseline); `max-h-40` caps the growth and `overflow-y-auto` lets
             // it scroll past that instead of pushing the send bar off-screen.
-            className="w-full resize-none bg-transparent px-3 pt-2.5 pb-1 text-sm outline-none placeholder:text-muted-foreground max-h-40 overflow-y-auto leading-relaxed"
+            className="w-full resize-none bg-transparent px-3 pt-2 pb-0.5 text-sm outline-none placeholder:text-muted-foreground max-h-40 overflow-y-auto leading-normal"
           />
-          <div className="flex items-center gap-1 px-1.5 pb-1.5">
+          <div className="flex items-center gap-1 px-1.5 pb-1">
+            {/* Session controls — provider / model / effort, relocated off the
+                header so the title gets the full top bar. Opens above the input. */}
+            <SessionMenu providerKind={s.providerKind} model={s.model} />
             {/* Focus chip — the context that goes out with the next turn.
                 Lives on the input bar like claude-code's chat.log chip so
                 the user can see what's attached at a glance. */}
             {focusedLabel && (
-              <span
-                className="text-[10px] text-muted-foreground bg-muted/60 border border-border px-1.5 py-0.5 rounded truncate font-mono max-w-40"
-                title={`Schema context: ${focusedLabel}${focus ? ` · focus: ${focusLabel(focus)}` : ''}`}
+              <Tooltip
+                content={
+                  <span>
+                    Database context sent with your message
+                    <br />
+                    <span className="font-mono">{focusedLabel}</span>
+                    {focus && (
+                      <>
+                        {' · '}
+                        <span className="font-mono">{focusLabel(focus)}</span>
+                      </>
+                    )}
+                  </span>
+                }
               >
-                {focus ? focusLabel(focus) : focusedLabel}
-              </span>
+                <span className="h-6 inline-flex items-center text-[10px] text-muted-foreground bg-muted/40 border border-border px-1.5 rounded-md truncate font-mono max-w-40 cursor-default">
+                  {focus ? focusLabel(focus) : focusedLabel}
+                </span>
+              </Tooltip>
             )}
             <div className="flex-1" />
             {stickyKind && stickyKind !== 'chat' && (
@@ -1087,44 +1305,43 @@ function ActiveSession({
                 {stickyKind}
               </span>
             )}
-            {/* Queue count chip — shows how many messages are waiting to send. */}
+            {/* Queue chip — click to view / edit / remove queued messages. */}
             {queue.length > 0 && (
-              <span
-                className="text-[10px] text-primary bg-primary/10 border border-primary/30 px-1.5 py-0.5 rounded-full"
-                title={`${queue.length} message${queue.length === 1 ? '' : 's'} queued`}
-              >
-                {queue.length} queued
-              </span>
+              <QueuePopover queue={queue} onEdit={editQueued} onRemove={removeQueued} />
             )}
-            {/* Stop button — only while a turn is streaming. */}
-            {streaming && (
+            {/* AI permissions — sits next to the action button so it's in the
+                user's eyeline when they act, not tucked away in the header. */}
+            <PermissionsButton />
+            {/* One action button in a single slot: Stop while a turn is
+                streaming, Send otherwise. (Typing mid-stream still queues a
+                follow-up via Enter — see the textarea handler.) */}
+            {streaming ? (
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-7 w-7 rounded-full bg-destructive/10 text-destructive hover:bg-destructive/20"
+                className="h-6 w-6 rounded-full shrink-0 bg-destructive/10 text-destructive hover:bg-destructive/20"
                 onClick={() => void stopStreaming()}
                 title="Stop current turn"
                 aria-label="Stop"
               >
-                <Square className="w-3.5 h-3.5 fill-current" />
+                <Square className="w-3 h-3 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                variant="default"
+                size="icon"
+                className="h-6 w-6 rounded-full shrink-0"
+                onClick={() => void handleSend()}
+                disabled={!draft.trim()}
+                title="Send (Enter)"
+                aria-label="Send"
+              >
+                <ArrowUp className="w-3 h-3" />
               </Button>
             )}
-            {/* Send / queue button — always available when there's text. While
-                streaming it enqueues; otherwise it sends immediately. */}
-            <Button
-              variant="default"
-              size="icon"
-              className="h-7 w-7 rounded-full shrink-0"
-              onClick={() => void handleSend()}
-              disabled={!draft.trim()}
-              title={streaming ? 'Queue message' : 'Send (Enter)'}
-              aria-label={streaming ? 'Queue message' : 'Send'}
-            >
-              {streaming ? <Plus className="w-3.5 h-3.5" /> : <ArrowUp className="w-3.5 h-3.5" />}
-            </Button>
           </div>
         </div>
-        <p className="text-[10px] text-muted-foreground mt-1.5 px-1 text-center opacity-70">
+        <p className="text-[9px] text-muted-foreground mt-1 px-1 text-center opacity-70">
           {streaming ? 'Enter to queue · Shift+Enter for newline' : 'Enter to send · Shift+Enter for newline'}
         </p>
       </div>

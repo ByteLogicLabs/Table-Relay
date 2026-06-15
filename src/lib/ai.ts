@@ -247,6 +247,7 @@ export type ChatFocus =
   | { type: 'query'; sql: string }
   | { type: 'routine'; schema: string; name: string; kind: 'function' | 'procedure' | 'view' }
   | { type: 'table'; schema: string; name: string }
+  | { type: 'trigger'; schema: string; name: string }
   | { type: 'realtime'; pattern: string; isRunning: boolean; recentChannels: string[] };
 
 // --- Local model catalog (M8.1) ---
@@ -560,6 +561,9 @@ export const ai = {
       errorMessage?: string;
       maxIterations?: number;
       maxRepeatCalls?: number;
+      maxTokens?: number;
+      reasoningEffort?: 'low' | 'medium' | 'high';
+      recentQueryLog?: string;
     },
   ) =>
     invoke<void>('ai_chat_send', {
@@ -574,6 +578,9 @@ export const ai = {
         error_message: opts?.errorMessage,
         max_iterations: opts?.maxIterations,
         max_repeat_calls: opts?.maxRepeatCalls,
+        max_tokens: opts?.maxTokens,
+        reasoning_effort: opts?.reasoningEffort,
+        recent_query_log: opts?.recentQueryLog,
       },
     }),
 

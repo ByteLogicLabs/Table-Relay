@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
-import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft } from 'lucide-react';
+import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
 import { ConnectionProfile } from '../../types';
@@ -163,6 +163,10 @@ export default function RoutineView({
   // True once the user has made at least one explicit edit via Monaco onChange.
   // Prevents the scaffold from showing the unsaved dot before any typing.
   const [userEdited, setUserEdited] = useState(false);
+  // Live mirror so the reload effect can skip clobbering unsaved edits without
+  // re-subscribing on every keystroke.
+  const userEditedRef = useRef(false);
+  userEditedRef.current = userEdited;
 
   const load = async () => {
     if (kind === 'view') {
@@ -197,8 +201,25 @@ export default function RoutineView({
     }
   };
 
+  // Re-load on `tablerelay:reload` for THIS connection. Critical for Postgres:
+  // a database switch re-points the connection's single pool and fires reload —
+  // without re-loading here, a routine opened against the previous database
+  // would keep showing a stale "not found" (the pool now targets another DB).
+  const [reloadTick, setReloadTick] = useState(0);
+  useEffect(() => {
+    const onReload = (e: Event) => {
+      const cid = (e as CustomEvent<{ connectionId?: string | null }>).detail?.connectionId;
+      if (!cid || cid === connection.id) setReloadTick((t) => t + 1);
+    };
+    window.addEventListener('tablerelay:reload', onReload);
+    return () => window.removeEventListener('tablerelay:reload', onReload);
+  }, [connection.id]);
+
   useEffect(() => {
     if (isNew) return; // scaffold already seeded; nothing to fetch.
+    // Don't clobber unsaved edits on a reload-triggered refetch (the initial
+    // load runs with no edits, so it's unaffected).
+    if (reloadTick > 0 && userEditedRef.current) return;
     let cancelled = false;
     (async () => {
       try {
@@ -226,7 +247,7 @@ export default function RoutineView({
       }
     })();
     return () => { cancelled = true; };
-  }, [connection.id, schema, name, kind, isNew, dialect]);
+  }, [connection.id, schema, name, kind, isNew, dialect, reloadTick]);
 
   const dirty = userEdited && (isNew
     ? draft.trim().length > 0 && draft !== baselineRef
@@ -369,9 +390,21 @@ export default function RoutineView({
             Format SQL
           </Button>
         </div>
-        <div className="text-xs text-muted-foreground font-mono truncate">
-          {kind.toUpperCase()} · {schema}.{def?.name ?? (isNew ? '(new)' : '')}
-          {def?.definer && <span className="opacity-70"> · definer {def.definer}</span>}
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="text-xs text-muted-foreground font-mono truncate">
+            {kind.toUpperCase()} · {schema}.{def?.name ?? (isNew ? '(new)' : '')}
+            {def?.definer && <span className="opacity-70"> · definer {def.definer}</span>}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="shrink-0"
+            onClick={() => window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'))}
+            title="AI Chat — ask the assistant to edit this routine"
+          >
+            <Sparkles className="w-4 h-4 mr-2" />
+            Chat
+          </Button>
         </div>
       </div>
 

@@ -1,10 +1,22 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
+import {readFileSync} from 'fs';
 import {defineConfig, loadEnv} from 'vite';
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+
+// App version, sourced from package.json so it's the single place to bump for
+// the in-app version display + update check. Read at build time and injected as
+// `process.env.APP_VERSION`.
+const pkgVersion = (() => {
+  try {
+    return JSON.parse(readFileSync(path.resolve(__dirname, 'package.json'), 'utf8')).version as string;
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 export default defineConfig(({mode}) => {
   const env = loadEnv(mode, '.', '');
@@ -17,6 +29,9 @@ export default defineConfig(({mode}) => {
       'process.env.GIT_URL': JSON.stringify(
         env.GIT_URL || 'https://github.com/ByteLogicLabs/Table-Relay',
       ),
+      // Version from package.json (the file the team bumps). Drives the in-app
+      // version label + update check, instead of Tauri's tauri.conf.json.
+      'process.env.APP_VERSION': JSON.stringify(pkgVersion),
     },
     resolve: {
       alias: {

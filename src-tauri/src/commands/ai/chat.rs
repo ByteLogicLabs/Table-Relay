@@ -60,6 +60,20 @@ pub struct ChatSendInput {
     /// `DEFAULT_MAX_REPEAT_CALLS` when absent or out of the sane [1, 50] range.
     #[serde(default)]
     pub max_repeat_calls: Option<u32>,
+    /// Optional response token cap for this turn (from the effort preset).
+    /// Falls back to `DEFAULT_AI_MAX_TOKENS` when absent or out of the sane
+    /// [256, 200_000] range.
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    /// Optional reasoning/thinking effort for this turn (from the effort
+    /// preset). Providers/models that don't support it ignore it.
+    #[serde(default)]
+    pub reasoning_effort: Option<crate::ai::ReasoningEffort>,
+    /// Compact recent query-log for the focused connection (ok + errors),
+    /// formatted by the frontend. Injected per-turn so the model can see what
+    /// ran, diagnose failures, and offer a corrected query / retry.
+    #[serde(default)]
+    pub recent_query_log: Option<String>,
 }
 
 /// What the user is currently looking at. Informs the system-context blob —
@@ -83,6 +97,9 @@ pub enum FocusHint {
     /// already lists every table; this just marks which one is active so the
     /// model doesn't have to guess which table "this" refers to.
     Table { schema: String, name: String },
+    /// A trigger tab. The backend re-fetches the trigger's CREATE statement via
+    /// `describe_trigger` so the model can read and edit the exact definition.
+    Trigger { schema: String, name: String },
     /// A realtime pub/sub tab. `pattern` is the channel/glob the user has
     /// typed into the subscribe input (possibly empty). The adapter primer
     /// carries the syntactical rules (NOTIFY vs PUBLISH, wildcards, etc.).
@@ -115,6 +132,7 @@ impl FocusHint {
                 format!("routine:{schema}.{name}:{kind}")
             }
             FocusHint::Table { schema, name } => format!("table:{schema}.{name}"),
+            FocusHint::Trigger { schema, name } => format!("trigger:{schema}.{name}"),
             FocusHint::Realtime {
                 pattern,
                 is_running,
@@ -288,26 +306,55 @@ async fn ai_chat_send_inner(
             return Err(AiError::NoActiveSession);
         };
         if let Some(ctx) = system_context {
-            // If this is a *switch* rather than the first injection, frame it
-            // explicitly so the model understands the focus has changed. The
-            // older context stays in history — cheaper than rewriting and the
-            // model handles this fine.
-            let framed = if session.last_context_key.is_some() {
-                format!("The user has switched to a new database view. Use this updated context going forward.\n\n{ctx}")
-            } else {
-                ctx
-            };
-            crate::log_chat!("system", "{}", framed.chars().take(400).collect::<String>());
-            session
-                .messages
-                .push(ChatMessage::text(ChatRole::System, framed));
+            // Store (don't push into history). `with_system_prompt` re-prepends
+            // this every turn so the schema sits right next to the system prompt
+            // + the latest user turn — weak local models ignored it when it was
+            // buried thousands of tokens back in history.
+            crate::log_chat!("system", "{}", ctx.chars().take(400).collect::<String>());
+            session.current_context = Some(ctx);
             session.last_context_key = new_context_key.clone();
         }
+        // Refresh the recent-activity block every turn (it grows as queries run).
+        // Cleared when the frontend sends nothing so a stale log can't linger.
+        session.recent_activity = input
+            .recent_query_log
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         session
             .messages
             .push(ChatMessage::text(ChatRole::User, user_turn));
         let tool_mode = session.provider.supports_tools() && input.connection_id.is_some();
         (session.provider.clone(), tool_mode)
+    };
+
+    // Diagnostic: makes "the model has no DB context" debuggable. If
+    // connection_id is None the chat is unscoped (no schema context, no tools) —
+    // expected when chatting before focusing a database. tool_mode false on a
+    // focused connection means the provider/model reported no tool support.
+    crate::log_chat!(
+        "ctx",
+        "connection={} schema={} context_injected={} tool_mode={} effort={:?} max_tokens={:?} max_iter={:?} max_repeat={:?}",
+        input.connection_id.as_deref().unwrap_or("<none>"),
+        input.schema.as_deref().unwrap_or("<none>"),
+        needs_context,
+        tool_mode,
+        input.reasoning_effort,
+        input.max_tokens,
+        input.max_iterations,
+        input.max_repeat_calls,
+    );
+
+    // Effort-driven per-turn knobs, shared by both paths. `max_tokens` is
+    // clamped to a sane range; `reasoning_effort` is passed through verbatim
+    // (providers/models that don't support it ignore it).
+    let max_tokens = input
+        .max_tokens
+        .filter(|n| (256..=200_000).contains(n))
+        .unwrap_or(DEFAULT_AI_MAX_TOKENS);
+    let turn_opts = crate::ai::TurnOptions {
+        max_tokens: Some(max_tokens),
+        reasoning_effort: input.reasoning_effort,
     };
 
     if tool_mode {
@@ -335,6 +382,7 @@ async fn ai_chat_send_inner(
             input.schema,
             max_iterations,
             max_repeat_calls,
+            turn_opts,
         )
         .await;
     }
@@ -350,15 +398,18 @@ async fn ai_chat_send_inner(
             &session.messages,
             session.provider_kind.as_str(),
             &session.model,
+            session.current_context.as_deref(),
+            session.recent_activity.as_deref(),
         )
     };
 
     let req = CompletionRequest {
         request_id: input.request_id.clone(),
         messages: history,
-        max_tokens: Some(DEFAULT_AI_MAX_TOKENS),
+        max_tokens: Some(max_tokens),
         temperature: None,
         stop: None,
+        reasoning_effort: input.reasoning_effort,
     };
 
     let mut stream = provider.complete(req).await?;
@@ -467,6 +518,8 @@ pub async fn ai_restore_messages(
     // Force a fresh schema-context injection on the next turn (the restored
     // transcript has no context fingerprint).
     session.last_context_key = None;
+    session.current_context = None;
+    session.recent_activity = None;
     Ok(())
 }
 

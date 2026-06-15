@@ -16,6 +16,7 @@ import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '../../components/ui/select';
 import { ai, isAiError, type AiProviderKind } from '../../lib/ai';
+import { persistAutoApprovals, clearPersistedAutoApprovals } from '../../lib/ai-permissions';
 import {
   type CredentialProfile,
   deleteCredential,
@@ -28,13 +29,13 @@ import {
 import {
   type AppSettings, type AppTheme, type NullDisplay,
   applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
+  EFFORT_LEVELS, EFFORT_LABELS, EFFORT_PRESETS, type EffortLevel,
 } from '../../lib/settings-store';
 import ConnectionTransferDialog from '../connections/connection-transfer-dialog';
 import { LocalModelPanel } from '../ai-chat/local-model-panel';
 import { Row, Toggle, DataRow } from './settings-controls';
 import { AppearanceSettings, EditorSettings, LogsSettings } from './settings-sections';
 import {
-  AI_LIMIT_UNLIMITED,
   PROVIDERS,
   PROVIDER_COLORS,
   type ProfileForm,
@@ -64,7 +65,9 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
 
   // App version for the nav footer — read from the bundled binary (the real
   // build the user is running), so it reflects the installed version, not just
-  // the source package.json.
+  // Settings label shows the Tauri app version (tauri.conf.json) — the real
+  // shipped/installed version. (The update check compares package.json
+  // separately; the two can differ.)
   const [appVersion, setAppVersion] = useState<string>('');
   useEffect(() => {
     void import('@tauri-apps/api/app')
@@ -383,13 +386,20 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
     }
   };
 
-  // Persist the toggle locally, and clear the backend in-memory flags when the
-  // user turns persistence OFF so a stale "remembered" grant can't linger.
+  // Persist the toggle locally. ON → snapshot the current grants to disk so
+  // they survive a restart. OFF → delete the saved snapshot AND reset the
+  // in-memory flags so a stale "remembered" grant can't linger.
   const handlePersistApprovals = async (v: boolean) => {
     saveSettings({ persistAiApprovals: v });
-    if (!v) {
-      setAiPermsBusy(true);
-      try {
+    setAiPermsBusy(true);
+    try {
+      if (v) {
+        // saveSettings is synchronous; persistAutoApprovals reads the now-true
+        // flag and writes whatever the backend currently holds.
+        const current = await ai.getAutoApprovals();
+        await persistAutoApprovals(current);
+      } else {
+        await clearPersistedAutoApprovals();
         await ai.setAutoApprovals({
           read_schema: true, read_structure: true,
           call_query: false,
@@ -398,9 +408,9 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
           cross_database: false,
           write_query_tab: false, publish_notify: false, subscribe_channel: false,
         });
-      } catch { /* backend may not be started; toggle still persisted */ }
-      finally { setAiPermsBusy(false); }
-    }
+      }
+    } catch { /* backend may not be started; toggle still persisted */ }
+    finally { setAiPermsBusy(false); }
   };
 
   // ── AI handlers
@@ -1015,42 +1025,30 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                     </div>
 
                     <Row
-                      title="Max tool steps per message"
-                      desc="How many tool-calling rounds (schema reads, queries) the assistant may take before it must answer. Raise it for capable agentic models; lower it to fail fast on models that over-explore."
+                      title="Default effort"
+                      desc="How hard the assistant works per message. Higher effort lets it take more tool steps, write longer answers, and (on models that support it) think more before replying — at higher latency and token cost. Override per-chat from the controls menu in the chat panel."
                     >
                       <Select
-                        value={String(settings.aiMaxToolIterations)}
-                        onValueChange={(v) => saveSettings({ aiMaxToolIterations: Number(v) })}
+                        value={settings.aiEffort}
+                        onValueChange={(v) => saveSettings({ aiEffort: v as EffortLevel })}
                       >
-                        <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
+                        <SelectTrigger className="h-8 text-xs w-32"><SelectValue /></SelectTrigger>
                         <SelectContent>
-                          {[3, 6, 9, 12, 16, 20, 30, 50, 100, AI_LIMIT_UNLIMITED].map(n => (
-                            <SelectItem key={n} value={String(n)} className="text-xs">
-                              {n === AI_LIMIT_UNLIMITED ? 'Unlimited' : `${n} steps`}
+                          {EFFORT_LEVELS.map((lvl) => (
+                            <SelectItem key={lvl} value={lvl} className="text-xs">
+                              {EFFORT_LABELS[lvl]}
                             </SelectItem>
                           ))}
                         </SelectContent>
                       </Select>
                     </Row>
 
-                    <Row
-                      title="Repeat-call limit"
-                      desc="How many times the assistant may call the same tool with identical arguments before the loop-guard stops the turn. Raise it for agentic flows that legitimately repeat a tool (e.g. writing many query tabs); lower it to stop runaway loops sooner."
-                    >
-                      <Select
-                        value={String(settings.aiMaxRepeatCalls)}
-                        onValueChange={(v) => saveSettings({ aiMaxRepeatCalls: Number(v) })}
-                      >
-                        <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
-                        <SelectContent>
-                          {[3, 5, 10, 15, 20, 30, 50, 100, AI_LIMIT_UNLIMITED].map(n => (
-                            <SelectItem key={n} value={String(n)} className="text-xs">
-                              {n === AI_LIMIT_UNLIMITED ? 'Unlimited' : `${n} calls`}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    </Row>
+                    <p className="text-[11px] text-muted-foreground/80 leading-relaxed pt-1">
+                      {EFFORT_LABELS[settings.aiEffort]}: up to{' '}
+                      {EFFORT_PRESETS[settings.aiEffort].maxIterations} tool steps,{' '}
+                      {(EFFORT_PRESETS[settings.aiEffort].maxTokens / 1000).toFixed(0)}k response tokens,{' '}
+                      {EFFORT_PRESETS[settings.aiEffort].reasoningEffort} reasoning where supported.
+                    </p>
                   </div>
                 )}
 

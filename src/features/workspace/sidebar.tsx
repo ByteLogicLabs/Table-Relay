@@ -21,7 +21,6 @@ import {
 import { toast } from "sonner";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
-import { ScrollArea } from "../../components/ui/scroll-area";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -379,6 +378,12 @@ export default function Sidebar({
     return schemas[0]?.name ?? selectedDb;
   }, [schemas, selectedDb]);
 
+  // Cache key for views/routines/triggers. MUST include the database, not just
+  // `conn.id` + schema: on Postgres every database has a `public` schema, so
+  // `conn.public` collides across databases — switching apex↔pagila would serve
+  // the previous DB's views (→ "relation does not exist" when one is opened).
+  const extrasKey = `${conn?.id ?? ""}.${selectedDb ?? ""}.${effectiveSchema ?? ""}`;
+
   // ⌘ + K / Ctrl + K opens the database dialog when there's a connection.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -408,7 +413,9 @@ export default function Sidebar({
       // changes — new/renamed/dropped tables — show up immediately.
       void refreshSchemas(conn.id);
       const schemaForCalls = effectiveSchema ?? selectedDb;
-      const key = `${conn.id}.${schemaForCalls}`;
+      // Cache key must match `extrasKey` (db-qualified) so the reload writes the
+      // slot the reader reads; `schemaForCalls` is the SQL schema for the calls.
+      const key = extrasKey;
       // Clear the in-flight marks so the lazy-load effect re-fetches on next render.
       fetchedExtrasRef.current.delete(`v:${key}`);
       fetchedExtrasRef.current.delete(`r:${key}`);
@@ -460,7 +467,7 @@ export default function Sidebar({
   // (SQLite has no stored routines) don't fire the command at all.
   useEffect(() => {
     if (!conn || !effectiveSchema) return;
-    const key = `${conn.id}.${effectiveSchema}`;
+    const key = extrasKey;
     const fetched = fetchedExtrasRef.current;
     const needV = supportsViews && !fetched.has(`v:${key}`);
     const needR = supportsRoutines && !fetched.has(`r:${key}`);
@@ -497,6 +504,9 @@ export default function Sidebar({
   }, [
     conn,
     effectiveSchema,
+    // `selectedDb` (the PG database) is part of the cache key — without it the
+    // effect wouldn't re-fetch when switching apex↔pagila (both schema=public).
+    selectedDb,
     supportsViews,
     supportsRoutines,
     supportsTriggers,
@@ -520,7 +530,7 @@ export default function Sidebar({
 
   const refreshViews = useCallback(async () => {
     if (!conn || !effectiveSchema) return;
-    const key = `${conn.id}.${effectiveSchema}`;
+    const key = extrasKey;
     setRefreshingSection("views");
     try {
       const v = await db.listViews(conn.id, effectiveSchema);
@@ -536,7 +546,7 @@ export default function Sidebar({
 
   const refreshRoutines = useCallback(async () => {
     if (!conn || !effectiveSchema) return;
-    const key = `${conn.id}.${effectiveSchema}`;
+    const key = extrasKey;
     setRefreshingSection("routines");
     try {
       const r = await db.listRoutines(conn.id, effectiveSchema);
@@ -552,7 +562,7 @@ export default function Sidebar({
 
   const refreshTriggers = useCallback(async () => {
     if (!conn || !effectiveSchema) return;
-    const key = `${conn.id}.${effectiveSchema}`;
+    const key = extrasKey;
     setRefreshingSection("triggers");
     try {
       const t = await db.listTriggers(conn.id, effectiveSchema);
@@ -574,17 +584,17 @@ export default function Sidebar({
 
   const views: ViewInfo[] = useMemo(() => {
     if (!conn || !effectiveSchema) return [];
-    return viewsByDb.get(`${conn.id}.${effectiveSchema}`) ?? [];
+    return viewsByDb.get(extrasKey) ?? [];
   }, [conn, effectiveSchema, viewsByDb]);
 
   const routines: RoutineInfo[] = useMemo(() => {
     if (!conn || !effectiveSchema) return [];
-    return routinesByDb.get(`${conn.id}.${effectiveSchema}`) ?? [];
+    return routinesByDb.get(extrasKey) ?? [];
   }, [conn, effectiveSchema, routinesByDb]);
 
   const triggers: TriggerInfo[] = useMemo(() => {
     if (!conn || !effectiveSchema) return [];
-    return triggersByDb.get(`${conn.id}.${effectiveSchema}`) ?? [];
+    return triggersByDb.get(extrasKey) ?? [];
   }, [conn, effectiveSchema, triggersByDb]);
 
   // Everywhere the sidebar passes a "schema" down to a command or a
@@ -760,7 +770,13 @@ export default function Sidebar({
       const intent = getClickIntent(e);
       switch (intent.kind) {
         case "open":
-          tableSelection.selectOnly(name);
+          // Opening a table for viewing is NOT a bulk-selection gesture — clear
+          // any selection so the only highlight is the active tab (set via
+          // `activeItem`/`matchesActive`). Leaving the row in `selectedIds`
+          // could combine with another selected row to show two highlighted
+          // rows with no clear "active" one. Multi-select stays explicit
+          // (Cmd/Shift-click → toggle/range below).
+          tableSelection.clearSelection();
           if (conn) onOpenTable(conn.id, schemaForActions, name);
           break;
         case "toggle":
@@ -909,7 +925,10 @@ export default function Sidebar({
   // Shared classes for sidebar rows. When a row is active we swap hover
   // colors for solid primary accents so the selection is obvious at a glance.
   const rowCls = (active: boolean) =>
-    `w-full text-left pl-7 pr-2 py-1 flex items-center gap-2 rounded-md text-sm transition-colors group ${
+    // `min-w-full w-max`: a row is at least the panel width, but grows to its
+    // content when a name/badge is longer — so the tree's `min-w-max` wrapper
+    // widens and the horizontal scrollbar can reveal it (instead of truncating).
+    `min-w-full w-max text-left pl-7 pr-2 py-1 flex items-center gap-2 rounded-md text-sm transition-colors group ${
       active
         ? "bg-primary/15 text-primary font-medium"
         : "hover:bg-primary/10 hover:text-primary"
@@ -1266,11 +1285,11 @@ export default function Sidebar({
       </div>
 
       {/* Body: Tables / Views / Routines */}
-      <ScrollArea className="flex-1 min-h-0">
-        {/* min-w-max: size the tree to its widest row so long table names
-            extend the content (and the horizontal scrollbar can reveal them)
-            instead of being truncated. */}
-        <div className="py-2 space-y-1 px-1 min-w-max">
+      {/* Vertical scroll is shared by the whole tree; horizontal is per-group
+          (each section's list has its own x-scroll below) so a long name in one
+          section doesn't shift the others. Hence overflow-x-hidden here. */}
+      <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden">
+        <div className="py-2 space-y-1 px-1">
           {/* Connect-failed state. The rail tile keeps its focus on a profile
               even when the connect attempt fails, so without this the sidebar
               silently shows an empty table list — which looks like every
@@ -1412,7 +1431,7 @@ export default function Sidebar({
                     role="listbox"
                     aria-multiselectable="true"
                     aria-label="Tables"
-                    className="outline-none"
+                    className="outline-none overflow-x-auto overflow-y-hidden"
                   >
                     {fTables.map((t) => {
                       const active = matchesActive("table", t.name);
@@ -1555,9 +1574,9 @@ export default function Sidebar({
                     addTitle="New view"
                   />
                 )}
-                {supportsViews &&
-                  !collapsed.views &&
-                  fViews.map((v) => {
+                {supportsViews && !collapsed.views && (
+                <div className="overflow-x-auto overflow-y-hidden">
+                {fViews.map((v) => {
                     const active = matchesActive("view", v.name);
                     return (
                       <ContextMenu key={`v-${v.name}`}>
@@ -1611,6 +1630,8 @@ export default function Sidebar({
                       </ContextMenu>
                     );
                   })}
+                </div>
+                )}
 
                 {supportsRoutines && (
                   <Section
@@ -1630,9 +1651,9 @@ export default function Sidebar({
                     addTitle="New function"
                   />
                 )}
-                {supportsRoutines &&
-                  !collapsed.routines &&
-                  fRoutines.map((r, i) => {
+                {supportsRoutines && !collapsed.routines && (
+                <div className="overflow-x-auto overflow-y-hidden">
+                {fRoutines.map((r, i) => {
                     const sig = r.parameters
                       .map((p) => `${p.mode ?? "IN"} ${p.name}:${p.dataType}`)
                       .join(", ");
@@ -1757,6 +1778,8 @@ export default function Sidebar({
                       </ContextMenu>
                     );
                   })}
+                </div>
+                )}
 
                 {supportsTriggers && (
                   <Section
@@ -1775,9 +1798,9 @@ export default function Sidebar({
                     addTitle="New trigger"
                   />
                 )}
-                {supportsTriggers &&
-                  !collapsed.triggers &&
-                  fTriggers.map((t, i) => {
+                {supportsTriggers && !collapsed.triggers && (
+                <div className="overflow-x-auto overflow-y-hidden">
+                {fTriggers.map((t, i) => {
                     const active = matchesActive("trigger", t.name);
                     const meta = [t.timing, t.event].filter(Boolean).join(" ");
                     const tooltip = `${t.timing} ${t.event} ON ${t.table}`;
@@ -1785,7 +1808,7 @@ export default function Sidebar({
                       <ContextMenu key={`tg-${t.name}-${t.table}-${i}`}>
                         <ContextMenuTrigger>
                           <button
-                            className={rowCls(active)}
+                            className={`${rowCls(active)} min-w-max`}
                             title={tooltip}
                             onClick={() =>
                               onOpenTrigger?.(
@@ -1797,8 +1820,12 @@ export default function Sidebar({
                           >
                             <Zap className={iconCls(active)} />
                             <span className="flex-1 whitespace-nowrap">{t.name}</span>
+                            {/* nowrap + shrink-0 so a long timing/event label
+                                ("AFTER INSERT OR DELETE OR UPDATE") stays on one
+                                line and scrolls horizontally instead of wrapping
+                                and making the row tall. */}
                             <span
-                              className={`text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
+                              className={`shrink-0 whitespace-nowrap text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
                             >
                               {meta}
                             </span>
@@ -1834,6 +1861,8 @@ export default function Sidebar({
                       </ContextMenu>
                     );
                   })}
+                </div>
+                )}
 
                 {fTables.length === 0 &&
                   fViews.length === 0 &&
@@ -1846,7 +1875,7 @@ export default function Sidebar({
               </>
             )}
         </div>
-      </ScrollArea>
+      </div>
 
       {/* Fixed-bottom Add button — only shown when a database is selected and at
           least one "create" action is available for this adapter. */}

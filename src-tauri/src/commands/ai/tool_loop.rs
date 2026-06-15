@@ -20,12 +20,13 @@ async fn complete_once_with_retry(
     provider: &Arc<dyn AiProvider>,
     history: &[ChatMessage],
     tools: &[ToolDef],
+    opts: crate::ai::TurnOptions,
 ) -> Result<ToolTurn, AiError> {
     const MAX_RETRIES: u32 = 3;
     const BACKOFF_MS: [u64; 3] = [800, 2_000, 5_000];
     let mut attempt = 0u32;
     loop {
-        match provider.complete_once(history, Some(tools)).await {
+        match provider.complete_once(history, Some(tools), opts).await {
             Ok(t) => return Ok(t),
             Err(e) if is_retryable(&e) && attempt < MAX_RETRIES => {
                 let wait = BACKOFF_MS[attempt as usize];
@@ -76,6 +77,7 @@ pub(super) async fn run_tool_loop(
     schema: Option<String>,
     max_iterations: u32,
     max_repeat_calls: u32,
+    turn_opts: crate::ai::TurnOptions,
 ) -> Result<(), AiError> {
     use crate::ai::tools;
     // Filter the tool catalog by the current scope: when cross-database access
@@ -135,6 +137,8 @@ pub(super) async fn run_tool_loop(
                 &session.messages,
                 session.provider_kind.as_str(),
                 &session.model,
+                session.current_context.as_deref(),
+                session.recent_activity.as_deref(),
             )
         };
 
@@ -149,7 +153,7 @@ pub(super) async fn run_tool_loop(
         // final-answer block below doesn't re-emit it as a duplicate chunk.
         let mut streamed = false;
         let turn = match provider
-            .complete_once_stream(&history, Some(&tools_catalog))
+            .complete_once_stream(&history, Some(&tools_catalog), turn_opts)
             .await
         {
             Ok(Some(mut stream)) => {
@@ -199,17 +203,17 @@ pub(super) async fn run_tool_loop(
                     // finalizes cleanly on error), so a transient partial never
                     // persists. Falling back keeps a flaky/incompatible stream
                     // from failing a turn the non-streaming path can complete.
-                    complete_once_with_retry(&provider, &history, &tools_catalog).await?
+                    complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts).await?
                 }
             }
             // Provider doesn't stream tool turns → non-streaming with retry.
-            Ok(None) => complete_once_with_retry(&provider, &history, &tools_catalog).await?,
+            Ok(None) => complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts).await?,
             // Pre-stream failure (auth/HTTP/etc.) → degrade to the non-streaming
             // path, which applies retry for transient errors and surfaces the
             // rest unchanged.
             Err(e) => {
                 crate::log_chat!("error", "stream setup failed, falling back to non-streaming: {e}");
-                complete_once_with_retry(&provider, &history, &tools_catalog).await?
+                complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts).await?
             }
         };
 
@@ -480,12 +484,30 @@ pub(super) fn with_system_prompt(
     history: &[ChatMessage],
     provider: &str,
     model: &str,
+    context: Option<&str>,
+    recent_activity: Option<&str>,
 ) -> Vec<ChatMessage> {
-    let mut out = Vec::with_capacity(history.len() + 2);
+    let mut out = Vec::with_capacity(history.len() + 3);
     out.push(ChatMessage::text(
         ChatRole::System,
         crate::ai::context::system_prompt(provider, model),
     ));
+    // Schema context as a SECOND system message, re-added every turn so it stays
+    // adjacent to the prompt + the latest user turn (not lost deep in history).
+    if let Some(ctx) = context.filter(|c| !c.trim().is_empty()) {
+        out.push(ChatMessage::text(ChatRole::System, ctx.to_string()));
+    }
+    // Recent query activity (ok + errors). Lets the model see what just ran and
+    // propose a fix / retry when a query failed. Re-added per turn (it changes).
+    if let Some(act) = recent_activity.filter(|a| !a.trim().is_empty()) {
+        out.push(ChatMessage::text(
+            ChatRole::System,
+            format!(
+                "Recent queries run in this connection (most recent last). Use this to \
+                 diagnose failures and offer a corrected query or retry when one errored:\n\n{act}"
+            ),
+        ));
+    }
     out.extend(repair_orphan_tool_calls(history));
     out
 }

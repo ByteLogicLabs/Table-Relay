@@ -71,6 +71,7 @@ impl AnthropicProvider {
             messages: &[AnthropicMsg { role: "user", content: "ping" }],
             stream: false,
             temperature: None,
+            thinking: None,
         };
         let key = self.api_key.lock().await.to_string();
         let res = client()?
@@ -100,6 +101,43 @@ struct AnthropicRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<Thinking>,
+}
+
+/// Extended-thinking block. When present, Anthropic spends up to
+/// `budget_tokens` reasoning before the answer; `max_tokens` must exceed it and
+/// `temperature` must be unset.
+#[derive(Serialize)]
+struct Thinking {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    budget_tokens: u32,
+}
+
+/// Token budget for a given effort, or `None` to disable thinking. Extended
+/// thinking exists ONLY on Claude 3.7 Sonnet and the Claude 4 family (opus-4 /
+/// sonnet-4) — NOT 3.5/3.0. Sending `thinking` to a model that rejects it is a
+/// 400 that kills the whole turn, so the gate is deliberately strict: when in
+/// doubt, omit and let the turn run without thinking.
+fn supports_thinking(model_lower: &str) -> bool {
+    let m = model_lower;
+    // Claude 4 family: `claude-opus-4`, `claude-sonnet-4`, `claude-opus-4-1`, …
+    let v4 = m.contains("opus-4") || m.contains("sonnet-4");
+    // Claude 3.7 Sonnet (first model with extended thinking).
+    let v37 = m.contains("3-7-sonnet") || m.contains("3.7-sonnet");
+    v4 || v37
+}
+
+fn thinking_budget(model: &str, effort: Option<crate::ai::ReasoningEffort>) -> Option<u32> {
+    if !supports_thinking(&model.to_ascii_lowercase()) {
+        return None;
+    }
+    match effort {
+        Some(crate::ai::ReasoningEffort::High) => Some(12_288),
+        Some(crate::ai::ReasoningEffort::Medium) => Some(4_096),
+        _ => None,
+    }
 }
 
 #[derive(Serialize)]
@@ -178,13 +216,27 @@ impl AiProvider for AnthropicProvider {
         req: CompletionRequest,
     ) -> Result<BoxStream<'static, TokenChunk>, AiError> {
         let (system, msgs) = split_system(&req.messages);
+        let budget = thinking_budget(&self.model, req.reasoning_effort);
+        let mut max_tokens = req.max_tokens.unwrap_or(2048);
+        // Thinking requires max_tokens > budget; give the answer headroom too.
+        // Temperature must be unset when thinking is on.
+        let (thinking, temperature) = match budget {
+            Some(b) => {
+                if max_tokens <= b {
+                    max_tokens = b + 2048;
+                }
+                (Some(Thinking { kind: "enabled", budget_tokens: b }), None)
+            }
+            None => (None, req.temperature),
+        };
         let body = AnthropicRequest {
             model: &self.model,
-            max_tokens: req.max_tokens.unwrap_or(2048),
+            max_tokens,
             system: system.as_deref(),
             messages: &msgs,
             stream: true,
-            temperature: req.temperature,
+            temperature,
+            thinking,
         };
         let key = self.api_key.lock().await.to_string();
         let res = client()?

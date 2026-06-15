@@ -159,6 +159,15 @@ pub async fn build(
 
     let fks = adapter.list_relations(&schema_name).await.unwrap_or_default();
 
+    // Postgres models the database (e.g. `apex`) as distinct from its SQL schema
+    // (`public`). `schema_name` here is the SQL SCHEMA. Tools take a `schema`
+    // arg — the model must pass the schema, never the database name, or
+    // describe_table/list_tables fail with "not found". Call that out explicitly.
+    let is_postgres = manifest
+        .as_ref()
+        .map(|m| matches!(m.capabilities.sql_dialect, adapter_api::SqlDialect::Postgres))
+        .unwrap_or(false);
+
     let mut out = String::new();
     // CRITICAL RULES FIRST. These ride at the very top of the freshly-injected
     // context message every turn — the highest-salience position for models
@@ -166,15 +175,31 @@ pub async fn build(
     // were replying in Chinese and looping `list_schemas` despite the static
     // rules). Stated imperatively, before anything else.
     out.push_str("# IMPORTANT RULES (read first)\n\n");
-    out.push_str(&format!(
+    out.push_str(
         "1. **Reply in English.** Always respond in English regardless of the user's \
-         greeting language. Only switch if the user explicitly asks for another language.\n\
-         2. **You are already connected to the `{schema_name}` database.** Do NOT call \
-         `list_schemas` — you know the database; it is `{schema_name}`. All tables below \
-         belong to it. Reference them by bare name.\n\
-         3. If a tool says \"cross-database access is disabled\", do not retry — tell the \
-         user to enable it in AI permissions.\n\n"
-    ));
+         greeting language. Only switch if the user explicitly asks for another language.\n",
+    );
+    if is_postgres {
+        // The #1 source of "not found" errors: the model passes the DATABASE
+        // name as the `schema` tool arg. State the schema explicitly and ban
+        // using the database name as a schema.
+        out.push_str(&format!(
+            "2. **The active SQL schema is `{schema_name}`.** When a tool takes a `schema` \
+             argument (describe_table, list_tables, …), pass `{schema_name}` — or omit it to \
+             use the active schema. NEVER pass the database name as `schema`. Reference \
+             tables by bare name; they resolve to `{schema_name}`.\n"
+        ));
+    } else {
+        out.push_str(&format!(
+            "2. **You are already connected to the `{schema_name}` database.** Do NOT call \
+             `list_schemas` — you know the database; it is `{schema_name}`. All tables below \
+             belong to it. Reference them by bare name.\n"
+        ));
+    }
+    out.push_str(
+        "3. If a tool says \"cross-database access is disabled\", do not retry — tell the \
+         user to enable it in AI permissions.\n\n",
+    );
     // Adapter primer next — the model needs to know "this is Redis, not
     // SQL" (or "MySQL vs SQLite") before it reads the schema markdown and
     // starts forming a plan. Wrapped in a header so it's visually distinct
@@ -185,10 +210,11 @@ pub async fn build(
         out.push_str("\n\n");
     }
     out.push_str("# Database context\n\n");
+    let scope_noun = if is_postgres { "schema" } else { "database" };
     out.push_str(&format!(
-        "Active database: `{schema_name}`. All queries and table references are scoped to it.\n\n"
+        "Active {scope_noun}: `{schema_name}`. All queries and table references are scoped to it.\n\n"
     ));
-    out.push_str(&format!("- Active database: `{schema_name}`\n"));
+    out.push_str(&format!("- Active {scope_noun}: `{schema_name}`\n"));
     out.push_str(&format!("- Tables in `{schema_name}`: {}\n", info.tables.len()));
     if !schemas.is_empty() {
         let other_count = schemas.iter().filter(|s| s.name != schema_name).count();
@@ -263,6 +289,31 @@ pub async fn build(
                 out.push_str(&format!(
                     "The user is viewing table `{tsch}.{name}`. Call `describe_table` if you need the column list.\n\n"
                 ));
+            }
+            FocusHint::Trigger { schema: tsch, name } => {
+                out.push_str(&format!(
+                    "The user is editing trigger `{tsch}.{name}`. "
+                ));
+                match adapter.describe_trigger(tsch, name).await {
+                    Ok(def) => {
+                        out.push_str(
+                            "Its current definition is below. To edit it, return the full \
+                             corrected `CREATE TRIGGER` (and any function it depends on) — open \
+                             it in the editor with `open_object_tab` (object=trigger), or run the \
+                             DDL with `call_query`.\n\n```sql\n",
+                        );
+                        let body = if def.create_sql.len() > 4_000 {
+                            format!("{}\n-- …(truncated, {} bytes total)…", &def.create_sql[..4_000], def.create_sql.len())
+                        } else {
+                            def.create_sql.clone()
+                        };
+                        out.push_str(&body);
+                        out.push_str("\n```\n\n");
+                    }
+                    Err(e) => {
+                        out.push_str(&format!("(failed to load definition: {e})\n\n"));
+                    }
+                }
             }
             FocusHint::Realtime { pattern, is_running, recent_channels } => {
                 out.push_str(

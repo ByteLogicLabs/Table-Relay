@@ -62,21 +62,23 @@ impl AiProvider for LlamaLocalProvider {
         &self,
         history: &[crate::ai::ChatMessage],
         tools: Option<&[crate::ai::tools::ToolDef]>,
+        opts: crate::ai::TurnOptions,
     ) -> Result<super::openai::ToolTurn, AiError> {
-        self.inner.complete_once(history, tools).await
+        self.inner.complete_once(history, tools, opts).await
     }
 
     async fn complete_once_stream(
         &self,
         history: &[crate::ai::ChatMessage],
         tools: Option<&[crate::ai::tools::ToolDef]>,
+        opts: crate::ai::TurnOptions,
     ) -> Result<
         Option<BoxStream<'static, Result<super::openai::ToolStreamEvent, AiError>>>,
         AiError,
     > {
         // Call the TRAIT method (returns Option); the inherent method of the
         // same name on OpenAiProvider would otherwise shadow it.
-        AiProvider::complete_once_stream(&self.inner, history, tools).await
+        AiProvider::complete_once_stream(&self.inner, history, tools, opts).await
     }
 
     fn supports_tools(&self) -> bool {

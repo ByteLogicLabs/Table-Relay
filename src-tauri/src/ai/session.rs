@@ -24,6 +24,18 @@ pub struct AiSession {
     /// fresh context message so the model doesn't keep answering against the
     /// old schema.
     pub last_context_key: Option<String>,
+    /// The current schema-context blob (tables/columns/FKs for the focused DB).
+    /// Held here — NOT pushed into `messages` — so it can be re-prepended as a
+    /// System message on EVERY turn, right next to the static system prompt and
+    /// the latest user turn. Injecting it once into history (its old behavior)
+    /// left it thousands of tokens back, where weak local models ignored it
+    /// ("I need more context" despite the schema being in the prompt). Updated
+    /// whenever the focus fingerprint (`last_context_key`) changes.
+    pub current_context: Option<String>,
+    /// Compact recent query-log (ok + errors) for the focused connection,
+    /// refreshed every turn from the request. Re-prepended like `current_context`
+    /// so the model can see what just ran and fix/retry a failed query.
+    pub recent_activity: Option<String>,
     /// Serialises the send pipeline so two `ai_chat_send` calls can't
     /// interleave their commits. Without this, a quick second send
     /// could append a User message between an assistant-with-tool_calls
@@ -89,6 +101,8 @@ mod tests {
             messages: Vec::new(),
             started_at: Instant::now(),
             last_context_key: None,
+            current_context: None,
+            recent_activity: None,
             send_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }

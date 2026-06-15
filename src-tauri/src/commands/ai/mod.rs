@@ -186,6 +186,8 @@ pub async fn ai_start(
         messages: Vec::new(),
         started_at: Instant::now(),
         last_context_key: None,
+        current_context: None,
+        recent_activity: None,
         send_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
     session::install(&slot, session).await?;

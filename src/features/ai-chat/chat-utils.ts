@@ -133,10 +133,13 @@ export function focusLabel(focus: ChatFocus): string {
     case 'query':   return 'query buffer';
     case 'routine': return `${focus.kind} ${focus.schema}.${focus.name}`;
     case 'table':   return `${focus.schema}.${focus.name}`;
+    case 'trigger': return `trigger ${focus.schema}.${focus.name}`;
     case 'realtime':
       return focus.pattern
         ? `realtime: ${focus.pattern}`
         : 'realtime';
+    default:
+      return '';
   }
 }
 

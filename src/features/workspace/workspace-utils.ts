@@ -23,6 +23,13 @@ export function computeFocusHint(tab: AppTab | undefined): ChatFocus | undefined
         name: tab.routine.name,
         kind: tab.routine.kind,
       };
+    case "trigger":
+      if (!tab.trigger || !tab.schema) return undefined;
+      return {
+        type: "trigger",
+        schema: tab.schema,
+        name: tab.trigger.name,
+      };
     case "data":
     case "structure":
       if (tab.schema && tab.table) {

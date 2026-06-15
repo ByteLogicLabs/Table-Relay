@@ -1,6 +1,27 @@
 import { useSyncExternalStore } from 'react';
 import { ai, isAiError, isCliProviderKind, type AiProviderKind, type ChatFocus, type ChatKind, type Conversation, type StartInput, type QueryTier } from '../lib/ai';
-import { loadSettings } from '../lib/settings-store';
+import { loadSettings, EFFORT_PRESETS } from '../lib/settings-store';
+import { recentQueryLog } from './query-log-store';
+
+/** Format the connection's recent query log into a compact text block for the
+ *  AI, so it can see what ran (and what FAILED) and offer fixes / retries.
+ *  Newest last; statements truncated; errors carry their message. Returns
+ *  undefined when there's nothing worth sending. */
+function recentQueryLogForAi(connectionId: string): string | undefined {
+  const entries = recentQueryLog(connectionId, 8);
+  if (entries.length === 0) return undefined;
+  const lines = entries.map((e) => {
+    const sql = e.statement.replace(/\s+/g, ' ').trim();
+    const clipped = sql.length > 300 ? sql.slice(0, 300) + '…' : sql;
+    if (e.status === 'error') {
+      const msg = (e.message ?? 'unknown error').replace(/\s+/g, ' ').trim();
+      return `- [ERROR] ${clipped}\n    → ${msg}`;
+    }
+    const ms = e.durationMs != null ? ` (${Math.round(e.durationMs)}ms)` : '';
+    return `- [ok${ms}] ${clipped}`;
+  });
+  return lines.join('\n');
+}
 import { loadCredentials, setActiveCredentialId } from '../lib/ai-credentials';
 import { flog } from '../lib/flog';
 
@@ -54,6 +75,12 @@ export interface ConnectionChat {
   lastError?: string;
   /** Persistent conversation id — set when the first message is saved. */
   conversationId?: string;
+  /** Display title for the header. Auto-derived from the first message, or set
+   *  by the user via inline rename. Mirrors the persisted conversation title. */
+  conversationTitle?: string;
+  /** True once the user has renamed the conversation by hand, so auto-titling
+   *  never overwrites their choice. */
+  titleManual?: boolean;
 }
 
 interface AiState {
@@ -64,6 +91,10 @@ interface AiState {
   swapping?: boolean;
   providerKind?: AiProviderKind;
   model?: string;
+  /** Provider being started, set while `status === 'starting'` so the loading
+   *  screen can tailor its message (e.g. local Llama spawns a server and is
+   *  slow). Cleared once active/inactive. */
+  startingKind?: AiProviderKind;
   /** Most recent top-level (non-chat) error string — e.g. start-up
    *  failure. Per-connection errors live on the entry in `byConnection`. */
   lastError?: string;
@@ -494,7 +525,7 @@ export function setSwapping(v: boolean) {
 
 export async function start(input: StartInput) {
   await ensureWired();
-  mutate(s => ({ ...s, status: 'starting', lastError: undefined }));
+  mutate(s => ({ ...s, status: 'starting', startingKind: input.kind, lastError: undefined }));
   try {
     let status;
     try {
@@ -514,6 +545,7 @@ export async function start(input: StartInput) {
     mutate(s => ({
       ...s,
       status: 'active',
+      startingKind: undefined,
       providerKind: status.providerKind,
       model: status.model,
     }));
@@ -529,7 +561,7 @@ export async function start(input: StartInput) {
         .catch(() => {});
     }
   } catch (e) {
-    mutate(s => ({ ...s, status: 'inactive', lastError: errMsg(e) }));
+    mutate(s => ({ ...s, status: 'inactive', startingKind: undefined, lastError: errMsg(e) }));
     throw e;
   }
 }
@@ -556,6 +588,32 @@ export function newChat() {
     if (isAiError(e) && e.kind === 'NoActiveSession') return;
     mutate(s => ({ ...s, lastError: errMsg(e) }));
   });
+}
+
+/**
+ * Rename the current conversation. Stamps the title in the bucket immediately
+ * (so the header updates without a round-trip) and marks it `titleManual` so
+ * auto-titling never clobbers it. Persists to the backend when a conversation
+ * row exists; an empty title clears the manual flag and falls back to auto.
+ */
+export function renameConversation(title: string) {
+  const trimmed = title.trim();
+  mutate(s => {
+    const key = s.focusedConnectionId ?? GLOBAL_KEY;
+    const chat = chatOf(s, key);
+    return setChat(s, key, {
+      ...chat,
+      conversationTitle: trimmed || undefined,
+      titleManual: trimmed.length > 0,
+    });
+  });
+  const key = state.focusedConnectionId ?? GLOBAL_KEY;
+  const convId = state.byConnection[key]?.conversationId;
+  // No conversation row yet (rename before the first message). The title is held
+  // in the bucket and will be applied on create via the titleManual guard.
+  if (convId && trimmed) {
+    void ai.conversationUpdateTitle(convId, trimmed).catch(() => {});
+  }
 }
 
 /** Load a saved conversation into the current chat view. */
@@ -643,6 +701,10 @@ export async function loadConversation(conversationId: string) {
   mutate(s => setChat(s, connKey, {
     ...chatOf(s, connKey),
     conversationId: conv.id,
+    conversationTitle: conv.title || undefined,
+    // A loaded conversation keeps whatever title it was saved with; treat it as
+    // user-owned so a stray empty send can't auto-rename it.
+    titleManual: !!conv.title,
     messages,
   }));
   // Pin the view to the bucket we just loaded into, so a follow-up send routes
@@ -812,6 +874,7 @@ export async function sendMessage(
 
   // Auto-create conversation on first message
   let convId = state.byConnection[connKey]?.conversationId;
+  let autoTitle: string | undefined;
   if (!convId) {
     convId = crypto.randomUUID();
     try {
@@ -820,9 +883,17 @@ export async function sendMessage(
         providerKind: state.providerKind,
         model: state.model,
       });
-      // Auto-name from first user message
-      const title = trimmed.length > 80 ? trimmed.slice(0, 80) + '…' : trimmed;
-      void ai.conversationUpdateTitle(convId, title);
+      // Title precedence: a manual title typed before the first send wins;
+      // otherwise auto-name from the first user message.
+      const manualTitle = state.byConnection[connKey]?.titleManual
+        ? state.byConnection[connKey]?.conversationTitle?.trim()
+        : undefined;
+      if (manualTitle) {
+        void ai.conversationUpdateTitle(convId, manualTitle);
+      } else {
+        autoTitle = trimmed.length > 80 ? trimmed.slice(0, 80) + '…' : trimmed;
+        void ai.conversationUpdateTitle(convId, autoTitle);
+      }
     } catch { /* non-fatal */ }
   }
 
@@ -832,6 +903,7 @@ export async function sendMessage(
     return setChat(s, connKey, {
       ...chat,
       conversationId: convId,
+      conversationTitle: chat.conversationTitle ?? autoTitle,
       pendingRequestId: requestId,
       messages: [
         ...chat.messages,
@@ -854,10 +926,16 @@ export async function sendMessage(
     // Pass the user's per-turn tool-iteration cap + repeat-call guard through
     // to the backend loop.
     flog('send', 'chatSend → backend rid=', requestId);
+    const preset = EFFORT_PRESETS[loadSettings().aiEffort] ?? EFFORT_PRESETS.medium;
     await ai.chatSend(requestId, trimmed, {
       ...context,
-      maxIterations: loadSettings().aiMaxToolIterations,
-      maxRepeatCalls: loadSettings().aiMaxRepeatCalls,
+      recentQueryLog: context?.connectionId
+        ? recentQueryLogForAi(context.connectionId)
+        : undefined,
+      maxIterations: preset.maxIterations,
+      maxRepeatCalls: preset.maxRepeatCalls,
+      maxTokens: preset.maxTokens,
+      reasoningEffort: preset.reasoningEffort,
     });
     flog('send', 'chatSend resolved rid=', requestId);
   } catch (e) {

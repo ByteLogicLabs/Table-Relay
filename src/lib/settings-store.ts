@@ -6,6 +6,37 @@ export type AppTheme = 'one-dark' | 'latte' | 'monokai' | 'dracula' | 'nord' | '
 /** How a NULL / undefined cell renders in the data grid. */
 export type NullDisplay = 'blank' | 'null-text' | 'symbol';
 
+/** How hard the AI works per turn. A preset that expands into concrete knobs
+ *  (tool-call budget, response length, and — where the provider supports it —
+ *  reasoning effort). See `EFFORT_PRESETS`. */
+export type EffortLevel = 'low' | 'medium' | 'high' | 'extra_high';
+
+/** Ordered for the slider (index = stop position). */
+export const EFFORT_LEVELS: EffortLevel[] = ['low', 'medium', 'high', 'extra_high'];
+
+export const EFFORT_LABELS: Record<EffortLevel, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  extra_high: 'Extra High',
+};
+
+/** Concrete knobs each effort level expands into. `reasoningEffort` is sent
+ *  only to providers/models that accept it (others ignore it). */
+export interface EffortPreset {
+  maxIterations: number;
+  maxRepeatCalls: number;
+  maxTokens: number;
+  reasoningEffort: 'low' | 'medium' | 'high';
+}
+
+export const EFFORT_PRESETS: Record<EffortLevel, EffortPreset> = {
+  low:        { maxIterations: 6,   maxRepeatCalls: 10, maxTokens: 4096,  reasoningEffort: 'low' },
+  medium:     { maxIterations: 25,  maxRepeatCalls: 25, maxTokens: 16384, reasoningEffort: 'medium' },
+  high:       { maxIterations: 60,  maxRepeatCalls: 40, maxTokens: 32768, reasoningEffort: 'high' },
+  extra_high: { maxIterations: 120, maxRepeatCalls: 60, maxTokens: 64000, reasoningEffort: 'high' },
+};
+
 export interface AppSettings {
   // Appearance
   theme: AppTheme;
@@ -25,8 +56,9 @@ export interface AppSettings {
 
   // AI
   persistAiApprovals: boolean;    // remember auto-approval flags across restarts
-  aiMaxToolIterations: number;    // cap on tool-calling rounds per turn (1–50)
-  aiMaxRepeatCalls: number;       // how many identical consecutive tool calls before the loop-guard stops (1–50)
+  aiMaxToolIterations: number;    // superseded by aiEffort/EFFORT_PRESETS; kept for back-compat
+  aiMaxRepeatCalls: number;       // superseded by aiEffort/EFFORT_PRESETS; kept for back-compat
+  aiEffort: EffortLevel;          // how hard the AI works per turn (drives iterations / tokens / reasoning)
 }
 
 const KEY = 'tablerelay:settings:v1';
@@ -46,6 +78,7 @@ export const DEFAULTS: AppSettings = {
   persistAiApprovals: false,
   aiMaxToolIterations: 50,
   aiMaxRepeatCalls: 50,
+  aiEffort: 'medium',
 };
 
 // ── Module-level state + subscription ──────────────────────────────────────────

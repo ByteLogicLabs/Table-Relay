@@ -118,6 +118,7 @@ impl OpenAiProvider {
             max_tokens: Some(1),
             max_completion_tokens: None,
             temperature: None,
+            reasoning_effort: None,
         };
         let key = self.api_key.lock().await.to_string();
         let http = client()?;
@@ -142,6 +143,7 @@ impl OpenAiProvider {
                     max_tokens: None,
                     max_completion_tokens: Some(1),
                     temperature: None,
+                    reasoning_effort: None,
                 };
                 let retry = http
                     .post(format!("{}/chat/completions", self.base_url))
@@ -173,23 +175,26 @@ impl OpenAiProvider {
         &self,
         history: &[crate::ai::ChatMessage],
         tools: Option<&[crate::ai::tools::ToolDef]>,
+        opts: crate::ai::TurnOptions,
     ) -> Result<ToolTurn, AiError> {
         // Build the messages array with the OpenAI tool-use shape (shared with
         // the streaming variant).
         let msgs = build_tool_messages(history);
 
+        let limit = opts.max_tokens.unwrap_or(DEFAULT_TOOL_MAX_TOKENS);
         let mut body = serde_json::json!({
             "model": self.model,
             "messages": msgs,
             "stream": false,
         });
-        let token_params = self.token_limit_params(Some(DEFAULT_TOOL_MAX_TOKENS));
+        let token_params = self.token_limit_params(Some(limit));
         if let Some(max_tokens) = token_params.max_tokens {
             body["max_tokens"] = serde_json::json!(max_tokens);
         }
         if let Some(max_completion_tokens) = token_params.max_completion_tokens {
             body["max_completion_tokens"] = serde_json::json!(max_completion_tokens);
         }
+        self.apply_reasoning_effort(&mut body, opts.reasoning_effort);
         if let Some(tools) = tools {
             body["tools"] = serde_json::to_value(tools).unwrap_or(serde_json::Value::Null);
             body["tool_choice"] = serde_json::Value::String("auto".into());
@@ -255,20 +260,23 @@ impl OpenAiProvider {
         &self,
         history: &[crate::ai::ChatMessage],
         tools: Option<&[crate::ai::tools::ToolDef]>,
+        opts: crate::ai::TurnOptions,
     ) -> Result<BoxStream<'static, Result<ToolStreamEvent, AiError>>, AiError> {
         let msgs = build_tool_messages(history);
+        let limit = opts.max_tokens.unwrap_or(DEFAULT_TOOL_MAX_TOKENS);
         let mut body = serde_json::json!({
             "model": self.model,
             "messages": msgs,
             "stream": true,
         });
-        let token_params = self.token_limit_params(Some(DEFAULT_TOOL_MAX_TOKENS));
+        let token_params = self.token_limit_params(Some(limit));
         if let Some(max_tokens) = token_params.max_tokens {
             body["max_tokens"] = serde_json::json!(max_tokens);
         }
         if let Some(max_completion_tokens) = token_params.max_completion_tokens {
             body["max_completion_tokens"] = serde_json::json!(max_completion_tokens);
         }
+        self.apply_reasoning_effort(&mut body, opts.reasoning_effort);
         if let Some(tools) = tools {
             body["tools"] = serde_json::to_value(tools).unwrap_or(serde_json::Value::Null);
             body["tool_choice"] = serde_json::Value::String("auto".into());
@@ -345,10 +353,46 @@ impl OpenAiProvider {
 
     fn token_limit_params(&self, limit: Option<u32>) -> TokenLimitParams {
         if self.uses_max_completion_tokens() {
-            TokenLimitParams { max_tokens: None, max_completion_tokens: limit }
+            // Reasoning models spend `max_completion_tokens` on BOTH hidden
+            // reasoning and the visible answer. A small effort cap (e.g. Low's
+            // 4k) can be consumed entirely by reasoning, leaving an empty reply
+            // ("Thinking…" then nothing). Enforce a floor so the answer always
+            // has room; the cap still bounds the upper end.
+            const REASONING_FLOOR: u32 = 25_000;
+            let budget = limit.map(|n| n.max(REASONING_FLOOR));
+            TokenLimitParams { max_tokens: None, max_completion_tokens: budget }
         } else {
             TokenLimitParams { max_tokens: limit, max_completion_tokens: None }
         }
+    }
+
+    /// Add `reasoning_effort` to the request body — but only for reasoning-era
+    /// OpenAI models (o-series / gpt-5). Non-reasoning models and
+    /// OpenAI-compatible endpoints reject the field, so we omit it there;
+    /// `uses_max_completion_tokens()` is exactly that gate. Effort `None` = leave
+    /// the body untouched (provider default).
+    fn apply_reasoning_effort(
+        &self,
+        body: &mut serde_json::Value,
+        effort: Option<crate::ai::ReasoningEffort>,
+    ) {
+        let Some(effort) = effort else { return };
+        if !self.uses_max_completion_tokens() {
+            // Not a reasoning-era OpenAI model — `reasoning_effort` would 400.
+            crate::log_line!(
+                "ai_effort",
+                "skip reasoning_effort (model `{}` is not a reasoning model)",
+                self.model
+            );
+            return;
+        }
+        let level = match effort {
+            crate::ai::ReasoningEffort::Low => "low",
+            crate::ai::ReasoningEffort::Medium => "medium",
+            crate::ai::ReasoningEffort::High => "high",
+        };
+        crate::log_line!("ai_effort", "reasoning_effort={} model={}", level, self.model);
+        body["reasoning_effort"] = serde_json::json!(level);
     }
 
     fn should_retry_with_max_completion_tokens(status: reqwest::StatusCode, body: &str) -> bool {
@@ -670,6 +714,20 @@ struct ChatRequest<'a> {
     max_completion_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(rename = "reasoning_effort", skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'a str>,
+}
+
+/// Map effort → the OpenAI `reasoning_effort` string. `None` (or a non-reasoning
+/// model) → omit the field. Free function so it can be used where `self` isn't
+/// in scope (the typed `ChatRequest` builders).
+fn reasoning_effort_str(effort: Option<crate::ai::ReasoningEffort>) -> Option<&'static str> {
+    match effort {
+        Some(crate::ai::ReasoningEffort::Low) => Some("low"),
+        Some(crate::ai::ReasoningEffort::Medium) => Some("medium"),
+        Some(crate::ai::ReasoningEffort::High) => Some("high"),
+        None => None,
+    }
 }
 
 #[derive(Serialize)]
@@ -733,6 +791,13 @@ impl AiProvider for OpenAiProvider {
         } else {
             req.temperature
         };
+        // reasoning_effort only for reasoning-era models (same gate as the token
+        // param). Compatible endpoints / non-reasoning models omit it.
+        let effort = if self.uses_max_completion_tokens() {
+            reasoning_effort_str(req.reasoning_effort)
+        } else {
+            None
+        };
         let body = ChatRequest {
             model: &self.model,
             messages: &messages,
@@ -740,6 +805,7 @@ impl AiProvider for OpenAiProvider {
             max_tokens: token_params.max_tokens,
             max_completion_tokens: token_params.max_completion_tokens,
             temperature,
+            reasoning_effort: effort,
         };
         let key = self.api_key.lock().await.to_string();
         let http = client()?;
@@ -762,6 +828,7 @@ impl AiProvider for OpenAiProvider {
                     max_tokens: None,
                     max_completion_tokens: req.max_tokens,
                     temperature: None,
+                    reasoning_effort: effort,
                 };
                 let retry = http
                     .post(format!("{}/chat/completions", self.base_url))
@@ -801,17 +868,19 @@ impl AiProvider for OpenAiProvider {
         &self,
         history: &[crate::ai::ChatMessage],
         tools: Option<&[crate::ai::tools::ToolDef]>,
+        opts: crate::ai::TurnOptions,
     ) -> Result<ToolTurn, AiError> {
         // Delegate to the inherent method we already implemented above.
-        OpenAiProvider::complete_once(self, history, tools).await
+        OpenAiProvider::complete_once(self, history, tools, opts).await
     }
 
     async fn complete_once_stream(
         &self,
         history: &[crate::ai::ChatMessage],
         tools: Option<&[crate::ai::tools::ToolDef]>,
+        opts: crate::ai::TurnOptions,
     ) -> Result<Option<BoxStream<'static, Result<ToolStreamEvent, AiError>>>, AiError> {
-        OpenAiProvider::complete_once_stream(self, history, tools)
+        OpenAiProvider::complete_once_stream(self, history, tools, opts)
             .await
             .map(Some)
     }

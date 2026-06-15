@@ -4,9 +4,11 @@ import WorkspaceView from './features/workspace/workspace-view';
 import WelcomeView from './features/workspace/welcome-view';
 import { Toaster } from './components/ui/sonner';
 import DevDebug from './components/dev-debug';
+import { UpdateNotice } from './components/update-notice';
 import { setDebugPage } from './state/debug';
 import { loadSettings, hydrateSettings, applyTheme } from './lib/settings-store';
 import { hydrateCredentials } from './lib/ai-credentials';
+import { hydrateAutoApprovals } from './lib/ai-permissions';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
 import { isDbError } from './lib/db';
 import { connectAndLoad, disconnect as disconnectDb, markConnectionLost, useConnections } from './state/connections';
@@ -78,6 +80,10 @@ function UnlockedApp() {
       const settings = await hydrateSettings();
       await hydrateCredentials();
       applyTheme(settings.theme);
+      // Restore remembered AI permissions into the backend (in-memory) state so
+      // they apply before the first chat turn. No-op unless the user enabled
+      // "Remember AI permissions across restarts".
+      void hydrateAutoApprovals();
     })();
   }, []);
 
@@ -409,6 +415,7 @@ function UnlockedApp() {
         )}
       </div>
       <Toaster position="top-right" />
+      <UpdateNotice />
       <DevDebug />
     </div>
   );

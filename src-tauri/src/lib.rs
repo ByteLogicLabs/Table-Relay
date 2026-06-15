@@ -345,6 +345,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // Frontend → log bridge (writes fe:<tag> lines into logs/app.log)
             crate::log::frontend_log,
+            // Update check: latest published version from GitHub package.json.
+            commands::update::check_latest_version,
             // Logs panel: toggle, read, clear, reveal.
             commands::logs::logging_get_enabled,
             commands::logs::logging_set_enabled,

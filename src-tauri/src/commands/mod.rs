@@ -7,3 +7,4 @@ pub mod secure_transfer;
 pub mod security;
 pub mod store;
 pub mod tableplus;
+pub mod update;

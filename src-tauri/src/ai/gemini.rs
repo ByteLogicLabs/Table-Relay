@@ -83,6 +83,7 @@ impl GeminiProvider {
             generation_config: Some(GenerationConfig {
                 max_output_tokens: Some(1),
                 temperature: None,
+                thinking_config: None,
             }),
         };
         let (url, body_json) = self.build_request(&inner, false).await?;
@@ -150,6 +151,32 @@ struct GenerationConfig {
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+}
+
+/// Gemini 2.5 thinking control. `thinkingBudget` is a token budget for internal
+/// reasoning (0 disables it).
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "thinkingBudget")]
+    thinking_budget: u32,
+}
+
+/// Token budget for an effort, or `None` to omit thinkingConfig entirely.
+/// Gated to 2.5-family models — older Gemini rejects `thinkingConfig`.
+fn gemini_thinking_budget(model: &str, effort: Option<crate::ai::ReasoningEffort>) -> Option<u32> {
+    if !model.to_ascii_lowercase().contains("2.5") {
+        return None;
+    }
+    match effort {
+        Some(crate::ai::ReasoningEffort::High) => Some(12_288),
+        Some(crate::ai::ReasoningEffort::Medium) => Some(4_096),
+        // Don't send `thinkingBudget: 0` — 2.5 Pro can't fully disable thinking
+        // and rejects it. Omitting the field lets the model use its own default.
+        Some(crate::ai::ReasoningEffort::Low) => None,
+        None => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -236,6 +263,8 @@ impl AiProvider for GeminiProvider {
             generation_config: Some(GenerationConfig {
                 max_output_tokens: req.max_tokens,
                 temperature: req.temperature,
+                thinking_config: gemini_thinking_budget(&self.model, req.reasoning_effort)
+                    .map(|b| ThinkingConfig { thinking_budget: b }),
             }),
         };
         let (url, body_json) = self.build_request(&inner, true).await?;

@@ -77,6 +77,16 @@ export function AssistantOrUserBubble({ message: m }: { message: StoreChatMessag
             className="absolute top-1 right-1 opacity-0 group-hover/msg:opacity-100 focus:opacity-100 z-10"
           />
         )}
+        {/* Persistent in-progress badge while the assistant turn streams AND has
+            started emitting text. The pre-content state below shows its own
+            "Thinking…" line; this keeps a visible "working" affordance once
+            tokens begin, so a long reasoning turn never looks stalled. */}
+        {!isUser && m.streaming && m.content.length > 0 && (
+          <span className="flex items-center gap-1.5 mb-1.5 text-[10px] font-medium text-primary">
+            <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+            Thinking…
+          </span>
+        )}
         {m.streaming && m.content.length === 0 ? (
           <span className="inline-flex items-center gap-2 text-muted-foreground">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
