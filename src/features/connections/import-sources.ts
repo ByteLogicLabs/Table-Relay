@@ -336,14 +336,16 @@ export const IMPORT_SOURCES: ImportSource[] = [
     extensions: ['tableplusconnection'],
     encrypted: true,
   },
-  {
-    id: 'dbeaver',
-    label: 'DBeaver',
-    hint: 'DBeaver’s data-sources.json (in the workspace .dbeaver folder). You can also point at credentials-config.json for passwords.',
-    extensions: ['json'],
-    parse: parseDBeaver,
-    enrich: enrichDBeaver,
-  },
+  // Hidden for now — re-enable by uncommenting. Parsers (parseDBeaver /
+  // enrichDBeaver) and the backend dbeaver_decrypt_credentials command are kept.
+  // {
+  //   id: 'dbeaver',
+  //   label: 'DBeaver',
+  //   hint: 'DBeaver’s data-sources.json (in the workspace .dbeaver folder). You can also point at credentials-config.json for passwords.',
+  //   extensions: ['json'],
+  //   parse: parseDBeaver,
+  //   enrich: enrichDBeaver,
+  // },
   {
     id: 'navicat',
     label: 'Navicat',

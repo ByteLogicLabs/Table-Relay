@@ -8,6 +8,8 @@
 
 One app for **MySQL, PostgreSQL, SQLite, MongoDB, Redis**, built with [Tauri](https://tauri.app) (Rust + React).
 
+<a href="https://www.producthunt.com/products/table-relay?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-table-relay" target="_blank" rel="noopener noreferrer"><img alt="Table Relay - Fast multi-DB workbench with a private, on-device AI | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1172086&amp;theme=light&amp;t=1781507862067"></a>
+
 <img src="screenshots/main.png" alt="Table Relay screenshot" width="900" />
 
 </div>
@@ -67,7 +69,7 @@ Download the installer for your OS from the [latest release](https://github.com/
 - **Realtime**: publish/subscribe against Redis Pub/Sub and Postgres `LISTEN`/`NOTIFY`.
 - **Process list**: view and kill running queries/connections (where the driver supports it).
 - **Import and export**:
-  - **Import connections** from other clients so you do not re-enter every server by hand. Supported sources include TablePlus, DBeaver, Navicat, HeidiSQL, and another Table Relay export. A password prompt fills in any secrets the source file does not carry.
+  - **Import connections** from other clients so you do not re-enter every server by hand. Supported sources include TablePlus, Navicat, HeidiSQL, and another Table Relay export. A password prompt fills in any secrets the source file does not carry.
   - **Import data** from a `.sql`, `.csv`, or `.json` file.
   - **Export** a query result or a whole connection to CSV, TSV, JSON, NDJSON, Excel, or SQL INSERT statements, with a progress dialog and cancellation for large exports.
 - **AI assistant**: chat about your schema and data with OpenAI, Anthropic, Google Gemini, any OpenAI-compatible endpoint (Ollama, Groq, LM Studio), a **fully local on-device model**, or a **CLI provider** (Claude Code, Codex, Gemini CLI, opencode, Kilo, or Antigravity) that runs against the coding agent you already have installed and logged in on your machine. Conversations and the chosen model/provider are saved per conversation and restored across restarts, and you can manage or bulk-delete chat history.

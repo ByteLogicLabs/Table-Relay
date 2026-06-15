@@ -692,7 +692,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                 </div>
                 <div className="rounded-md border border-border divide-y divide-border">
                   <DataRow label="Settings" desc="Appearance, editor and behaviour preferences" onExport={handleExportSettings} onImport={handleImportSettings} />
-                  <DataRow label="Connections" desc="Saved databases — pick which to export/import, or bring in from TablePlus, DBeaver, Navicat, HeidiSQL" onExport={() => setConnTransfer('export')} onImport={() => setConnTransfer('import')} />
+                  <DataRow label="Connections" desc="Saved databases — pick which to export/import, or bring in from TablePlus, Navicat, HeidiSQL" onExport={() => setConnTransfer('export')} onImport={() => setConnTransfer('import')} />
                   <DataRow label="AI credentials" desc="Provider profiles — includes API keys" onExport={handleExportCredentials} onImport={handleImportCredentials} />
                   <DataRow label="Conversations" desc="Full AI chat history" onExport={handleExportConversations} onImport={handleImportConversations} />
                 </div>
