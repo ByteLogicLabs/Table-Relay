@@ -8,6 +8,8 @@
 
 One app for **MySQL, PostgreSQL, SQLite, MongoDB, Redis**, built with [Tauri](https://tauri.app) (Rust + React).
 
+<img src="screenshots/main.png" alt="Table Relay screenshot" width="900" />
+
 </div>
 
 ---
