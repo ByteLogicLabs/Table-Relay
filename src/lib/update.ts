@@ -48,14 +48,13 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
     const latest = await invoke<{ version: string } | null>('check_latest_version');
     const current = CURRENT_VERSION;
     if (!latest?.version) {
-      flog('update', 'check failed/empty', 'latest=', latest, 'current=', current);
+      flog('update', 'update check returned no version');
       return null;
     }
     const hasUpdate = isNewer(latest.version, current);
-    flog('update', 'current=', current, 'latest=', latest.version, 'hasUpdate=', hasUpdate);
     return { current, latest: latest.version, hasUpdate };
   } catch (e) {
-    flog('update', 'check threw', String(e));
+    flog('update', 'update check failed:', String(e));
     return null;
   }
 }

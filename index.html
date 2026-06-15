@@ -6,6 +6,16 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon.png" />
     <link rel="icon" type="image/x-icon" href="/favicon.ico" />
     <title>Table Relay</title>
+    <script>
+      (function () {
+        try {
+          var t = localStorage.getItem('tablerelay:theme') || 'monokai';
+          var el = document.documentElement;
+          el.setAttribute('data-theme', t);
+          if (t !== 'latte') el.classList.add('dark');
+        } catch (e) { /* default CSS applies */ }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -152,9 +152,20 @@ export function useSettings(): AppSettings {
   return useSyncExternalStore(subscribe, loadSettings);
 }
 
+/**
+ * localStorage key holding just the theme id, kept as a fast, synchronously
+ * readable mirror of the encrypted setting. The inline boot script in
+ * `index.html` reads this before first paint to avoid a white flash while the
+ * real (encrypted) settings hydrate asynchronously. See [[THEME_BOOT_KEY]].
+ */
+export const THEME_BOOT_KEY = 'tablerelay:theme';
+
 export function applyTheme(theme: AppTheme): void {
   const el = document.documentElement;
   const isDark = theme !== 'latte';  // latte is the only light theme
   el.classList.toggle('dark', isDark);
   el.setAttribute('data-theme', theme);
+  // Mirror to localStorage so the next cold boot can paint the right theme
+  // synchronously (the encrypted settings load too late to prevent a flash).
+  try { localStorage.setItem(THEME_BOOT_KEY, theme); } catch { /* noop */ }
 }

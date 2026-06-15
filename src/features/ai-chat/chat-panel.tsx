@@ -1276,8 +1276,8 @@ function ActiveSession({
                 header so the title gets the full top bar. Opens above the input. */}
             <SessionMenu providerKind={s.providerKind} model={s.model} />
             {/* Focus chip — the context that goes out with the next turn.
-                Lives on the input bar like claude-code's chat.log chip so
-                the user can see what's attached at a glance. */}
+                Lives on the input bar so the user can see what's attached
+                at a glance. */}
             {focusedLabel && (
               <Tooltip
                 content={

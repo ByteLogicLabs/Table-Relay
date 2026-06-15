@@ -193,7 +193,7 @@ function onWatchdogFire(key: string, rid: string) {
   // Only act if this exact turn is still the pending one — otherwise it already
   // completed/cancelled and the timer is stale.
   if (!chat || chat.pendingRequestId !== rid) return;
-  flog('watchdog', 'FIRED stuck turn rid=', rid, 'bucket=', key, '— clearing pending');
+  flog('ai', 'recovered a stuck chat turn (no response received) — clearing pending state');
   mutate(s => {
     const c = chatOf(s, key);
     if (c.pendingRequestId !== rid) return s;
@@ -318,24 +318,23 @@ async function wireListeners() {
     bumpWatchdog(ev.requestId); // activity → push the stuck-turn deadline out
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.requestId);
-      if (!conn) { flog('chunk', 'DROPPED no-bucket rid=', ev.requestId, 'buckets=', Object.keys(s.byConnection)); return s; }
+      if (!conn) return s;
       const chat = chatOf(s, conn);
       const idx = chat.messages.findIndex(m => m.id === ev.requestId);
-      if (idx < 0) { flog('chunk', 'DROPPED no-msg rid=', ev.requestId, 'conn=', conn); return s; }
+      if (idx < 0) return s;
       const next = [...chat.messages];
       next[idx] = { ...next[idx], content: next[idx].content + ev.delta };
       return setChat(s, conn, { ...chat, messages: next });
     });
   }));
   unlisteners.push(await ai.onDone(ev => {
-    flog('done', 'rid=', ev.requestId, 'finish=', ev.finishReason, 'len=', (ev.content ?? '').length);
     if (watchdogRid === ev.requestId) disarmWatchdog(); // turn completed cleanly
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.requestId);
-      if (!conn) { flog('done', 'DROPPED no-bucket rid=', ev.requestId, 'buckets=', Object.keys(s.byConnection)); return s; }
+      if (!conn) return s;
       const chat = chatOf(s, conn);
       const idx = chat.messages.findIndex(m => m.id === ev.requestId);
-      if (idx < 0) { flog('done', 'no-msg rid=', ev.requestId, 'conn=', conn); return setChat(s, conn, { ...chat, pendingRequestId: undefined }); }
+      if (idx < 0) return setChat(s, conn, { ...chat, pendingRequestId: undefined });
       const next = [...chat.messages];
       next[idx] = {
         ...next[idx],
@@ -728,7 +727,7 @@ export async function loadConversation(conversationId: string) {
   try {
     await ai.restoreMessages(restorable);
   } catch (e) {
-    flog('restore', 'failed', errMsg(e));
+    flog('ai', 'failed to restore conversation history:', errMsg(e));
   }
 }
 
@@ -795,7 +794,7 @@ export async function restoreBackendTranscript() {
   try {
     await ai.restoreMessages(restorable);
   } catch (e) {
-    flog('restore', 'swap re-seed failed', errMsg(e));
+    flog('ai', 'failed to re-seed history after provider switch:', errMsg(e));
   }
 }
 
@@ -810,7 +809,6 @@ export async function sendMessage(
     errorMessage?: string;
   },
 ): Promise<boolean> {
-  flog('send', 'enter status=', state.status, 'provider=', state.providerKind, 'focused=', state.focusedConnectionId, 'ctxConn=', context?.connectionId);
   // Wire first so status reconciles with a live backend session that
   // survived a page reload — otherwise the very first send after HMR
   // bails on the stale `inactive` default and the user sees nothing.
@@ -822,20 +820,19 @@ export async function sendMessage(
   if (state.status !== 'active') {
     try {
       const status = await ai.status();
-      flog('send', 'status-recheck active=', status.active, 'kind=', status.providerKind);
       if (status.active) {
         mutate(s => ({ ...s, status: 'active', providerKind: status.providerKind, model: status.model }));
       } else {
-        flog('send', 'ABORT backend inactive — no session');
+        flog('ai', 'cannot send: no active AI session');
         return false;
       }
     } catch (e) {
-      flog('send', 'ABORT status() threw', errMsg(e));
+      flog('ai', 'cannot send: failed to check AI session status:', errMsg(e));
       return false;
     }
   }
   const trimmed = content.trim();
-  if (!trimmed) { flog('send', 'ABORT empty content'); return false; }
+  if (!trimmed) return false;
   // Route the turn into the connection bucket the user is interacting with.
   // Prefer the FOCUSED bucket when it already holds an in-progress conversation
   // — otherwise a reopened chat (loaded into the focused/global bucket) would be
@@ -858,7 +855,6 @@ export async function sendMessage(
   // into a connection focuses it. This is the real fix for "no error but
   // nothing appends" (logs showed write bucket=<conn> vs visible=__global__).
   if (state.focusedConnectionId !== connKey && connKey !== GLOBAL_KEY) {
-    flog('send', 'aligning focus', state.focusedConnectionId, '→', connKey);
     setFocusedConnection(connKey);
   }
   const userId = crypto.randomUUID();
@@ -897,7 +893,6 @@ export async function sendMessage(
     } catch { /* non-fatal */ }
   }
 
-  flog('send', 'placeholder rid=', requestId, 'bucket=', connKey, 'conv=', convId);
   mutate(s => {
     const chat = chatOf(s, connKey);
     return setChat(s, connKey, {
@@ -912,7 +907,6 @@ export async function sendMessage(
       ],
     });
   });
-  flog('send', 'after-mutate visibleBucket=', (state.focusedConnectionId ?? GLOBAL_KEY), 'msgCount=', (state.byConnection[connKey]?.messages.length ?? -1));
   armWatchdog(connKey, requestId); // self-heal if no chunk/done ever arrives
 
   // Save user message to persistent storage
@@ -925,7 +919,6 @@ export async function sendMessage(
   try {
     // Pass the user's per-turn tool-iteration cap + repeat-call guard through
     // to the backend loop.
-    flog('send', 'chatSend → backend rid=', requestId);
     const preset = EFFORT_PRESETS[loadSettings().aiEffort] ?? EFFORT_PRESETS.medium;
     await ai.chatSend(requestId, trimmed, {
       ...context,
@@ -937,9 +930,8 @@ export async function sendMessage(
       maxTokens: preset.maxTokens,
       reasoningEffort: preset.reasoningEffort,
     });
-    flog('send', 'chatSend resolved rid=', requestId);
   } catch (e) {
-    flog('send', 'chatSend THREW rid=', requestId, errMsg(e));
+    flog('ai', 'chat send failed:', errMsg(e));
     if (watchdogRid === requestId) disarmWatchdog();
     mutate(s => {
       const chat = chatOf(s, connKey);

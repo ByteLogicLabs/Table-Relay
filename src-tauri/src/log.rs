@@ -2,9 +2,14 @@
 //!
 //! Logging is OFF by default and opt-in: the frontend toggles it via
 //! `set_logging_enabled` (persisted in app-state and re-applied on launch). When
-//! enabled, lines are appended to `<app-data>/logs/{app,chat}.log`. Each file is
-//! ring-capped at `MAX_LOG_BYTES` (5 MB): once it would exceed the cap we drop
-//! the oldest whole lines so the file always holds roughly the newest 5 MB.
+//! enabled, lines are appended to `<app-data>/logs/{app,chat}.log` as
+//! `[ts] [tag] msg`. Each file is ring-capped at `MAX_LOG_BYTES` (5 MB): once it
+//! would exceed the cap we drop the oldest whole lines so it holds roughly the
+//! newest 5 MB.
+//!
+//! `log_line!(tag, "...")` writes operational lines to `app.log`; `log_chat!`
+//! writes the AI conversation transcript to `chat.log`. The viewer highlights
+//! problems by reading the message text (no severity token is stored).
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -56,7 +61,7 @@ fn logs_dir() -> PathBuf {
     p
 }
 
-/// Absolute path to `app.log` / `chat.log` (whether or not it exists yet).
+/// Absolute path to `app.log` (whether or not it exists yet).
 pub fn log_file(name: &str) -> PathBuf {
     logs_dir().join(name)
 }
@@ -106,6 +111,8 @@ fn trim_to_tail(path: &std::path::Path, keep_bytes: u64) {
     let _ = fs::write(path, &data[cut..]);
 }
 
+/// Append one line to `app.log` as `[ts] [tag] msg`. In debug builds it also
+/// mirrors to stderr so local `tauri dev` keeps showing logs in the terminal.
 pub fn write_line(tag: &str, msg: &str) {
     let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let line = format!("[{ts}] [{tag}] {msg}\n");
@@ -114,6 +121,9 @@ pub fn write_line(tag: &str, msg: &str) {
     eprint!("{line}");
 }
 
+/// Append one line to `chat.log` as `[ts] [role] msg`. The AI conversation
+/// transcript (user/assistant/tool turns + chat-side errors) goes here, kept
+/// separate from the operational `app.log`.
 pub fn write_chat(role: &str, msg: &str) {
     let ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.3f");
     let line = format!("[{ts}] [{role}] {msg}\n");
