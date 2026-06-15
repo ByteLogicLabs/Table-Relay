@@ -3063,10 +3063,10 @@ export default function DataGrid({
             onClick={() =>
               window.dispatchEvent(new CustomEvent("tablerelay:toggle-chat"))
             }
-            title="AI Chat"
+            title="Ask AI"
           >
-            <Sparkles className="w-4 h-4 mr-2" />
-            Chat
+            <Sparkles className="w-4 h-4 mr-2 text-primary" />
+            Ask AI
           </Button>
         </div>
       </div>

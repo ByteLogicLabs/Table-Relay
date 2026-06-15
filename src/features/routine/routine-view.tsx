@@ -400,10 +400,10 @@ export default function RoutineView({
             size="sm"
             className="shrink-0"
             onClick={() => window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'))}
-            title="AI Chat — ask the assistant to edit this routine"
+            title="Ask AI — have the assistant edit this routine"
           >
-            <Sparkles className="w-4 h-4 mr-2" />
-            Chat
+            <Sparkles className="w-4 h-4 mr-2 text-primary" />
+            Ask AI
           </Button>
         </div>
       </div>

@@ -1100,7 +1100,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
           }}
         >
           <Sparkles className="w-4 h-4 mr-2 text-primary" />
-          AI
+          Ask AI
         </Button>
       </div>
 

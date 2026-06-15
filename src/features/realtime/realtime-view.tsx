@@ -537,8 +537,8 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
           <Button size="sm" variant="ghost" onClick={handleClear} disabled={events.length === 0}>
             <Trash2 className="w-3.5 h-3.5 mr-1.5" /> Clear
           </Button>
-          <Button size="sm" variant="ghost" onClick={handleOpenChat} title="AI Chat">
-            <Sparkles className="w-3.5 h-3.5 mr-1.5" /> Chat
+          <Button size="sm" variant="ghost" onClick={handleOpenChat} title="Ask AI">
+            <Sparkles className="w-3.5 h-3.5 mr-1.5 text-primary" /> Ask AI
           </Button>
         </div>
 
