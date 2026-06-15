@@ -192,6 +192,6 @@ Do not commit `.env` files or any file containing real keys; the repo's `.gitign
 
 ## License
 
-[MIT](LICENSE) © 2026
+[Apache License 2.0](LICENSE) © 2026 ByteLogic Labs
 </content>
 </invoke>
