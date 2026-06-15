@@ -33,6 +33,16 @@ fn wildcard_path(raw: &str) -> String {
     format!("{s}.$**")
 }
 
+fn is_index_not_found(e: &mongodb::error::Error) -> bool {
+    if let mongodb::error::ErrorKind::Command(cmd) = e.kind.as_ref() {
+        if cmd.code == 27 {
+            return true;
+        }
+    }
+    let low = e.to_string().to_ascii_lowercase();
+    low.contains("indexnotfound") || low.contains("index not found")
+}
+
 pub(crate) async fn modify_indexes(
     driver: &MongoDriver,
     req: ModifyIndexesRequest,
@@ -46,7 +56,12 @@ pub(crate) async fn modify_indexes(
         if name == "_id_" || name.is_empty() {
             continue;
         }
-        coll.drop_index(name, None).await.map_err(map_err)?;
+        if let Err(e) = coll.drop_index(name, None).await {
+            if is_index_not_found(&e) {
+                continue;
+            }
+            return Err(map_err(e));
+        }
     }
 
     // Creates. Each field carries its own key value (Compass-style), so a

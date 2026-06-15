@@ -141,12 +141,6 @@ export function normaliseExtra(raw: string): string {
 }
 
 export function indexesToDrafts(idxs: IndexInfo[], defaultAlgorithm: IndexAlgorithm = 'BTREE'): DraftIndex[] {
-  // We can't recover the original Mongo kind from `IndexInfo` (it's not
-  // returned by `describe_table` today). For Mongo we default to
-  // `regular` — if the user edits and saves, the index is dropped and
-  // recreated with whatever kind is currently selected. Compass behaves
-  // the same way: existing indexes can't be edited in place, only
-  // dropped and recreated.
   return idxs
     // The PRIMARY index is the physical backing of the PK, which the
     // column-level `key = PRIMARY` cell already owns. Surfacing it here too

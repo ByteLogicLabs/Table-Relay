@@ -204,11 +204,15 @@ impl MongoDriver {
                 .and_then(|o| o.name.clone())
                 .unwrap_or_else(|| "index".to_string());
             let unique = idx.options.as_ref().and_then(|o| o.unique).unwrap_or(false);
-            let cols: Vec<String> = idx.keys.keys().map(|k| k.to_string()).collect();
-            for c in &cols {
-                indexed_fields.insert(c.clone());
+            let cols: Vec<String> = idx
+                .keys
+                .iter()
+                .map(|(field, value)| index_key_with_type(field, value))
+                .collect();
+            for (field, _) in idx.keys.iter() {
+                indexed_fields.insert(field.clone());
                 if unique {
-                    unique_fields.insert(c.clone());
+                    unique_fields.insert(field.clone());
                 }
             }
             indexes.push(IndexInfo {
@@ -758,6 +762,30 @@ pub(crate) fn bson_type_name(v: &Bson) -> &'static str {
     }
 }
 
+fn index_key_with_type(field: &str, value: &Bson) -> String {
+    if field == "$**" || field.ends_with(".$**") {
+        return format!("{field}:wildcard");
+    }
+    let suffix = match value {
+        Bson::Int32(-1) | Bson::Int64(-1) => Some("desc"),
+        Bson::Double(d) if *d == -1.0 => Some("desc"),
+        Bson::Int32(_) | Bson::Int64(_) | Bson::Double(_) => None,
+        Bson::String(s) => match s.as_str() {
+            "text" => Some("text"),
+            "2dsphere" => Some("2dsphere"),
+            "2d" => Some("2d"),
+            "hashed" => Some("hashed"),
+            other if !other.is_empty() => return format!("{field}:{other}"),
+            _ => None,
+        },
+        _ => None,
+    };
+    match suffix {
+        Some(t) => format!("{field}:{t}"),
+        None => field.to_string(),
+    }
+}
+
 pub(crate) fn map_err(e: mongodb::error::Error) -> AdapterError {
     let msg = e.to_string();
     let low = msg.to_ascii_lowercase();
@@ -967,4 +995,42 @@ fn quote_unquoted_object_keys(input: &str) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod index_key_tests {
+    use super::index_key_with_type;
+    use mongodb::bson::Bson;
+
+    #[test]
+    fn ascending_emits_bare_field() {
+        assert_eq!(index_key_with_type("name", &Bson::Int32(1)), "name");
+        assert_eq!(index_key_with_type("name", &Bson::Int64(1)), "name");
+        assert_eq!(index_key_with_type("name", &Bson::Double(1.0)), "name");
+    }
+
+    #[test]
+    fn descending_emits_desc_suffix() {
+        assert_eq!(index_key_with_type("createdAt", &Bson::Int32(-1)), "createdAt:desc");
+        assert_eq!(index_key_with_type("createdAt", &Bson::Double(-1.0)), "createdAt:desc");
+    }
+
+    #[test]
+    fn special_kinds_round_trip() {
+        assert_eq!(index_key_with_type("loc", &Bson::String("2dsphere".into())), "loc:2dsphere");
+        assert_eq!(index_key_with_type("loc", &Bson::String("2d".into())), "loc:2d");
+        assert_eq!(index_key_with_type("body", &Bson::String("text".into())), "body:text");
+        assert_eq!(index_key_with_type("uid", &Bson::String("hashed".into())), "uid:hashed");
+    }
+
+    #[test]
+    fn wildcard_path_is_tagged() {
+        assert_eq!(index_key_with_type("$**", &Bson::Int32(1)), "$**:wildcard");
+        assert_eq!(index_key_with_type("attrs.$**", &Bson::Int32(1)), "attrs.$**:wildcard");
+    }
+
+    #[test]
+    fn unknown_string_kind_is_surfaced_not_dropped() {
+        assert_eq!(index_key_with_type("g", &Bson::String("geoHaystack".into())), "g:geoHaystack");
+    }
 }
