@@ -1506,7 +1506,14 @@ export default function DataGrid({
     }
     const originalValue = data.rows.find((r) => r.__rowId === rowId)?.[col];
     pushHistory();
-    if (String(originalValue) === value) {
+    // NULL/undefined render as an empty editor, so committing an untouched NULL
+    // cell hands back "". Treat null/undefined ↔ "" as no change — otherwise an
+    // accidental open+commit marks an empty cell as edited (and drops its NULL).
+    const isNoChange =
+      originalValue === null || originalValue === undefined
+        ? value === ""
+        : String(originalValue) === value;
+    if (isNoChange) {
       const newEdits = { ...editedCells };
       delete newEdits[`${rowId}${KEY_SEP}${col}`];
       setEditedCells(newEdits);

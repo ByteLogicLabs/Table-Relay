@@ -63,11 +63,14 @@ export interface AppSettings {
 
 const KEY = 'tablerelay:settings:v1';
 const OLD_KEY = 'dbtable:settings:v1';
+// One-time migration markers (kept out of AppSettings so they don't leak into
+// settings export/import). See `runMigrations`.
+const MIGRATION_KEY = 'tablerelay:settings-migrations:v1';
 
 export const DEFAULTS: AppSettings = {
   theme: 'monokai',
   defaultRowLimit: 100,
-  nullDisplay: 'blank',
+  nullDisplay: 'null-text',
   confirmDestructive: true,
   restoreOnStartup: true,
   editorFontSize: 13,
@@ -126,6 +129,7 @@ export async function hydrateSettings(): Promise<AppSettings> {
         } catch { /* noop */ }
       }
     }
+    await runMigrations();
   } catch {
     const legacy = readLegacyLocalStorage();
     current = legacy ? { ...DEFAULTS, ...legacy } : { ...DEFAULTS };
@@ -133,6 +137,32 @@ export async function hydrateSettings(): Promise<AppSettings> {
   hydrated = true;
   emit();
   return current;
+}
+
+/**
+ * Apply one-time, idempotent setting upgrades. Each migration runs at most once
+ * (tracked by id in `MIGRATION_KEY`), so a deliberate user choice made *after*
+ * the migration is never overwritten.
+ */
+async function runMigrations(): Promise<void> {
+  let done: Record<string, boolean> = {};
+  try { done = (await getAppState<Record<string, boolean>>(MIGRATION_KEY)) ?? {}; } catch { /* noop */ }
+  let changed = false;
+
+  // Default NULL rendering moved from blank → dimmed "NULL" (TablePlus-style).
+  // Flip anyone still on the old 'blank' default so they get it once.
+  if (!done.nullTextDefault) {
+    if (current.nullDisplay === 'blank') {
+      current = { ...current, nullDisplay: 'null-text' };
+      void setAppState(KEY, current);
+    }
+    done.nullTextDefault = true;
+    changed = true;
+  }
+
+  if (changed) {
+    try { await setAppState(MIGRATION_KEY, done); } catch { /* noop */ }
+  }
 }
 
 export function saveSettings(patch: Partial<AppSettings>): void {

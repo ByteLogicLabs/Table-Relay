@@ -178,7 +178,7 @@ export const DataRow = memo(function DataRow({
               />
             ) : (
               <div
-                className={`px-4 py-1.5 truncate ${isBlobCol && fullValue.length > 0 ? "italic text-muted-foreground" : ""} ${isNull && nullMarker ? "italic text-muted-foreground/60" : ""}`}
+                className={`px-4 py-1.5 truncate ${isBlobCol && fullValue.length > 0 ? "italic text-muted-foreground" : ""} ${isNull && nullMarker ? "text-muted-foreground/40" : ""}`}
               >
                 {isNull && nullMarker ? nullMarker : value}
                 {didTruncate && !isBlobCol && (
