@@ -17,6 +17,7 @@ import {
   Activity,
   FileUp,
   FileDown,
+  Unplug,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "../../components/ui/button";
@@ -93,6 +94,8 @@ interface SidebarProps {
   onEditConnection: (connection: ConnectionProfile) => void;
   /** Delete an existing saved connection. */
   onDeleteConnection: (connectionId: string) => void;
+  /** Disconnect an active connection. */
+  onDisconnect?: (connectionId: string) => void;
   /** Open the "create connection" modal. */
   onOpenNewServer: () => void;
   /** Pin (server, database) to the rail and switch focus to it. */
@@ -164,6 +167,7 @@ export default function Sidebar({
   onPickConnection,
   onEditConnection,
   onDeleteConnection,
+  onDisconnect,
   onOpenNewServer,
   onPinDatabase,
   onImportSql,
@@ -1229,6 +1233,14 @@ export default function Sidebar({
               <DropdownMenuItem onClick={onOpenNewServer}>
                 <Plus className="w-4 h-4 mr-2" /> New server
               </DropdownMenuItem>
+              {onDisconnect && (
+                <DropdownMenuItem
+                  className="text-destructive focus:text-destructive"
+                  onClick={() => onDisconnect(conn.id)}
+                >
+                  <Unplug className="w-4 h-4 mr-2" /> Disconnect
+                </DropdownMenuItem>
+              )}
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
