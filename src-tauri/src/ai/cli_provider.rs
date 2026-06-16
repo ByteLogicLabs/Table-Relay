@@ -122,19 +122,27 @@ pub(crate) fn build_command(bin: &std::path::Path, args: &[String]) -> Command {
             // and a parsing-breakage bug. We build the entire command line
             // ourselves with `raw_arg`, quoting the program and each arg and
             // caret-escaping cmd metacharacters so cmd treats them as literal.
-            use std::os::windows::process::CommandExt;
             let mut cmd = Command::new("cmd");
             cmd.raw_arg("/C");
             cmd.raw_arg(format!(" {}", cmd_quote(&bin.to_string_lossy())));
             for a in args {
                 cmd.raw_arg(format!(" {}", cmd_quote(a)));
             }
+            no_window(&mut cmd);
             return cmd;
         }
     }
     let mut cmd = Command::new(bin);
     cmd.args(args);
+    #[cfg(windows)]
+    no_window(&mut cmd);
     cmd
+}
+
+#[cfg(windows)]
+fn no_window(cmd: &mut Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    cmd.creation_flags(CREATE_NO_WINDOW);
 }
 
 /// Quote + caret-escape a single argument for safe passage through `cmd.exe /C`.
