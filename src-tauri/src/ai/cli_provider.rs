@@ -79,6 +79,12 @@ pub trait CliSpec: Send + Sync + 'static {
     fn tolerate_nonzero_exit(&self) -> bool {
         false
     }
+    /// If this CLI can't run headless (no machine-readable stdout), return a
+    /// user-facing reason; the engine surfaces it instead of spawning. Default
+    /// `None` (works headless).
+    fn unsupported_reason(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Resolve the CLI binary: PATH first (via `which`, cross-platform), then the
@@ -97,21 +103,26 @@ pub fn resolve_binary(spec: &dyn CliSpec) -> Option<PathBuf> {
 
 /// Build the spawn `Command` for a resolved binary + args, cross-platform.
 ///
-/// On Windows, npm-installed CLIs are `.cmd`/`.bat` batch shims, which the OS
-/// `CreateProcess` (and thus `tokio::process`) cannot execute directly — they
-/// must run through `cmd.exe /C`. Real `.exe` binaries spawn directly. On Unix
-/// every CLI is a normal executable, so we spawn it directly.
+/// On Windows, npm CLI shims run through `cmd.exe`, whose 8191-char command line
+/// the large prompt+schema overflows ("The command line is too long."). So we
+/// first run the shim's underlying `node <script>` directly (no shell, ~32767
+/// limit), falling back to `cmd /C` only when the shim can't be parsed. Real
+/// `.exe`s and all Unix binaries spawn directly.
 pub(crate) fn build_command(bin: &std::path::Path, args: &[String]) -> Command {
     #[cfg(windows)]
     {
+        if let Some((node, script)) = node_target_from_npm_shim(bin) {
+            let mut cmd = Command::new(node);
+            cmd.arg(script);
+            cmd.args(args);
+            no_window(&mut cmd);
+            return cmd;
+        }
         let is_batch = bin
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| {
                 let e = e.to_ascii_lowercase();
-                // npm/installer shims come as .cmd, .bat, AND .ps1 — all of which
-                // CreateProcess can't run directly. Route every non-.exe shim
-                // through a shell. (.ps1 needs PowerShell, handled below.)
                 e == "cmd" || e == "bat"
             })
             .unwrap_or(false);
@@ -143,6 +154,44 @@ pub(crate) fn build_command(bin: &std::path::Path, args: &[String]) -> Command {
 fn no_window(cmd: &mut Command) {
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     cmd.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// If `bin` is an npm `.cmd`/`.bat`/`.ps1` shim, extract the `(node.exe, script)`
+/// it execs so the caller can run it directly and skip `cmd.exe`. The shims embed
+/// the entry as a quoted path containing `node_modules`, rooted at the shim's dir
+/// (`%dp0%`/`$basedir`). Returns `None` for real `.exe`s or any unparseable shim.
+#[cfg(windows)]
+fn node_target_from_npm_shim(bin: &std::path::Path) -> Option<(PathBuf, PathBuf)> {
+    let ext = bin
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    if !matches!(ext.as_deref(), Some("cmd") | Some("bat") | Some("ps1")) {
+        return None;
+    }
+    let content = std::fs::read_to_string(bin).ok()?;
+    let dir = bin.parent()?;
+
+    let raw = content
+        .split('"')
+        .find(|seg| seg.contains("node_modules"))?;
+    let rel = raw
+        .replace("%~dp0", "")
+        .replace("%dp0%", "")
+        .replace("$basedir", "")
+        .replace('/', "\\");
+    let script = dir.join(rel.trim_start_matches('\\'));
+    if !script.is_file() {
+        return None;
+    }
+
+    let local_node = dir.join("node.exe");
+    let node = if local_node.is_file() {
+        local_node
+    } else {
+        which::which("node").ok()?
+    };
+    Some((node, script))
 }
 
 /// Quote + caret-escape a single argument for safe passage through `cmd.exe /C`.
@@ -270,6 +319,25 @@ impl AiProvider for CliProvider {
         &self,
         req: CompletionRequest,
     ) -> Result<BoxStream<'static, TokenChunk>, AiError> {
+        // CLIs with no headless stdout mode (e.g. `agy` on Windows) would only
+        // yield "[no output from CLI]"; surface their reason as the reply instead.
+        if let Some(reason) = self.spec.unsupported_reason() {
+            let request_id = req.request_id.clone();
+            crate::log_line!(
+                "cli",
+                "{} unsupported headless: surfacing message",
+                self.spec.binary_name()
+            );
+            let out = async_stream::stream! {
+                yield TokenChunk {
+                    request_id,
+                    delta: reason,
+                    finish_reason: Some(FinishReason::Error),
+                };
+            };
+            return Ok(out.boxed());
+        }
+
         let prompt = flatten_prompt(&req.messages);
         let via_stdin = self.spec.prompt_via_stdin();
         let args = self.spec.build_args(
@@ -521,5 +589,61 @@ impl AiProvider for CliProvider {
         for (_, mut child) in map.drain() {
             let _ = child.start_kill();
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_shim_tests {
+    use super::*;
+    use std::fs;
+
+    // Locks the npm-shim parser that every node-based CLI (claude, codex, kilo,
+    // opencode, gemini) relies on to bypass cmd.exe's 8191-char limit.
+    #[test]
+    fn parses_npm_cmd_shim_to_node_target() {
+        let base = std::env::temp_dir().join(format!("tr-shim-cmd-{}", std::process::id()));
+        let bindir = base
+            .join("node_modules")
+            .join("@scope")
+            .join("pkg")
+            .join("bin");
+        fs::create_dir_all(&bindir).unwrap();
+        fs::write(bindir.join("tool"), "// entry").unwrap();
+        fs::write(base.join("node.exe"), "fake").unwrap();
+        let shim = base.join("tool.cmd");
+        fs::write(
+            &shim,
+            "@ECHO off\r\nGOTO start\r\n:start\r\nendLocal & \"%_prog%\"  \
+             \"%dp0%\\node_modules\\@scope\\pkg\\bin\\tool\" %*\r\n",
+        )
+        .unwrap();
+
+        let (node, script) = node_target_from_npm_shim(&shim).expect("cmd shim should parse");
+        assert_eq!(node, base.join("node.exe")); // prefers sibling node.exe
+        assert_eq!(script, bindir.join("tool"));
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    // .ps1 shims use $basedir + forward slashes; same extraction must hold.
+    #[test]
+    fn parses_npm_ps1_shim_to_node_target() {
+        let base = std::env::temp_dir().join(format!("tr-shim-ps1-{}", std::process::id()));
+        let bindir = base.join("node_modules").join("pkg").join("bin");
+        fs::create_dir_all(&bindir).unwrap();
+        fs::write(bindir.join("tool"), "// entry").unwrap();
+        fs::write(base.join("node.exe"), "fake").unwrap();
+        let shim = base.join("tool.ps1");
+        fs::write(&shim, "& \"node$exe\"  \"$basedir/node_modules/pkg/bin/tool\" $args\r\n").unwrap();
+
+        let (_, script) = node_target_from_npm_shim(&shim).expect("ps1 shim should parse");
+        assert_eq!(script, bindir.join("tool"));
+
+        fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn real_exe_is_not_treated_as_a_shim() {
+        assert!(node_target_from_npm_shim(std::path::Path::new("C:\\x\\claude.exe")).is_none());
     }
 }

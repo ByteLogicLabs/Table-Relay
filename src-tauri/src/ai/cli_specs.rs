@@ -358,6 +358,12 @@ impl CliSpec for CodexCliSpec {
         let mut v = npm_global_candidates("codex");
         if let Some(h) = home() {
             v.extend(native_install_candidates(&h, ".codex/bin", "codex"));
+            // Native standalone installer: ~/.codex/packages/standalone/current/bin.
+            v.extend(native_install_candidates(
+                &h,
+                ".codex/packages/standalone/current/bin",
+                "codex",
+            ));
         }
         v
     }
@@ -631,10 +637,10 @@ impl CliSpec for KiloSpec {
 }
 
 // ── antigravity (agy) ────────────────────────────────────────────────────────
-// Google Antigravity's headless agent CLI: `agy -p <prompt> [--model M]` runs a
-// single prompt non-interactively and prints the response as PLAIN TEXT (no JSON
-// stream). We stream stdout lines straight through as deltas. MCP/tools are not
-// wired (agy exposes tools via its own plugin system, not an MCP-config flag).
+// `agy -p <prompt> [--model M]` runs one prompt and prints plain text; MCP comes
+// from ~/.gemini/antigravity/mcp_config.json (out-of-band). On Windows it writes
+// the answer only to its terminal UI, never to a piped stdout (and `agy models`
+// hangs), so we disable it there via `unsupported_reason`. macOS is unaffected.
 
 pub struct AgySpec;
 
@@ -675,6 +681,22 @@ impl CliSpec for AgySpec {
         // `agy` exits non-zero even on a successful run (observed on `agy models`
         // and chat). Once we've streamed output, don't surface that as an error.
         true
+    }
+    fn unsupported_reason(&self) -> Option<String> {
+        // Windows only (see module note); macOS/Linux stream to stdout fine.
+        if cfg!(windows) {
+            Some(
+                "Antigravity's `agy` CLI can't be used as a chat provider on Windows: \
+                 it renders answers to its terminal UI and writes nothing to stdout \
+                 when run as a subprocess, so Table Relay can't capture its replies \
+                 (and `agy models` hangs without a terminal). Pick a different \
+                 provider — Claude Code, Codex, Gemini CLI, opencode, Kilo, a hosted \
+                 API, or the local model. (Antigravity works on macOS.)"
+                    .to_string(),
+            )
+        } else {
+            None
+        }
     }
     fn parse_line(&self, line: &str) -> LineEvent {
         // Plain-text output: every stdout line is part of the answer. Keep the

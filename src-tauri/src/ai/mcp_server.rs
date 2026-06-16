@@ -192,12 +192,10 @@ pub fn register_gemini(home: &std::path::Path, exe: &str, port: u16, token: &str
     merge_json_config(&path, "mcpServers", MCP_SERVER_NAME, entry)
 }
 
-/// Register the MCP server for Antigravity (`agy`). The binary reads MCP
-/// servers from `~/.gemini/config/mcp_config.json` (`{ "mcpServers": { … } }`,
-/// same `command`/`args` shape as Gemini). Verified against the `agy` binary's
-/// embedded config schema + the empty `mcp_config.json` it creates.
+/// Register the MCP server for Antigravity (`agy`), which reads
+/// `~/.gemini/antigravity/mcp_config.json` (same shape as Gemini), NOT `~/.gemini/config`.
 pub fn register_antigravity(home: &std::path::Path, exe: &str, port: u16, token: &str) -> std::io::Result<()> {
-    let path = home.join(".gemini/config/mcp_config.json");
+    let path = home.join(".gemini/antigravity/mcp_config.json");
     let entry = gemini_mcp_fragment(exe, port, token)
         .get(MCP_SERVER_NAME)
         .cloned()
