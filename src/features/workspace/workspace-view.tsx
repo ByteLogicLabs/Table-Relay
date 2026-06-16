@@ -1784,6 +1784,7 @@ export default function WorkspaceView({
         onPickConnection={handlePickConnection}
         onEditConnection={(conn) => openEditConnection(conn, true)}
         onDeleteConnection={onDeleteConnection}
+        onDisconnect={onDisconnect}
         onOpenNewServer={() => setNewConnectionOpen(true)}
         onPinDatabase={handlePinDatabase}
         onImportSql={(id) => setImportSqlForId(id)}

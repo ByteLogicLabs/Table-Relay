@@ -159,6 +159,11 @@ export function cancelConnect(connectionId: string): void {
     lastErrorById.delete(connectionId);
     return { ...s, connectingIds, lastErrorById };
   });
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(
+      new CustomEvent('tablerelay:cancel-connect', { detail: { connectionId } })
+    );
+  }
 }
 
 export async function disconnect(connectionId: string): Promise<void> {
