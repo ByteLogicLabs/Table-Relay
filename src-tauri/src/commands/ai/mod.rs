@@ -314,9 +314,14 @@ pub async fn ai_list_models(input: ListModelsInput) -> Result<Vec<String>, AiErr
         ProviderKind::Opencode => Ok(cli_models(ProviderKind::Opencode).await.unwrap_or_default()),
         // Kilo is opencode-compatible — `kilo models` prints provider/model ids.
         ProviderKind::Kilo => Ok(cli_models(ProviderKind::Kilo).await.unwrap_or_default()),
-        // Antigravity's `agy models` lists its model ids.
+        // `agy models` hangs on Windows (no TTY) and chat is disabled there
+        // anyway (see AgySpec), so return empty fast; list normally elsewhere.
         ProviderKind::Antigravity => {
-            Ok(cli_models(ProviderKind::Antigravity).await.unwrap_or_default())
+            if cfg!(windows) {
+                Ok(Vec::new())
+            } else {
+                Ok(cli_models(ProviderKind::Antigravity).await.unwrap_or_default())
+            }
         }
     }
 }
@@ -825,7 +830,7 @@ fn register_cli_mcp(
             }
             None
         }
-        // Antigravity (agy) reads MCP servers from ~/.gemini/config/mcp_config.json.
+        // Antigravity (agy) reads MCP servers from ~/.gemini/antigravity/mcp_config.json.
         ProviderKind::Antigravity => {
             if let Some(h) = &home {
                 if let Err(e) = mcp_server::register_antigravity(h, &exe, port, token) {
