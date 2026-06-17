@@ -58,6 +58,7 @@ import { useMultiSelection } from "../../hooks/use-multi-selection";
 import { getClickIntent, getKeyIntent } from "../../lib/click-intent";
 import { dialectFromManifest } from "../data-grid/editor-kinds";
 import { copyText } from "../../lib/clipboard";
+import { displayHost } from "../../lib/connection-display";
 import { Section } from "./sidebar-section";
 import {
   pickDdlColumn,
@@ -346,7 +347,15 @@ export default function Sidebar({
     if (!conn) return;
     setRetrying(true);
     try {
-      await connectAndLoad(conn.id);
+      if (isConnected) {
+        // Connect succeeded but the schema load failed (e.g. authenticated to
+        // the server but unauthorized for listDatabases). `connectAndLoad`
+        // would short-circuit on the cached active entry, so retry the schema
+        // fetch directly.
+        await refreshSchemas(conn.id);
+      } else {
+        await connectAndLoad(conn.id);
+      }
     } catch {
       // Error is already captured in `lastErrorById`; no need to toast again.
     } finally {
@@ -1167,7 +1176,7 @@ export default function Sidebar({
               )}
             </div>
             <div className="text-[10px] text-muted-foreground truncate">
-              {conn.driver} · {conn.host}
+              {conn.driver} · {displayHost(conn.host)}
             </div>
           </div>
           <DropdownMenu>
@@ -1308,7 +1317,14 @@ export default function Sidebar({
               section is collapsed. Surface the real reason + a Retry button
               so the user knows something went wrong and can recover without
               clicking back through the rail. */}
-          {conn && !isConnected && !isConnecting && connectError && (
+          {/* Show the error whenever one is recorded and we're not actively
+              retrying — covers BOTH a failed connect (`!isConnected`) AND a
+              successful connect whose schema load failed (e.g. the user can
+              authenticate to the server but `listDatabases` is unauthorized).
+              The latter used to leave `isConnected=true` with no schemas and no
+              error branch, so the body sat on the "Loading schemas…" skeleton
+              forever. */}
+          {conn && !isConnecting && connectError && (
             <div className="px-4 py-6 flex flex-col items-center gap-3 text-center">
               <AlertCircle className="w-6 h-6 text-destructive" />
               <div className="text-xs font-medium">
@@ -1369,6 +1385,7 @@ export default function Sidebar({
               in flight (`loadingExtras`). */}
           {conn &&
             isConnected &&
+            !connectError &&
             (isLoadingSchemas || (!hasLoadedSchemas && schemas.length === 0) || showLoadingFloor) && (
               <>
                 <div className="px-4 pt-2 pb-1 flex items-center gap-2 text-[11px] text-muted-foreground">

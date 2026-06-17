@@ -8,7 +8,8 @@ mod store;
 use std::sync::Arc;
 
 use tauri::menu::{
-    IsMenuItem, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu, SubmenuBuilder,
+    IsMenuItem, Menu, MenuBuilder, MenuItem, MenuItemBuilder, PredefinedMenuItem, Submenu,
+    SubmenuBuilder,
 };
 use tauri::{Emitter, Manager, Wry};
 use tokio::sync::RwLock;
@@ -20,6 +21,20 @@ use tokio::sync::RwLock;
 /// open they would only ever toast an error — better to disable them outright.
 struct ConnectionMenuItems {
     items: Vec<MenuItem<Wry>>,
+}
+
+/// The whole "Connection" submenu plus where it lives in the menu bar. Shown
+/// only once a connection is open; hidden on the home screen, where the home
+/// view already surfaces every connection action (Connect / New / List / etc.).
+/// Tauri 2 has no `set_visible`, so we insert/remove the submenu from the top
+/// menu bar — same approach as [`QueryMenuItems`]. `index` is its fixed slot in
+/// the bar (after Edit), captured at build time so re-insertion lands in place.
+struct ConnectionMenu {
+    menu: Menu<Wry>,
+    submenu: Submenu<Wry>,
+    index: usize,
+    /// Tracks current state so repeated toggles don't double-insert / error.
+    shown: std::sync::Mutex<bool>,
 }
 
 /// File-menu items that act on the query editor (Load / Save / Save Query As),
@@ -279,12 +294,25 @@ pub fn run() {
             let menu = menu_builder
                 .item(&file_menu)
                 .item(&edit_menu)
-                .item(&connection_menu)
+                // Connection submenu is omitted here on purpose — the app opens
+                // on the home screen, which already exposes every connection
+                // action, so we start without it and let the frontend insert it
+                // (via `set_connection_menu_visible`) once a connection opens.
                 // .item(&ai_menu) // hidden for now
                 .item(&view_menu)
                 .item(&window_menu)
                 .build()?;
-            app.set_menu(menu)?;
+            app.set_menu(menu.clone())?;
+
+            // Its slot is right after Edit: app(macOS)/File/Edit precede it.
+            // The macOS app menu adds one leading entry, so the index shifts.
+            let connection_index = if cfg!(target_os = "macos") { 3 } else { 2 };
+            app.manage(ConnectionMenu {
+                menu,
+                submenu: connection_menu,
+                index: connection_index,
+                shown: std::sync::Mutex::new(false),
+            });
 
             // Items that act on the focused connection start disabled — there's
             // no connection open at launch. The frontend re-enables them once a
@@ -357,6 +385,8 @@ pub fn run() {
             commands::logs::logging_open_dir,
             // Native-menu state: grey out connection-dependent items at home.
             set_connection_menu_enabled,
+            // Native-menu state: hide the Connection submenu on the home screen.
+            set_connection_menu_visible,
             // Native-menu state: show query file actions only on query tabs.
             set_query_menu_visible,
             // Security / encrypted app store
@@ -515,6 +545,36 @@ fn set_query_menu_visible(
         state
             .file_menu
             .remove(&state.separator as &dyn IsMenuItem<Wry>)
+            .map_err(|e| e.to_string())?;
+    }
+    *shown = visible;
+    Ok(())
+}
+
+/// Show or hide the whole "Connection" submenu in the native menu bar. The
+/// frontend calls this with `false` on the home screen — where the home view
+/// already provides Connect / New / List Connections, making the submenu
+/// redundant — and `true` once a connection is open. Tauri 2 has no
+/// `set_visible`, so we insert/remove the submenu from the menu bar (same as
+/// `set_query_menu_visible`).
+#[tauri::command]
+fn set_connection_menu_visible(
+    visible: bool,
+    state: tauri::State<'_, ConnectionMenu>,
+) -> Result<(), String> {
+    let mut shown = state.shown.lock().map_err(|e| e.to_string())?;
+    if *shown == visible {
+        return Ok(()); // already in the requested state — nothing to do
+    }
+    if visible {
+        state
+            .menu
+            .insert(&state.submenu as &dyn IsMenuItem<Wry>, state.index)
+            .map_err(|e| e.to_string())?;
+    } else {
+        state
+            .menu
+            .remove(&state.submenu as &dyn IsMenuItem<Wry>)
             .map_err(|e| e.to_string())?;
     }
     *shown = visible;

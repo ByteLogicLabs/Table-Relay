@@ -3,6 +3,9 @@
 @plugin "tailwindcss-animate";
 
 @source inline("sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5");
+@source inline("group-hover:w-4 group-hover:w-8 group-hover:w-auto data-popup-open:w-8");
+@source inline("hidden! group-hover:inline-flex! focus:inline-flex! data-popup-open:inline-flex!");
+@source inline("-mt-1 -mt-2");
 
 @custom-variant dark (&:is(.dark *));
 

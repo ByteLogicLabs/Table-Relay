@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ConnectionProfile } from './types';
+import { ConnectionProfile, type ConnectionTag } from './types';
 import WorkspaceView from './features/workspace/workspace-view';
 import WelcomeView from './features/workspace/welcome-view';
 import { Toaster } from './components/ui/sonner';
@@ -40,7 +40,33 @@ function fromRecord(p: ConnectionProfileRecord): ConnectionProfile {
     sshKeyPassphrase: p.sshKeyPassphrase ?? undefined,
     color: p.color ?? undefined,
     isFavorite: p.isFavorite,
+    tag: p.tag ?? undefined,
+    tagColor: p.tagColor ?? undefined,
+    tags: parseTags(p.tags, p.tag, p.tagColor),
   };
+}
+
+/** Parse the stored tags JSON; fall back to the legacy single tag/tagColor so
+ *  pre-multi-tag connections still show their tag. */
+function parseTags(
+  tagsJson: string | null | undefined,
+  legacyTag: string | null | undefined,
+  legacyColor: string | null | undefined,
+): ConnectionTag[] {
+  if (tagsJson) {
+    try {
+      const arr = JSON.parse(tagsJson);
+      if (Array.isArray(arr)) {
+        return arr
+          .filter((t) => t && typeof t.name === 'string' && t.name.trim() !== '')
+          .map((t) => ({ name: String(t.name), color: String(t.color || 'Gray') }));
+      }
+    } catch { /* fall through to legacy */ }
+  }
+  if (legacyTag && legacyTag.trim() !== '') {
+    return [{ name: legacyTag, color: legacyColor || 'Gray' }];
+  }
+  return [];
 }
 
 export default function App() {
@@ -306,6 +332,11 @@ function UnlockedApp() {
       sshKeyPassphrase: conn.sshKeyPassphrase || undefined,
       color: conn.color,
       isFavorite: !!conn.isFavorite,
+      // Multi-tag: persist the array as JSON, and mirror the first tag into the
+      // legacy tag/tagColor columns for back-compat.
+      tags: conn.tags && conn.tags.length > 0 ? JSON.stringify(conn.tags) : undefined,
+      tag: conn.tags?.[0]?.name ?? conn.tag ?? undefined,
+      tagColor: conn.tags?.[0]?.color ?? conn.tagColor ?? undefined,
     });
     await reload();
     return saved.id;
@@ -367,8 +398,10 @@ function UnlockedApp() {
       if (idChanged) {
         await connectionsStore.remove(previousId);
         setActiveConnectionIds(prev => prev.filter(cId => cId !== previousId));
-        await reload();
       }
+      // Always refresh the in-memory list so edits (tags, name, color, …) show
+      // immediately in the sidebar / cards, not just when the id changed.
+      await reload();
     } catch (e) {
       toast.error(`Failed to save connection: ${String(e)}`);
       throw e;

@@ -176,6 +176,7 @@ pub async fn db_test_connection(
         is_favorite: profile.is_favorite,
         tag: profile.tag,
         tag_color: profile.tag_color,
+        tags: profile.tags,
     };
 
     let adapter_id = factories.resolve(&profile.driver).ok_or_else(|| {

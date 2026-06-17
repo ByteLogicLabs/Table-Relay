@@ -245,15 +245,40 @@ export default function WorkspaceView({
   useEffect(() => {
     connectionsRef.current = connections;
   }, [connections]);
+
+  // Unique, sorted tags across all connections — feeds the tag suggestions.
+  const connectionTags = useMemo(() => {
+    // Dedupe by name, keeping the first-seen color so existing tags reuse it.
+    const byName = new Map<string, { name: string; color: string }>();
+    for (const c of connections) {
+      const tags = c.tags && c.tags.length > 0
+        ? c.tags
+        : c.tag ? [{ name: c.tag, color: c.tagColor || 'Gray' }] : [];
+      for (const t of tags) {
+        if (t.name.trim() === '' || byName.has(t.name)) continue;
+        byName.set(t.name, { name: t.name, color: t.color });
+      }
+    }
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [connections]);
   // Grey out the connection-dependent native menu items (Edit Current / Open
   // Database / Import Data / Export Data) whenever no connection is focused.
   // They all act on the focused connection, so on the home screen they would
   // only toast an error — disabling them is the honest affordance.
   useEffect(() => {
+    const hasFocus = focusedConnectionId != null;
     void invoke("set_connection_menu_enabled", {
-      enabled: focusedConnectionId != null,
+      enabled: hasFocus,
     }).catch(() => {
       /* menu state is best-effort; the listeners still guard with a toast */
+    });
+    // Hide the whole Connection submenu on the home screen — the home view
+    // already surfaces Connect / New / List Connections, so it's redundant
+    // there. Show it again once a connection is focused.
+    void invoke("set_connection_menu_visible", {
+      visible: hasFocus,
+    }).catch(() => {
+      /* best-effort; submenu just stays in its current state on failure */
     });
   }, [focusedConnectionId]);
   const openEditConnection = (
@@ -1936,6 +1961,7 @@ export default function WorkspaceView({
         isOpen={newConnectionOpen}
         onClose={() => setNewConnectionOpen(false)}
         onSave={handleSaveNewConnection}
+        existingTags={connectionTags}
       />
 
       <ConnectionModal
@@ -1943,6 +1969,7 @@ export default function WorkspaceView({
         onClose={closeEditConnection}
         onSave={handleSaveEditedConnection}
         initialData={editingConnection ?? undefined}
+        existingTags={connectionTags}
       />
 
       <ImportSqlDialog
