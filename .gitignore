@@ -12,6 +12,10 @@ coverage/
 src-tauri/target/
 src-tauri/gen/
 
+# Tauri updater signing keys / credentials — never commit
+workspace/credentials/*
+!workspace/credentials/README.md
+
 # Downloaded AI model weights (M8.1). See ai-plan.md.
 ai-models/
 target
@@ -25,3 +29,5 @@ AUDIT.md
 
 # Locally built macOS installers (scripts/make-dmg.sh writes to repo root)
 *.dmg
+docs
+workspace

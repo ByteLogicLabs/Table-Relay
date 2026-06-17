@@ -755,6 +755,8 @@ function ModelSearchPicker({
       searchPlaceholder="Search or type a model id…"
       className="h-8 text-[11px] font-mono"
       allowCustom
+      loading={loading}
+      loadingLabel="Loading models…"
     />
   );
 }

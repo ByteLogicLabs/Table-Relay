@@ -1,27 +1,23 @@
 import { useEffect, useRef, useState } from 'react';
-import { ArrowUpCircle, X } from 'lucide-react';
+import { ArrowUpCircle, X, Loader2 } from 'lucide-react';
 import { openUrl } from '@tauri-apps/plugin-opener';
+import { toast } from 'sonner';
 import { Button } from './ui/button';
-import { checkForUpdate } from '../lib/update';
+import {
+  checkForUpdate,
+  canAutoInstall,
+  downloadAndInstallUpdate,
+  relaunchApp,
+} from '../lib/update';
 
-const POLL_MS = 30 * 60 * 1000; // re-check every 30 minutes
+const POLL_MS = 30 * 60 * 1000;
 
-/**
- * Bottom-right "update available" notice.
- *
- * Behaviour (per product spec):
- *   - Shows on every boot when the running version is behind GitHub.
- *   - Re-checks every 30 minutes so a release published while the app is open
- *     still surfaces.
- *   - Dismissing hides it for the rest of this app run (in-memory only) — it
- *     reappears on the next reboot, not on the 30-min poll. Nothing is persisted,
- *     so there's no per-version "remembered dismissal".
- */
+type Phase = 'idle' | 'installing' | 'done';
+
 export function UpdateNotice() {
   const [info, setInfo] = useState<{ current: string; latest: string } | null>(null);
-  // Dismissed for this session — suppresses the card until the app restarts,
-  // even across the 30-min re-checks. A ref so the interval callback reads the
-  // live value without re-subscribing.
+  const [phase, setPhase] = useState<Phase>('idle');
+  const [pct, setPct] = useState<number | null>(null);
   const dismissedRef = useRef(false);
 
   useEffect(() => {
@@ -30,9 +26,7 @@ export function UpdateNotice() {
       if (dismissedRef.current) return;
       const res = await checkForUpdate();
       if (cancelled || dismissedRef.current) return;
-      if (res?.hasUpdate) {
-        setInfo({ current: res.current, latest: res.latest });
-      }
+      if (res?.hasUpdate) setInfo({ current: res.current, latest: res.latest });
     };
     void run();
     const id = window.setInterval(() => void run(), POLL_MS);
@@ -45,47 +39,98 @@ export function UpdateNotice() {
   if (!info) return null;
 
   const dismiss = () => {
+    if (phase === 'installing') return;
     dismissedRef.current = true;
     setInfo(null);
   };
 
-  const download = () => {
+  const openReleases = () => {
     const base = process.env.GIT_URL || 'https://github.com/ByteLogicLabs/Table-Relay';
     void openUrl(`${base}/releases/latest`).catch(() => {});
     dismiss();
   };
 
+  const update = async () => {
+    if (!canAutoInstall()) {
+      openReleases();
+      return;
+    }
+    setPhase('installing');
+    setPct(null);
+    try {
+      await downloadAndInstallUpdate(({ downloaded, total }) => {
+        setPct(total ? Math.min(100, Math.round((downloaded / total) * 100)) : null);
+      });
+      setPhase('done');
+      await relaunchApp();
+    } catch (e) {
+      setPhase('idle');
+      setPct(null);
+      toast.error(`Update failed: ${String(e)}`);
+    }
+  };
+
+  const installing = phase === 'installing';
+  const done = phase === 'done';
+
   return (
-    // Offset above the dev-debug bug button (bottom-right) so they don't overlap.
     <div className="fixed bottom-14 right-4 z-50 w-76 rounded-xl border border-border bg-popover text-popover-foreground shadow-xl">
-      {/* Header: icon + title, with the close button aligned to it. */}
       <div className="flex items-center gap-2 px-3.5 pt-3 pb-1">
         <ArrowUpCircle className="w-4 h-4 text-primary shrink-0" />
         <span className="text-sm font-semibold flex-1 min-w-0">Update available</span>
-        <button
-          type="button"
-          onClick={dismiss}
-          className="-mr-1 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
-          title="Dismiss"
-          aria-label="Dismiss"
-        >
-          <X className="w-3.5 h-3.5" />
-        </button>
+        {!installing && (
+          <button
+            type="button"
+            onClick={dismiss}
+            className="-mr-1 p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-muted shrink-0"
+            title="Dismiss"
+            aria-label="Dismiss"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+        )}
       </div>
-      {/* Version line — kept on one line; the version pills don't break. */}
+
       <div className="px-3.5 text-xs text-muted-foreground">
         <span className="font-mono text-foreground">{info.current}</span>
         {' → '}
         <span className="font-mono text-primary">{info.latest}</span>
         {' available'}
       </div>
+
+      {installing && (
+        <div className="px-3.5 pt-2.5">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-[width] duration-200"
+              style={{ width: pct === null ? '40%' : `${pct}%` }}
+            />
+          </div>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">
+            {pct === null ? 'Downloading…' : `Downloading… ${pct}%`}
+          </p>
+        </div>
+      )}
+
       <div className="flex items-center gap-2 px-3.5 pt-3 pb-3.5">
-        <Button size="sm" className="h-7 text-xs flex-1" onClick={download}>
-          Download
-        </Button>
-        <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={dismiss}>
-          Later
-        </Button>
+        {done ? (
+          <Button size="sm" className="h-7 text-xs flex-1" disabled>
+            <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Restarting…
+          </Button>
+        ) : installing ? (
+          <Button size="sm" className="h-7 text-xs flex-1" disabled>
+            <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> Installing…
+          </Button>
+        ) : (
+          <>
+            <Button size="sm" className="h-7 text-xs flex-1" onClick={() => void update()}>
+              {canAutoInstall() ? 'Update now' : 'Download'}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={dismiss}>
+              Later
+            </Button>
+          </>
+        )}
       </div>
     </div>
   );

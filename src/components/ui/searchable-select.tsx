@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Check, ChevronsUpDown, Search } from 'lucide-react';
+import { Check, ChevronsUpDown, Loader2, Search } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from './popover';
 import { Input } from './input';
 import { cn } from '@/src/lib/utils';
@@ -26,6 +26,8 @@ export function SearchableSelect({
   disabled,
   className,
   allowCustom = false,
+  loading = false,
+  loadingLabel = 'Loading…',
 }: {
   value: string;
   options: SearchableSelectOption[];
@@ -39,6 +41,11 @@ export function SearchableSelect({
    *  '<query>'" row appears). Lets the user enter a value not in `options` —
    *  e.g. a CLI model id newer than our curated list. */
   allowCustom?: boolean;
+  /** Show a loading row in the open list while options are still being fetched
+   *  (e.g. a CLI model catalog spawned via subprocess). */
+  loading?: boolean;
+  /** Text shown next to the spinner while `loading`. */
+  loadingLabel?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -149,9 +156,16 @@ export function SearchableSelect({
           />
         </div>
         <div ref={listRef} className="max-h-64 overflow-y-auto p-1">
-          {filtered.length === 0 && !showCustom ? (
+          {loading && (
+            <div className="flex items-center justify-center gap-2 py-2 text-xs text-muted-foreground">
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              {loadingLabel}
+            </div>
+          )}
+          {!loading && filtered.length === 0 && !showCustom && (
             <div className="py-6 text-center text-xs text-muted-foreground">No matches.</div>
-          ) : (
+          )}
+          {filtered.length > 0 &&
             filtered.map((o, idx) => (
               <button
                 key={o.value}
@@ -168,8 +182,7 @@ export function SearchableSelect({
                 <Check className={cn('w-3.5 h-3.5 shrink-0', o.value === value ? 'opacity-100' : 'opacity-0')} />
                 <span className="truncate">{o.label}</span>
               </button>
-            ))
-          )}
+            ))}
           {showCustom && (
             <button
               type="button"
