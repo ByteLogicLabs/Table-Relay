@@ -21,6 +21,16 @@ const DRIVER_TO_ADAPTER_KEY: Record<string, string> = {
   PostgreSQL: 'postgres',
   MongoDB: 'mongo',
 };
+
+export const TAG_COLORS = [
+  { name: 'Red', bg: 'bg-rose-100 dark:bg-rose-950/40', text: 'text-rose-700 dark:text-rose-300', dot: 'bg-rose-500' },
+  { name: 'Orange', bg: 'bg-orange-100 dark:bg-orange-950/40', text: 'text-orange-700 dark:text-orange-300', dot: 'bg-orange-500' },
+  { name: 'Yellow', bg: 'bg-amber-100 dark:bg-amber-950/40', text: 'text-amber-700 dark:text-amber-300', dot: 'bg-amber-500' },
+  { name: 'Green', bg: 'bg-emerald-100 dark:bg-emerald-950/40', text: 'text-emerald-700 dark:text-emerald-300', dot: 'bg-emerald-500' },
+  { name: 'Blue', bg: 'bg-blue-100 dark:bg-blue-950/40', text: 'text-blue-700 dark:text-blue-300', dot: 'bg-blue-500' },
+  { name: 'Purple', bg: 'bg-purple-100 dark:bg-purple-950/40', text: 'text-purple-700 dark:text-purple-300', dot: 'bg-purple-500' },
+  { name: 'Gray', bg: 'bg-slate-100 dark:bg-slate-900/60', text: 'text-slate-700 dark:text-slate-300', dot: 'bg-slate-500' },
+];
 /** Reverse lookup so we can translate an adapter key back to the driver
  *  string the store expects on save. */
 function adapterKeyToDriver(key: string): Driver {
@@ -198,6 +208,8 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
       sshKeyPassphrase: formData.sshKeyPassphrase || undefined,
       color: formData.color,
       isFavorite: !!formData.isFavorite,
+      tag: formData.tag || undefined,
+      tagColor: formData.tagColor || undefined,
     };
   };
 
@@ -285,6 +297,8 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
         sshKeyPassphrase: formData.sshKeyPassphrase,
         color: formData.color,
         isFavorite: formData.isFavorite,
+        tag: formData.tag,
+        tagColor: formData.tagColor,
       }, initialData?.id);
     } catch {
       setIsSaving(false);
@@ -357,6 +371,41 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
               onChange={(e) => handleChange('name', e.target.value)}
               autoFocus
             />
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Tag Name</label>
+              <Input
+                className="w-full"
+                placeholder="e.g. Production, Staging, Local"
+                value={formData.tag || ''}
+                onChange={(e) => handleChange('tag', e.target.value)}
+              />
+            </div>
+            <div className="grid gap-2">
+              <label className="text-sm font-medium">Tag Color (macOS Style)</label>
+              <div className="flex items-center gap-3 h-10">
+                {TAG_COLORS.map(tc => {
+                  const isSelected = formData.tagColor === tc.name || (!formData.tagColor && tc.name === 'Gray');
+                  return (
+                    <button
+                      key={tc.name}
+                      type="button"
+                      className={`w-6 h-6 rounded-full ${tc.dot} hover:scale-110 active:scale-95 transition-all duration-200 cursor-pointer flex items-center justify-center border ${
+                        isSelected ? 'border-foreground ring-2 ring-primary/40' : 'border-transparent'
+                      }`}
+                      title={tc.name}
+                      onClick={() => handleChange('tagColor', tc.name)}
+                    >
+                      {isSelected && (
+                        <div className="w-1.5 h-1.5 bg-background rounded-full" />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
 
 

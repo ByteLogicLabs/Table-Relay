@@ -10,7 +10,9 @@ export type FilterOperator =
   | "gt"
   | "lt"
   | "is_empty"
-  | "is_not_empty";
+  | "is_not_empty"
+  | "in"
+  | "not_in";
 
 export interface FilterCondition {
   id: string;
@@ -26,6 +28,7 @@ export const OPERATORS: {
   value: FilterOperator;
   label: string;
   valueless?: boolean;
+  placeholder?: string;
 }[] = [
   { value: "eq", label: "= equals" },
   { value: "neq", label: "≠ not equal" },
@@ -36,6 +39,8 @@ export const OPERATORS: {
   { value: "lt", label: "< less than" },
   { value: "is_empty", label: "is empty", valueless: true },
   { value: "is_not_empty", label: "is not empty", valueless: true },
+  { value: "in", label: "is in list", placeholder: "value1, value2, ..." },
+  { value: "not_in", label: "is not in list", placeholder: "value1, value2, ..." },
 ];
 
 export function cellToString(v: unknown): string {
@@ -78,6 +83,18 @@ export function matchCondition(
       return s.length === 0;
     case "is_not_empty":
       return s.length > 0;
+    case "in": {
+      const parts = c.value
+        .split(",")
+        .map((p) => p.trim().toLowerCase());
+      return parts.includes(s);
+    }
+    case "not_in": {
+      const parts = c.value
+        .split(",")
+        .map((p) => p.trim().toLowerCase());
+      return !parts.includes(s);
+    }
   }
 }
 

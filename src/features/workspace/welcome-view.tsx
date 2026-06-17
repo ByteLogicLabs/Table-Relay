@@ -11,6 +11,25 @@ import MacWindowControls from './mac-window-controls';
 import DbIcon from '../../components/db-icon';
 import { useConnections, cancelConnect } from '../../state/connections';
 import { getAppState, setAppState } from '../../lib/app-state-store';
+const getTagColors = (colorName?: string) => {
+  switch (colorName) {
+    case 'Red':
+      return { bg: 'bg-rose-100 dark:bg-rose-950/40', text: 'text-rose-700 dark:text-rose-300' };
+    case 'Orange':
+      return { bg: 'bg-orange-100 dark:bg-orange-950/40', text: 'text-orange-700 dark:text-orange-300' };
+    case 'Yellow':
+      return { bg: 'bg-amber-100 dark:bg-amber-950/40', text: 'text-amber-700 dark:text-amber-300' };
+    case 'Green':
+      return { bg: 'bg-emerald-100 dark:bg-emerald-950/40', text: 'text-emerald-700 dark:text-emerald-300' };
+    case 'Blue':
+      return { bg: 'bg-blue-100 dark:bg-blue-950/40', text: 'text-blue-700 dark:text-blue-300' };
+    case 'Purple':
+      return { bg: 'bg-purple-100 dark:bg-purple-950/40', text: 'text-purple-700 dark:text-purple-300' };
+    case 'Gray':
+    default:
+      return { bg: 'bg-slate-100 dark:bg-slate-900/60', text: 'text-slate-700 dark:text-slate-300' };
+  }
+};
 
 interface FavoriteGroup {
   id: string;
@@ -158,6 +177,7 @@ export default function WelcomeView({
   const handleConnect = (id: string) => {
     // Kicks off the real connect in app.tsx, which drives the
     // store's `connectingIds` set we read from below.
+    if (connState.connectingIds.has(id)) return;
     onConnect(id);
   };
 
@@ -290,53 +310,67 @@ export default function WelcomeView({
                           Empty group
                         </div>
                       ) : (
-                        group.connections.map(conn => (
-                          <div
-                            key={conn.id}
-                            className="group flex items-center justify-between gap-2 px-2 py-1.5 hover:bg-muted/50 rounded-md cursor-pointer text-sm"
-                            onClick={() => handleConnect(conn.id)}
-                          >
-                            <div className="flex items-center gap-2 min-w-0 flex-1">
-                              <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: conn.color || '#888' }} />
-                              <span className="truncate">{conn.name}</span>
-                            </div>
-                            <div className="flex items-center gap-1 shrink-0">
-                              <DropdownMenu>
-                                <DropdownMenuTrigger
-                                  className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
-                                  onClick={(e) => e.stopPropagation()}
-                                >
-                                  <Folder className="w-3.5 h-3.5" />
-                                </DropdownMenuTrigger>
-                                <DropdownMenuContent align="end" className="w-48">
-                                  <div className="px-2 py-1 text-xs font-semibold text-muted-foreground select-none">Move to Group</div>
-                                  <DropdownMenuSeparator />
-                                  <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, ''); }}>
-                                    None (Ungrouped)
-                                  </DropdownMenuItem>
-                                  {groups.filter(g => g.id !== group.id).map(g => (
-                                    <DropdownMenuItem key={g.id} onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, g.id); }}>
-                                      {g.name}
+                        group.connections.map(conn => {
+                          const isConnecting = connState.connectingIds.has(conn.id);
+                          return (
+                            <div
+                              key={conn.id}
+                              className={`group flex items-center justify-between gap-2 px-2 py-1.5 hover:bg-muted/50 rounded-md cursor-pointer text-sm ${isConnecting ? "pointer-events-none opacity-75" : ""}`}
+                              onClick={() => !isConnecting && handleConnect(conn.id)}
+                            >
+                              <div className="flex items-center gap-2 min-w-0 flex-1">
+                                <div className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                                  {isConnecting ? (
+                                    <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                                  ) : (
+                                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: conn.color || '#888' }} />
+                                  )}
+                                </div>
+                                <span className="truncate">{conn.name}</span>
+                                {conn.tag && (
+                                  <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full select-none shrink-0 ${getTagColors(conn.tagColor).bg} ${getTagColors(conn.tagColor).text}`}>
+                                    {conn.tag}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1 shrink-0">
+                                <DropdownMenu>
+                                  <DropdownMenuTrigger
+                                    className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    <Folder className="w-3.5 h-3.5" />
+                                  </DropdownMenuTrigger>
+                                  <DropdownMenuContent align="end" className="w-48">
+                                    <div className="px-2 py-1 text-xs font-semibold text-muted-foreground select-none">Move to Group</div>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, ''); }}>
+                                      None (Ungrouped)
                                     </DropdownMenuItem>
-                                  ))}
-                                </DropdownMenuContent>
-                              </DropdownMenu>
+                                    {groups.filter(g => g.id !== group.id).map(g => (
+                                      <DropdownMenuItem key={g.id} onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, g.id); }}>
+                                        {g.name}
+                                      </DropdownMenuItem>
+                                    ))}
+                                  </DropdownMenuContent>
+                                </DropdownMenu>
 
-                              <Button
-                                variant="ghost"
-                                size="icon"
-                                className="w-5 h-5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-amber-500 hover:bg-transparent"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onEditConnection({ ...conn, isFavorite: false });
-                                }}
-                                title="Remove from Favorites"
-                              >
-                                <Star className="w-3 h-3 fill-amber-500 text-amber-500 hover:fill-none" />
-                              </Button>
+                                <Button
+                                  variant="ghost"
+                                  size="icon"
+                                  className="w-5 h-5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-amber-500 hover:bg-transparent"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    onEditConnection({ ...conn, isFavorite: false });
+                                  }}
+                                  title="Remove from Favorites"
+                                >
+                                  <Star className="w-3 h-3 fill-amber-500 text-amber-500 hover:fill-none" />
+                                </Button>
+                              </div>
                             </div>
-                          </div>
-                        ))
+                          );
+                        })
                       )}
                     </div>
                   )}
@@ -351,55 +385,69 @@ export default function WelcomeView({
                       Ungrouped
                     </div>
                   )}
-                  {groupedFavorites.ungrouped.map(conn => (
-                    <div
-                      key={conn.id}
-                      className="group flex items-center justify-between gap-2 px-2 py-1.5 hover:bg-muted/50 rounded-md cursor-pointer text-sm"
-                      onClick={() => handleConnect(conn.id)}
-                    >
-                      <div className="flex items-center gap-2 min-w-0 flex-1">
-                        <div className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: conn.color || '#888' }} />
-                        <span className="truncate">{conn.name}</span>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        {groups.length > 0 && (
-                          <DropdownMenu>
-                            <DropdownMenuTrigger
-                              className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
-                              onClick={(e) => e.stopPropagation()}
-                            >
-                              <Folder className="w-3.5 h-3.5" />
-                            </DropdownMenuTrigger>
-                            <DropdownMenuContent align="end" className="w-48">
-                              <div className="px-2 py-1 text-xs font-semibold text-muted-foreground select-none">Move to Group</div>
-                              <DropdownMenuSeparator />
-                              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, ''); }}>
-                                None (Ungrouped)
-                              </DropdownMenuItem>
-                              {groups.map(g => (
-                                <DropdownMenuItem key={g.id} onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, g.id); }}>
-                                  {g.name}
+                  {groupedFavorites.ungrouped.map(conn => {
+                    const isConnecting = connState.connectingIds.has(conn.id);
+                    return (
+                      <div
+                        key={conn.id}
+                        className={`group flex items-center justify-between gap-2 px-2 py-1.5 hover:bg-muted/50 rounded-md cursor-pointer text-sm ${isConnecting ? "pointer-events-none opacity-75" : ""}`}
+                        onClick={() => !isConnecting && handleConnect(conn.id)}
+                      >
+                        <div className="flex items-center gap-2 min-w-0 flex-1">
+                          <div className="w-3.5 h-3.5 flex items-center justify-center shrink-0">
+                            {isConnecting ? (
+                              <div className="w-3 h-3 border-2 border-primary border-t-transparent rounded-full animate-spin" />
+                            ) : (
+                              <div className="w-2 h-2 rounded-full" style={{ backgroundColor: conn.color || '#888' }} />
+                            )}
+                          </div>
+                          <span className="truncate">{conn.name}</span>
+                          {conn.tag && (
+                            <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full select-none shrink-0 ${getTagColors(conn.tagColor).bg} ${getTagColors(conn.tagColor).text}`}>
+                              {conn.tag}
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {groups.length > 0 && (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger
+                                className="w-5 h-5 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-foreground"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <Folder className="w-3.5 h-3.5" />
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end" className="w-48">
+                                <div className="px-2 py-1 text-xs font-semibold text-muted-foreground select-none">Move to Group</div>
+                                <DropdownMenuSeparator />
+                                <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, ''); }}>
+                                  None (Ungrouped)
                                 </DropdownMenuItem>
-                              ))}
-                            </DropdownMenuContent>
-                          </DropdownMenu>
-                        )}
+                                {groups.map(g => (
+                                  <DropdownMenuItem key={g.id} onClick={(e) => { e.stopPropagation(); handleMoveToGroup(conn.id, g.id); }}>
+                                    {g.name}
+                                  </DropdownMenuItem>
+                                ))}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
 
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="w-5 h-5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-amber-500 hover:bg-transparent"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onEditConnection({ ...conn, isFavorite: false });
-                          }}
-                          title="Remove from Favorites"
-                        >
-                          <Star className="w-3 h-3 fill-amber-500 text-amber-500 hover:fill-none" />
-                        </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="w-5 h-5 opacity-0 group-hover:opacity-100 transition-opacity text-muted-foreground hover:text-amber-500 hover:bg-transparent"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onEditConnection({ ...conn, isFavorite: false });
+                            }}
+                            title="Remove from Favorites"
+                          >
+                            <Star className="w-3 h-3 fill-amber-500 text-amber-500 hover:fill-none" />
+                          </Button>
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -598,7 +646,14 @@ export default function WelcomeView({
                   <h3 className="font-semibold text-base mb-1 truncate">{conn.name}</h3>
                   <div className="text-sm text-muted-foreground flex flex-col gap-1">
                     <span className="truncate">{conn.user}@{conn.host}:{conn.port}</span>
-                    <span className="text-xs px-2 py-0.5 bg-muted rounded-md w-fit">{conn.driver}</span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-xs px-2 py-0.5 bg-muted rounded-md w-fit">{conn.driver}</span>
+                      {conn.tag && (
+                        <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full select-none ${getTagColors(conn.tagColor).bg} ${getTagColors(conn.tagColor).text}`}>
+                          {conn.tag}
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               ))}

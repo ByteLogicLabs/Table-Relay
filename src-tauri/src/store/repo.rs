@@ -31,6 +31,8 @@ pub struct ConnectionProfile {
     pub ssh_key_passphrase: Option<String>,
     pub color: Option<String>,
     pub is_favorite: bool,
+    pub tag: Option<String>,
+    pub tag_color: Option<String>,
 }
 
 impl ConnectionProfile {
@@ -101,13 +103,17 @@ pub struct ConnectionProfileInput {
     pub color: Option<String>,
     #[serde(default)]
     pub is_favorite: bool,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub tag_color: Option<String>,
 }
 
 pub fn list_connections(conn: &Connection) -> Result<Vec<ConnectionProfile>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT id, name, driver, host, port, user, password, database, ssl_mode,
                 ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_auth_kind, ssh_key_path,
-                ssh_password, ssh_key_passphrase, color, is_favorite
+                ssh_password, ssh_key_passphrase, color, is_favorite, tag, tag_color
          FROM connections ORDER BY name",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -131,6 +137,8 @@ pub fn list_connections(conn: &Connection) -> Result<Vec<ConnectionProfile>, Sto
             ssh_key_passphrase: r.get(16)?,
             color: r.get(17)?,
             is_favorite: r.get::<_, i64>(18)? != 0,
+            tag: r.get(19)?,
+            tag_color: r.get(20)?,
         })
     })?;
     let mut out = Vec::new();
@@ -157,8 +165,8 @@ pub fn save_connection(
     conn.execute(
         "INSERT INTO connections (id, name, driver, host, port, user, password, database, ssl_mode,
                                   ssh_enabled, ssh_host, ssh_port, ssh_user, ssh_auth_kind, ssh_key_path,
-                                  ssh_password, ssh_key_passphrase, color, is_favorite, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?20)
+                                  ssh_password, ssh_key_passphrase, color, is_favorite, tag, tag_color, created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?21, ?22, ?20, ?20)
          ON CONFLICT(id) DO UPDATE SET
             name = excluded.name,
             driver = excluded.driver,
@@ -178,6 +186,8 @@ pub fn save_connection(
             ssh_key_passphrase = excluded.ssh_key_passphrase,
             color = excluded.color,
             is_favorite = excluded.is_favorite,
+            tag = excluded.tag,
+            tag_color = excluded.tag_color,
             updated_at = excluded.updated_at",
         params![
             id,
@@ -200,6 +210,8 @@ pub fn save_connection(
             input.color,
             if input.is_favorite { 1 } else { 0 },
             now,
+            input.tag,
+            input.tag_color,
         ],
     )?;
     get_connection(conn, &id)
