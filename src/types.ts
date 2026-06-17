@@ -22,6 +22,8 @@ export interface ConnectionProfile {
   sshKeyPassphrase?: string;
   color?: string;
   isFavorite?: boolean;
+  tag?: string;
+  tagColor?: string;
 }
 
 export type TabType = 'data' | 'structure' | 'query' | 'erd' | 'routine' | 'trigger' | 'realtime';

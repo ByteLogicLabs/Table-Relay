@@ -1238,6 +1238,13 @@ export default function DataGrid({
         redo();
         return;
       }
+      if (mod && key === "f") {
+        if (viewMode !== "table") return;
+        e.preventDefault();
+        setFilterPopoverOpen((prev) => !prev);
+        setColumnsPopoverOpen(false);
+        return;
+      }
       if (inEditable) return;
       if (viewMode !== "table") return;
       if (mod && key === "c" && selectedRows.size > 0) {
@@ -1288,6 +1295,19 @@ export default function DataGrid({
    */
   const toBrowseFilters = (): BrowseFilter[] => {
     return activeFilters.map((f) => {
+      if (f.op === "in" || f.op === "not_in") {
+        const isNumericColumn =
+          (columnKinds[f.column]?.kind ?? "text") === "number";
+        const parts = f.value.split(",").map((p) => p.trim());
+        const value = parts.map((part) => {
+          if (isNumericColumn) {
+            const n = Number(part);
+            return Number.isFinite(n) ? n : part;
+          }
+          return part;
+        });
+        return { column: f.column, op: f.op, value };
+      }
       const op: BrowseFilterOp = (() => {
         switch (f.op) {
           case "eq":
@@ -1366,6 +1386,18 @@ export default function DataGrid({
           case "is_not_empty":
             filterObj[key] = { $nin: [null, ""] };
             break;
+          case "in": {
+            const parts = f.value.split(",").map((p) => p.trim());
+            const parsedParts = parts.map((part) => isNaN(Number(part)) ? part : Number(part));
+            filterObj[key] = { $in: parsedParts };
+            break;
+          }
+          case "not_in": {
+            const parts = f.value.split(",").map((p) => p.trim());
+            const parsedParts = parts.map((part) => isNaN(Number(part)) ? part : Number(part));
+            filterObj[key] = { $nin: parsedParts };
+            break;
+          }
         }
       });
       const sortObj: Record<string, 1 | -1> = {};
@@ -1422,6 +1454,28 @@ export default function DataGrid({
             return `(${col} IS NULL OR ${col} = '')`;
           case "is_not_empty":
             return `(${col} IS NOT NULL AND ${col} <> '')`;
+          case "in": {
+            const list = f.value
+              .split(",")
+              .map((val) => {
+                const trimmed = val.trim();
+                const escaped = trimmed.replace(/'/g, "''");
+                return isNaN(Number(trimmed)) ? `'${escaped}'` : trimmed;
+              })
+              .join(", ");
+            return `${col} IN (${list})`;
+          }
+          case "not_in": {
+            const list = f.value
+              .split(",")
+              .map((val) => {
+                const trimmed = val.trim();
+                const escaped = trimmed.replace(/'/g, "''");
+                return isNaN(Number(trimmed)) ? `'${escaped}'` : trimmed;
+              })
+              .join(", ");
+            return `${col} NOT IN (${list})`;
+          }
         }
       })
       .join(" AND ");
@@ -2821,7 +2875,7 @@ export default function DataGrid({
                                 </SelectContent>
                               </Select>
                               <Input
-                                placeholder={op?.valueless ? "" : "value"}
+                                placeholder={op?.valueless ? "" : (op?.placeholder || "value")}
                                 disabled={op?.valueless}
                                 className="h-7 flex-1 min-w-0 text-xs"
                                 value={f.value}
