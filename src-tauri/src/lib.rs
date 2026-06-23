@@ -95,16 +95,36 @@ pub fn run() {
             // vault + oauth files forward so existing users keep their saved
             // connections, known SSH hosts, AI settings and chat history.
             migrate_legacy_app_data(&dir);
-            let store = Arc::new(
-                Store::open(dir.clone()).unwrap_or_else(|e| {
-                    // Last-resort recovery: if the store can't open even after
-                    // internal fallback (e.g. filesystem permission issue), wipe
-                    // it and start clean rather than crashing the app.
+            let store = Arc::new(match Store::open(dir.clone()) {
+                Ok(s) => s,
+                // The store is UNREADABLE but INTACT — either a wrong/missing
+                // encryption token, or a schema newer than this build knows
+                // (DB-ahead-of-code, e.g. a dev build opened after a newer
+                // release wrote the store). Deleting it here would silently wipe
+                // the user's connections — this exact path destroyed data
+                // before. Never reset in this case; crash with a clear message
+                // so the data is preserved and the build/branch can be fixed.
+                Err(e) if e.is_unreadable_not_corrupt() => {
+                    crate::log::write_line(
+                        "store",
+                        &format!("open failed ({e}); store is intact but unreadable by this build \
+                                  — refusing to reset"),
+                    );
+                    panic!(
+                        "Stored data could not be opened by this build, but it is intact. \
+                         Refusing to reset so your connections are not lost. Cause: {e}. \
+                         This usually means a different/missing encryption token, or running \
+                         an older build against a store written by a newer one."
+                    );
+                }
+                // Genuine I/O / corruption (not a token mismatch): self-heal by
+                // resetting, since the file truly can't be opened either way.
+                Err(e) => {
                     crate::log::write_line("store", &format!("open failed ({e}), resetting store"));
                     let _ = std::fs::remove_file(dir.join("store.db.enc"));
                     Store::open(dir.clone()).expect("store open failed even after reset")
-                }),
-            );
+                }
+            });
 
             // Restore the user's file-logging preference (default OFF in
             // release). Must come after the store opens.

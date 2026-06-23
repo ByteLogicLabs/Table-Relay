@@ -7,19 +7,38 @@ import { toast } from 'sonner';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '../../components/ui/select';
-import { type AppSettings, type AppTheme, saveSettings } from '../../lib/settings-store';
+import { type AppSettings, type AppTheme, type RailMode, RAIL_MODE_OPTIONS, saveSettings } from '../../lib/settings-store';
 import { copyText } from '../../lib/clipboard';
 import { Row, Toggle } from './settings-controls';
 import { THEMES } from './settings-utils';
 
 // ── Appearance ──────────────────────────────────────────────────────────────────
 
-export function AppearanceSettings({ theme, onSelectTheme }: {
+export function AppearanceSettings({ theme, onSelectTheme, settings }: {
   theme: AppTheme;
   onSelectTheme: (t: AppTheme) => void;
+  settings: AppSettings;
 }) {
   return (
     <div className="space-y-5">
+      <div>
+        <h3 className="text-sm font-medium mb-0.5">Sidebar</h3>
+        <p className="text-xs text-muted-foreground mb-2">How the connection sidebar behaves.</p>
+        <Row title="Connection sidebar" desc="Auto expands on hover; pin it open or icons-only.">
+          <Select
+            value={settings.connectionRailMode}
+            onValueChange={(v) => saveSettings({ connectionRailMode: v as RailMode })}
+          >
+            <SelectTrigger className="h-8 text-xs w-32"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              {RAIL_MODE_OPTIONS.map(o => (
+                <SelectItem key={o.value} value={o.value} className="text-xs">{o.label}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Row>
+      </div>
+
       <div>
         <h3 className="text-sm font-medium mb-0.5">Theme</h3>
         <p className="text-xs text-muted-foreground mb-4">Choose the color palette for the app and editor.</p>

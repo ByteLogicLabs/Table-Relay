@@ -919,7 +919,8 @@ export async function sendMessage(
   try {
     // Pass the user's per-turn tool-iteration cap + repeat-call guard through
     // to the backend loop.
-    const preset = EFFORT_PRESETS[loadSettings().aiEffort] ?? EFFORT_PRESETS.medium;
+    const appSettings = loadSettings();
+    const preset = EFFORT_PRESETS[appSettings.aiEffort] ?? EFFORT_PRESETS.medium;
     await ai.chatSend(requestId, trimmed, {
       ...context,
       recentQueryLog: context?.connectionId
@@ -929,6 +930,7 @@ export async function sendMessage(
       maxRepeatCalls: preset.maxRepeatCalls,
       maxTokens: preset.maxTokens,
       reasoningEffort: preset.reasoningEffort,
+      stream: appSettings.aiStreamMode,
     });
   } catch (e) {
     flog('ai', 'chat send failed:', errMsg(e));

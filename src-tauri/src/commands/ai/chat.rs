@@ -74,6 +74,15 @@ pub struct ChatSendInput {
     /// ran, diagnose failures, and offer a corrected query / retry.
     #[serde(default)]
     pub recent_query_log: Option<String>,
+    /// Stream tokens live (true) or do one buffered round-trip and show the
+    /// reply once complete (false). Defaults to true when absent so older
+    /// callers keep the streaming behaviour.
+    #[serde(default = "default_stream")]
+    pub stream: bool,
+}
+
+fn default_stream() -> bool {
+    true
 }
 
 /// What the user is currently looking at. Informs the system-context blob —
@@ -355,6 +364,7 @@ async fn ai_chat_send_inner(
     let turn_opts = crate::ai::TurnOptions {
         max_tokens: Some(max_tokens),
         reasoning_effort: input.reasoning_effort,
+        stream: input.stream,
     };
 
     if tool_mode {
@@ -421,14 +431,19 @@ async fn ai_chat_send_inner(
         if chunk.finish_reason.is_some() {
             finish = chunk.finish_reason;
         }
-        // Fire-and-forget — UI failures shouldn't kill the stream.
-        let _ = app.emit(
-            "ai://chat/chunk",
-            ChunkEvent {
-                request_id: chunk.request_id,
-                delta: chunk.delta,
-            },
-        );
+        // With stream mode off we still drive the provider's stream internally
+        // (it's the only entry point) but withhold the per-token chunks — the
+        // assembled reply is delivered once in the `done` event below.
+        if input.stream {
+            // Fire-and-forget — UI failures shouldn't kill the stream.
+            let _ = app.emit(
+                "ai://chat/chunk",
+                ChunkEvent {
+                    request_id: chunk.request_id,
+                    delta: chunk.delta,
+                },
+            );
+        }
     }
 
     crate::log_chat!("assistant", "{}", full);

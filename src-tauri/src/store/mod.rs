@@ -283,6 +283,21 @@ pub enum StoreError {
     Crypto(String),
 }
 
+impl StoreError {
+    /// True when the failure means the store is *unreadable but intact* — the
+    /// data is fine, this build just can't open it — so callers must NOT
+    /// delete-and-recreate it. Two cases:
+    ///   - `Crypto`: wrong/missing encryption token (recoverable with the right
+    ///     token).
+    ///   - `Migration`: the store's schema is newer than this build knows
+    ///     (DB-ahead-of-code). Happens when a newer published build writes the
+    ///     store and then an older dev build opens it. Resetting would wipe data
+    ///     just because the dev branch lags the release — never acceptable.
+    pub fn is_unreadable_not_corrupt(&self) -> bool {
+        matches!(self, StoreError::Crypto(_) | StoreError::Migration(_))
+    }
+}
+
 impl serde::Serialize for StoreError {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         #[derive(serde::Serialize)]

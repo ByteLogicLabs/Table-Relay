@@ -150,10 +150,24 @@ pub enum ReasoningEffort {
 /// Per-turn knobs shared by the tool-calling path. `max_tokens` caps the
 /// response; `reasoning_effort` requests a thinking budget where supported.
 /// Both `None` means "use the provider default" (back-compat).
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub struct TurnOptions {
     pub max_tokens: Option<u32>,
     pub reasoning_effort: Option<ReasoningEffort>,
+    /// When true, prefer the provider's streaming path so tokens render live.
+    /// When false, do one buffered round-trip and emit the reply once it's
+    /// complete. Default true (the historical behaviour).
+    pub stream: bool,
+}
+
+impl Default for TurnOptions {
+    fn default() -> Self {
+        Self {
+            max_tokens: None,
+            reasoning_effort: None,
+            stream: true,
+        }
+    }
 }
 
 /// Completion request shape used by every provider. Prompt assembly happens

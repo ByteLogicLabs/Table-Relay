@@ -1103,8 +1103,9 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
           <AlignLeft className="w-4 h-4 mr-2" />
           {isDocumentStore ? 'Format JSON' : 'Format SQL'}
         </Button>
-        {/* Load / Save / Save As live in the native File menu (and ⌘I / ⌘S /
-            ⌘⇧S shortcuts) rather than the toolbar. */}
+        {/* Row limit lives in the persistent footer (always visible, before and
+            after a run) rather than here. Load / Save / Save As live in the
+            native File menu (and ⌘I / ⌘S / ⌘⇧S shortcuts). */}
         <div className="ml-auto" />
         <Button
           variant="ghost"
@@ -1721,75 +1722,88 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             );
           })()}
 
-          {/* Auto-paging footer — mirrors the data-grid table footer's look:
-              rows + execution on the left, Limit selector + chevron pager on the
-              right. We intentionally don't run a COUNT query for a grand total
-              (would be a second query on potentially huge results), so the pager
-              shows "Page N" rather than "1 of N". Next is enabled only when the
-              +1 sentinel row came back (there's more). */}
-          {pagedStmt && !runError && activeResult && !activeResult.error && (
-            <div className="h-10 shrink-0 border-t border-border flex items-center justify-between px-4 bg-muted/10 text-xs text-muted-foreground">
-              <div className="flex items-center gap-4">
-                <span>
-                  {activeResult.rows.length.toLocaleString()} row{activeResult.rows.length === 1 ? '' : 's'}
-                  {pageSize > 0 && ` on page ${page + 1}`}
-                </span>
-                <span>Execution: {activeResult.durationMs.toFixed(1)}ms</span>
-              </div>
-
-              <div className="flex items-center gap-4">
-                <div className="flex items-center gap-2">
-                  <span>Limit:</span>
-                  <Select
-                    value={String(pageSize)}
-                    onValueChange={(v) => {
-                      const next = Number(v);
-                      setPageSize(next);
-                      void runPage(pagedStmt, 0, next); // re-run page 1 (0 = unlimited)
-                    }}
-                  >
-                    <SelectTrigger size="sm" className="h-7! w-24 py-0 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {['50', '100', '200', '500', '1000'].map((opt) => (
-                        <SelectItem key={opt} value={opt}>{opt}</SelectItem>
-                      ))}
-                      <SelectItem value="0">Unlimited</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-
-                {pageSize > 0 && (
-                  <div className="flex items-center gap-1">
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-6 w-6"
-                      disabled={isExecuting || page === 0}
-                      onClick={() => void runPage(pagedStmt, Math.max(0, page - 1), pageSize)}
-                      title="Previous page"
-                    >
-                      <ChevronLeft className="w-3 h-3" />
-                    </Button>
-                    <span className="px-2">Page {page + 1}</span>
-                    <Button
-                      variant="outline"
-                      size="icon"
-                      className="h-6 w-6"
-                      disabled={isExecuting || !hasNextPage}
-                      onClick={() => void runPage(pagedStmt, page + 1, pageSize)}
-                      title="Next page"
-                    >
-                      <ChevronRight className="w-3 h-3" />
-                    </Button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
         </div>
       )}
+
+      {/* Persistent footer — always visible so the user can pick the row Limit
+          BEFORE running (no need to run once then change). When a paged result
+          is on screen it also shows rows/execution on the left and the pager on
+          the right; before any run it's just the Limit selector. We don't run a
+          COUNT for a grand total (a second query on huge results), so the pager
+          shows "Page N" rather than "1 of N"; Next is enabled only when the +1
+          sentinel row came back. */}
+      {(() => {
+        const showPager = !!pagedStmt && !runError && !!activeResult && !activeResult.error;
+        return (
+          <div className="h-10 shrink-0 border-t border-border flex items-center justify-between px-4 bg-muted/10 text-xs text-muted-foreground">
+            <div className="flex items-center gap-4">
+              {showPager && activeResult ? (
+                <>
+                  <span>
+                    {activeResult.rows.length.toLocaleString()} row{activeResult.rows.length === 1 ? '' : 's'}
+                    {pageSize > 0 && ` on page ${page + 1}`}
+                  </span>
+                  <span>Execution: {activeResult.durationMs.toFixed(1)}ms</span>
+                </>
+              ) : (
+                <span className="text-muted-foreground/70">Set the row limit, then run a query.</span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-4">
+              <div className="flex items-center gap-2">
+                <span>Limit:</span>
+                <Select
+                  value={String(pageSize)}
+                  onValueChange={(v) => {
+                    const next = Number(v);
+                    setPageSize(next);
+                    // Apply immediately only when a paged result is already
+                    // showing; otherwise it just seeds the next run.
+                    if (showPager && pagedStmt && !isExecuting) void runPage(pagedStmt, 0, next);
+                  }}
+                >
+                  <SelectTrigger size="sm" className="h-7! w-24 py-0 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {['50', '100', '200', '500', '1000'].map((opt) => (
+                      <SelectItem key={opt} value={opt}>{opt}</SelectItem>
+                    ))}
+                    <SelectItem value="0">Unlimited</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {showPager && pageSize > 0 && pagedStmt && (
+                <div className="flex items-center gap-1">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-6 w-6"
+                    disabled={isExecuting || page === 0}
+                    onClick={() => void runPage(pagedStmt, Math.max(0, page - 1), pageSize)}
+                    title="Previous page"
+                  >
+                    <ChevronLeft className="w-3 h-3" />
+                  </Button>
+                  <span className="px-2">Page {page + 1}</span>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-6 w-6"
+                    disabled={isExecuting || !hasNextPage}
+                    onClick={() => void runPage(pagedStmt, page + 1, pageSize)}
+                    title="Next page"
+                  >
+                    <ChevronRight className="w-3 h-3" />
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       <DestructiveWarningDialog
         open={destructiveWarning !== null}

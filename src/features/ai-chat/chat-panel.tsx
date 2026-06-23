@@ -240,9 +240,44 @@ function SessionMenu({ providerKind, model }: { providerKind?: AiProviderKind; m
             <ActiveModelPicker providerKind={providerKind} model={model} />
           </div>
           <EffortSlider />
+          <StreamToggle />
         </div>
       </PopoverContent>
     </Popover>
+  );
+}
+
+/**
+ * Stream-mode toggle — when on, the reply renders token-by-token as it arrives;
+ * when off (the default) the backend does one buffered round-trip and the full
+ * reply appears at once. Persisted to settings; the next send reads it.
+ */
+function StreamToggle() {
+  const settings = useSettings();
+  const on = settings.aiStreamMode;
+  return (
+    <div className="flex items-center justify-between">
+      <div className="flex flex-col">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          Stream responses
+        </span>
+        <span className="text-[10px] text-muted-foreground/70">
+          {on ? 'Tokens render live' : 'Show reply when complete'}
+        </span>
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={on}
+        onClick={() => saveSettings({ aiStreamMode: !on })}
+        title={on ? 'Streaming on' : 'Streaming off'}
+        className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${on ? 'bg-primary' : 'bg-muted-foreground/30'}`}
+      >
+        <span
+          className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white transition-transform ${on ? 'translate-x-4' : 'translate-x-0'}`}
+        />
+      </button>
+    </div>
   );
 }
 
@@ -593,7 +628,10 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
             <span className="flex items-center gap-2 min-w-0">
               <span className={`w-2 h-2 rounded-full shrink-0 ${providerDot(p.kind)}`} />
               <span className="font-medium truncate">{p.label}</span>
-              <span className="text-emerald-600 dark:text-emerald-400 text-[10px] shrink-0">● ready</span>
+              <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400 text-[10px] shrink-0">
+                <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                ready
+              </span>
             </span>
           </SelectItem>
         ))}

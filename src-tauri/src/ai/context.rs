@@ -100,13 +100,30 @@ const SYSTEM_PROMPT_BODY: &str =
      - You may be locked to the active database. If a tool returns a \"cross-database \
      access is disabled\" error, do NOT retry against another database — tell the user they \
      can enable cross-database access in the AI permissions panel.\n\n\
+     Grounding — NEVER hallucinate (most important rule):\n\
+     - Every table, column, value, count, and relationship you state MUST come from \
+     the injected context above or from a tool result you actually received this \
+     conversation. If you have not seen it, you do not know it.\n\
+     - Do NOT invent or guess table names, column names, data types, enum values, row \
+     counts, or sample data. If you are unsure a table or column exists, call \
+     `describe_table` (or `list_tables`) FIRST and read the real structure before \
+     writing any query that references it.\n\
+     - The injected schema may be PARTIAL: large schemas list some tables by name only \
+     (no columns), and some describes can fail. For ANY table whose columns you have \
+     not actually seen, you MUST call `describe_table` before querying it — never \
+     assume its columns.\n\
+     - Never present a query's result, a number, or a fact unless a tool returned it. \
+     Do not fabricate output to look complete. If a tool errored or returned nothing, \
+     say so plainly.\n\
+     - When you genuinely lack the information and cannot get it from a tool, say you \
+     don't know and ask the user — do not fill the gap with a plausible guess.\n\n\
      Answering data questions — things you cannot know without querying:\n\
      - Do NOT infer language, country, region, or locale from email domains. Gmail, \
      Yahoo, Hotmail, iCloud etc. are global — they do not indicate any country.\n\
      - Do NOT assume columns store particular values or formats without sampling. If \
      the user asks \"find X\", first check what columns exist that could hold X \
      (country, locale, phone, address, language), and if unsure, sample a few rows with \
-     `call_sql` (SELECT ... LIMIT 10) before writing a filter.\n\
+     `call_query` (SELECT ... LIMIT 10) before writing a filter.\n\
      - If no obvious column exists for the user's question, tell them what columns you \
      see and ask which one to filter on — don't make up a heuristic.";
 /// Max tables we try to fully describe when the schema is large. Every
@@ -388,12 +405,20 @@ pub async fn build(
                 // Bail early if we're running over the soft cap — keeps the
                 // output bounded even when schemas have huge column counts.
                 if out.len() > MAX_CONTEXT_BYTES {
-                    out.push_str("_(output truncated to fit the context window)_\n");
+                    out.push_str(
+                        "_(Schema output truncated to fit the context window — not all tables/columns \
+                         are shown. For any table whose columns are not listed above, call \
+                         `describe_table` before querying it; do not guess.)_\n",
+                    );
                     break;
                 }
             }
             Err(e) => {
-                out.push_str(&format!("### `{}` — _(describe failed: {})_\n\n", name, e));
+                out.push_str(&format!(
+                    "### `{}` — _(columns could not be loaded: {}. You do NOT know this table's \
+                     structure — call `describe_table` before querying it; do not guess its columns.)_\n\n",
+                    name, e
+                ));
             }
         }
     }
@@ -401,7 +426,9 @@ pub async fn build(
     if table_names.len() > full_count {
         let remainder = table_names.len() - full_count;
         out.push_str(&format!(
-            "\n_Additional {remainder} tables not shown in full:_ {}\n",
+            "\n_Additional {remainder} tables exist but their columns are NOT shown below. \
+             You do NOT know their structure — call `describe_table` before querying any of \
+             them; do not guess their columns:_ {}\n",
             table_names
                 .iter()
                 .skip(full_count)
