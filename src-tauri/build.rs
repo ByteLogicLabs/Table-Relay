@@ -59,6 +59,19 @@ fn main() {
             panic!("APP_TOKEN must be a 64-character hex string");
         }
         println!("cargo:rustc-env=APP_TOKEN={val}");
+    } else if std::env::var("PROFILE").as_deref() == Ok("release") {
+        // Hard-fail any RELEASE build (this is what GitHub Actions ships) that
+        // lacks APP_TOKEN. Shipping a token-less release once already produced a
+        // binary that couldn't decrypt users' stores and reset them on launch.
+        // CI must provide secrets.APP_TOKEN; failing here is how we guarantee it.
+        // Debug builds are left lenient so a fresh local checkout still compiles
+        // (the runtime then surfaces a clear "APP_TOKEN not configured" error).
+        panic!(
+            "APP_TOKEN is required for release builds but was not set. \
+             Set the APP_TOKEN env var (CI: secrets.APP_TOKEN) or add it to the \
+             root .env. Building a release without it produces an app that cannot \
+             read existing encrypted stores."
+        );
     }
 
     // Re-run whenever the enrollment list changes. Cargo will also re-run

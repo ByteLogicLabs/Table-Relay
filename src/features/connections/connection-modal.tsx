@@ -1,15 +1,17 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../../components/ui/dialog';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
-import { ConnectionProfile, Driver, SshAuthKind } from '../../types';
+import { ConnectionProfile, Driver, SshAuthKind, type ConnectionTag } from '../../types';
+import { TAG_COLORS, getTagColor } from '../../lib/tag-colors';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { toast } from 'sonner';
 import { db, type AdapterManifest, type ConnectionField } from '../../lib/db';
 import DbIcon from '../../components/db-icon';
-import { Loader2 } from 'lucide-react';
+import { Loader2, X, Plus } from 'lucide-react';
 
 /** Human driver label → adapter key. Used to pair legacy store rows with
  *  the new adapter manifests until the store is updated to carry
@@ -21,11 +23,81 @@ const DRIVER_TO_ADAPTER_KEY: Record<string, string> = {
   PostgreSQL: 'postgres',
   MongoDB: 'mongo',
 };
+
 /** Reverse lookup so we can translate an adapter key back to the driver
  *  string the store expects on save. */
 function adapterKeyToDriver(key: string): Driver {
   const entry = Object.entries(DRIVER_TO_ADAPTER_KEY).find(([, v]) => v === key);
   return (entry?.[0] as Driver) ?? 'MySQL';
+}
+
+/** URI scheme → driver. */
+const SCHEME_TO_DRIVER: Record<string, Driver> = {
+  mysql: 'MySQL',
+  mariadb: 'MySQL',
+  postgres: 'PostgreSQL',
+  postgresql: 'PostgreSQL',
+  mongodb: 'MongoDB',
+  'mongodb+srv': 'MongoDB',
+  redis: 'Redis',
+  rediss: 'Redis',
+  sqlite: 'SQLite',
+};
+
+const DEFAULT_PORT: Record<Driver, string> = {
+  MySQL: '3306', PostgreSQL: '5432', MongoDB: '27017', Redis: '6379', SQLite: '',
+};
+
+export interface ParsedConnString {
+  driver: Driver;
+  host?: string;
+  port?: string;
+  user?: string;
+  password?: string;
+  database?: string;
+  /** Whole original URI — Mongo keeps this in `host` so params like
+   *  `?authSource=` reach the driver unchanged. */
+  rawUri?: string;
+  isSrv?: boolean;
+}
+
+/**
+ * Parse a database connection string into form fields. Returns `null` if the
+ * input isn't a recognized URI. Handles user:pass@host:port/db?params for
+ * mysql/postgres/mongodb/redis, mongodb+srv (no port), and sqlite file paths.
+ */
+export function parseConnectionString(input: string): ParsedConnString | null {
+  const raw = input.trim();
+  if (!raw) return null;
+
+  const schemeMatch = raw.match(/^([a-z][a-z0-9+]*):\/\//i);
+  if (!schemeMatch) return null;
+  const scheme = schemeMatch[1].toLowerCase();
+  const driver = SCHEME_TO_DRIVER[scheme];
+  if (!driver) return null;
+
+  if (driver === 'SQLite') {
+    // sqlite:///abs/path -> /abs/path ; sqlite://relative.db -> relative.db
+    const path = raw.replace(/^sqlite:\/\//i, '');
+    return { driver, database: path || undefined, host: '' };
+  }
+
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+
+  const user = url.username ? decodeURIComponent(url.username) : undefined;
+  const password = url.password ? decodeURIComponent(url.password) : undefined;
+  const host = url.hostname || undefined;
+  const port = url.port || DEFAULT_PORT[driver] || undefined;
+  const path = url.pathname.replace(/^\//, '');
+  const database = path ? decodeURIComponent(path) : undefined;
+  const isSrv = scheme === 'mongodb+srv';
+
+  return { driver, host, port, user, password, database, rawUri: raw, isSrv };
 }
 
 interface TestStep {
@@ -47,9 +119,12 @@ interface ConnectionModalProps {
   onClose: () => void;
   onSave: (conn: ConnectionProfile, previousId?: string) => void | Promise<void>;
   initialData?: ConnectionProfile;
+  /** Tags already used by other connections (name + their existing color),
+   *  for the autocomplete dropdown so picking one reuses its color. */
+  existingTags?: ConnectionTag[];
 }
 
-export default function ConnectionModal({ isOpen, onClose, onSave, initialData }: ConnectionModalProps) {
+export default function ConnectionModal({ isOpen, onClose, onSave, initialData, existingTags = [] }: ConnectionModalProps) {
   const [formData, setFormData] = useState<Partial<ConnectionProfile>>({
     driver: 'MySQL',
     host: 'localhost',
@@ -62,7 +137,6 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
   });
   const [isTesting, setIsTesting] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [testReport, setTestReport] = useState<TestReport | null>(null);
   /** Every registered adapter manifest. Loaded once per modal open. */
   const [manifests, setManifests] = useState<AdapterManifest[] | null>(null);
 
@@ -116,11 +190,46 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
     handleChange(toFormKey(field.key), value);
   };
 
+  const [connString, setConnString] = useState('');
+
+  /** Auto-fill the form from the connection string as the user types/pastes.
+   *  Silent (no toasts) since it runs on every change; only applies when the
+   *  string parses cleanly. For Mongo we keep the full URI in `host` so params
+   *  (authSource, replicaSet, tls, …) reach the driver unchanged. */
+  const onConnStringChange = (value: string) => {
+    setConnString(value);
+    const parsed = parseConnectionString(value);
+    if (!parsed) return;
+    setFormData(prev => {
+      const next: Partial<ConnectionProfile> = { ...prev, driver: parsed.driver };
+      if (parsed.driver === 'MongoDB' && parsed.rawUri) {
+        // Mongo (incl. mongodb+srv, which has no port): keep the whole URI in
+        // host so scheme + every query param reaches the driver unchanged.
+        next.host = parsed.rawUri;
+        next.database = parsed.database ?? '';
+      } else if (parsed.driver === 'SQLite') {
+        // SQLite has only a file path (the `database` field). No host/port/auth.
+        next.host = '';
+        next.database = parsed.database ?? '';
+      } else {
+        // SQL + Redis: fill discrete fields. Use empty strings (not undefined)
+        // so values from a previously pasted/typed URI don't linger.
+        next.host = parsed.host ?? '';
+        next.port = parsed.port ?? prev.port;
+        next.user = parsed.user ?? '';
+        next.password = parsed.password ?? '';
+        next.database = parsed.database ?? '';
+      }
+      return next;
+    });
+  };
+
   useEffect(() => {
     if (isOpen) {
       // Clear any stale busy flag from a previous save so the button is
       // live again when the modal is reopened (it isn't unmounted).
       setIsSaving(false);
+      setConnString('');
       if (initialData) {
         setFormData(initialData);
       } else {
@@ -139,8 +248,6 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
   }, [isOpen, initialData]);
 
   const handleChange = (field: keyof ConnectionProfile, value: string | boolean) => {
-    // Any edit invalidates the last test result — stop showing stale ticks.
-    setTestReport(null);
     setFormData(prev => {
       const newData = { ...prev, [field]: value } as Partial<ConnectionProfile>;
       if (field === 'driver' && typeof value === 'string' && manifests) {
@@ -198,6 +305,8 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
       sshKeyPassphrase: formData.sshKeyPassphrase || undefined,
       color: formData.color,
       isFavorite: !!formData.isFavorite,
+      tag: formData.tag || undefined,
+      tagColor: formData.tagColor || undefined,
     };
   };
 
@@ -217,25 +326,64 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
       return;
     }
     setIsTesting(true);
-    setTestReport(null);
+    // One toast for the whole run: loading -> success/error, updated by id so
+    // it shows progress without the user scrolling the form.
+    const toastId = toast.loading('Testing connection…', {
+      description: 'Running connection checks…',
+    });
     try {
       const report = await invoke<TestReport>('db_test_connection', {
         profile: buildProfileInput(),
       });
-      setTestReport(report);
+      // Per-step lines (✓ ok / ✗ failed / — skipped) with timing + message —
+      // the same detail the old inline panel showed, now in the toast. Rendered
+      // as JSX so line breaks + colors survive (plain "\n" strings collapse).
+      const details = (
+        <div className="mt-1 space-y-1 text-xs">
+          {report.steps.map((s, i) => {
+            const color =
+              s.status === 'ok'
+                ? 'text-green-600 dark:text-green-400'
+                : s.status === 'failed'
+                  ? 'text-red-600 dark:text-red-400'
+                  : 'text-muted-foreground';
+            const icon = s.status === 'ok' ? '✓' : s.status === 'failed' ? '✗' : '—';
+            return (
+              <div key={i}>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className={color}>{icon} {s.name}</span>
+                  {s.status !== 'skipped' && (
+                    <span className="text-muted-foreground tabular-nums">{s.durationMs.toFixed(0)}ms</span>
+                  )}
+                </div>
+                {s.message && (
+                  <div className="text-muted-foreground wrap-break-word whitespace-pre-wrap pl-3">{s.message}</div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      );
+
       if (report.ok && report.server) {
-        // Prefer the flavor ("MySQL"/"MariaDB"/…) over the adapter id
-        // ("mysql") for the human-facing toast.
+        // Prefer the flavor ("MySQL"/"MariaDB"/…) over the adapter id.
         const label = report.server.flavor ?? report.server.adapterId;
-        toast.success(`Connected to ${label} ${report.server.version}`);
+        toast.success(`Connected to ${label} ${report.server.version}`, {
+          id: toastId,
+          description: details,
+          duration: 6000,
+        });
       } else {
-        const failed = report.steps.find(s => s.status === 'failed');
-        toast.error(`Failed at: ${failed?.name ?? 'connection test'}`);
+        toast.error('Connection test failed', {
+          id: toastId,
+          description: details,
+          duration: 10000,
+        });
       }
     } catch (e: unknown) {
       const err = e as { message?: string; kind?: string } | string;
       const msg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));
-      toast.error(`Connection failed: ${msg}`);
+      toast.error('Connection failed', { id: toastId, description: msg, duration: 10000 });
     } finally {
       setIsTesting(false);
     }
@@ -285,6 +433,10 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
         sshKeyPassphrase: formData.sshKeyPassphrase,
         color: formData.color,
         isFavorite: formData.isFavorite,
+        tags: formData.tags,
+        // Mirror the first tag into the legacy fields for back-compat.
+        tag: formData.tags?.[0]?.name ?? formData.tag,
+        tagColor: formData.tags?.[0]?.color ?? formData.tagColor,
       }, initialData?.id);
     } catch {
       setIsSaving(false);
@@ -293,12 +445,29 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
 
   return (
     <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="sm:max-w-3xl w-[95vw] max-h-[90vh] overflow-y-auto">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-3xl w-[95vw] max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
+        <DialogHeader className="shrink-0 px-6 pt-6 pb-3 border-b border-border">
           <DialogTitle>{initialData ? 'Edit Connection' : 'New Connection'}</DialogTitle>
         </DialogHeader>
 
+        {/* Scrollable form body — header + footer stay pinned. */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-6">
         <div className="grid gap-6 py-4">
+          {/* Paste a connection string to auto-fill the fields below. */}
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Connection string</label>
+            <Input
+              value={connString}
+              onChange={(e) => onConnStringChange(e.target.value)}
+              placeholder="mysql://user:pass@host:3306/db  ·  mongodb://…?authSource=admin"
+              className="font-mono text-xs"
+              spellCheck={false}
+            />
+            <p className="text-xs text-muted-foreground">
+              Optional. Paste a URI and the fields below fill in automatically, or enter details manually.
+            </p>
+          </div>
+
           <div className="grid gap-2">
             <label className="text-sm font-medium">Adapter</label>
             <Select value={formData.driver} onValueChange={(v) => handleChange('driver', v)}>
@@ -358,7 +527,6 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
               autoFocus
             />
           </div>
-
 
           {/* Connection fields rendered from the adapter manifest. The
               adapter declares which fields exist, their labels, kinds
@@ -424,6 +592,15 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
               </div>
             </>
           )}
+
+          <div className="grid gap-2">
+            <label className="text-sm font-medium">Tags</label>
+            <TagsEditor
+              tags={formData.tags ?? []}
+              existingTags={existingTags}
+              onChange={(tags) => setFormData(prev => ({ ...prev, tags }))}
+            />
+          </div>
 
           {/* SSH block — hidden when the adapter's manifest says it has
               no SSH tunnel capability. If there's no active manifest
@@ -539,44 +716,9 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
           </div>
           )}
         </div>
+        </div>
 
-        {testReport && (
-          <div className="mt-2 rounded-md border border-border p-3 space-y-2">
-            <div className="text-sm font-medium">Connection test</div>
-            {testReport.steps.map((s, i) => {
-              const icon =
-                s.status === 'ok' ? '✓' : s.status === 'failed' ? '✗' : '—';
-              const color =
-                s.status === 'ok'
-                  ? 'text-green-600 dark:text-green-400'
-                  : s.status === 'failed'
-                  ? 'text-red-600 dark:text-red-400'
-                  : 'text-muted-foreground';
-              return (
-                <div key={i} className="flex items-start gap-2 text-sm">
-                  <span className={`${color} font-mono w-4 shrink-0`}>{icon}</span>
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-baseline justify-between gap-2">
-                      <span className={color}>{s.name}</span>
-                      {s.status !== 'skipped' && (
-                        <span className="text-xs text-muted-foreground">
-                          {s.durationMs.toFixed(0)}ms
-                        </span>
-                      )}
-                    </div>
-                    {s.message && (
-                      <div className="text-xs text-muted-foreground wrap-break-word whitespace-pre-wrap">
-                        {s.message}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        <DialogFooter className="flex justify-between sm:justify-between mt-4">
+        <DialogFooter className="shrink-0 flex justify-between sm:justify-between gap-2 px-6 pt-4 pb-6 border-t border-border bg-popover">
           <Button variant="outline" onClick={handleTest} disabled={isTesting}>
             {isTesting ? 'Testing...' : 'Test Connection'}
           </Button>
@@ -586,10 +728,10 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData }
               {isSaving ? (
                 <>
                   <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
-                  Connecting…
+                  {initialData ? 'Saving…' : 'Connecting…'}
                 </>
               ) : (
-                'Save & Connect'
+                initialData ? 'Save' : 'Save & Connect'
               )}
             </Button>
           </div>
@@ -775,4 +917,229 @@ function FieldControl({
         />,
       );
   }
+}
+
+/** A swatch trigger that opens a grid of all tag colors to pick from. Shared by
+ *  the "next tag color" swatch and each chip's recolor dot. */
+function ColorGridPopover({
+  value,
+  onPick,
+  trigger,
+}: {
+  value: string;
+  onPick: (color: string) => void;
+  trigger: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger className="inline-flex items-center">{trigger}</PopoverTrigger>
+      <PopoverContent align="start" className="w-auto p-2">
+        <div className="grid grid-cols-6 gap-1.5">
+          {TAG_COLORS.map(c => (
+            <button
+              key={c.name}
+              type="button"
+              onClick={() => { onPick(c.name); setOpen(false); }}
+              title={c.name}
+              aria-label={c.name}
+              className={`w-6 h-6 rounded-full transition-transform hover:scale-110 ${c.dot} ${
+                value === c.name ? 'ring-2 ring-foreground ring-offset-2 ring-offset-popover' : 'ring-1 ring-black/10 dark:ring-white/15'
+              }`}
+            />
+          ))}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+/** Multi-tag editor: removable colored chips + a creatable picker to add tags.
+ *  Suggests tags already used by other connections; a new name can be typed and
+ *  added with the chosen color. */
+function TagsEditor({
+  tags,
+  existingTags,
+  onChange,
+}: {
+  tags: ConnectionTag[];
+  existingTags: ConnectionTag[];
+  onChange: (tags: ConnectionTag[]) => void;
+}) {
+  const [draft, setDraft] = useState('');
+  const [color, setColor] = useState('Blue');
+  const [open, setOpen] = useState(false);
+  const [highlight, setHighlight] = useState(0);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  const colorFor = getTagColor;
+
+  // Next palette color not already used by a tag — so multiple tags get
+  // distinct colors automatically (cycles back once all are used).
+  const nextAutoColor = (current: ConnectionTag[]): string => {
+    const used = new Set(current.map(t => t.color));
+    return (TAG_COLORS.find(c => !used.has(c.name)) ?? TAG_COLORS[current.length % TAG_COLORS.length]).name;
+  };
+
+  const addTag = (rawName: string) => {
+    const name = rawName.trim();
+    if (!name) return;
+    if (tags.some(t => t.name.toLowerCase() === name.toLowerCase())) {
+      setDraft('');
+      return;
+    }
+    // Reuse the color this tag already has elsewhere; only brand-new tags get
+    // the next auto-assigned palette color.
+    const existing = existingTags.find(t => t.name.toLowerCase() === name.toLowerCase());
+    const next = [...tags, { name: existing?.name ?? name, color: existing?.color ?? color }];
+    onChange(next);
+    setDraft('');
+    setHighlight(0);
+    setColor(nextAutoColor(next)); // pre-pick a fresh color for the next tag
+  };
+
+  const removeTag = (name: string) => {
+    onChange(tags.filter(t => t.name !== name));
+  };
+
+  const setTagColor = (name: string, newColor: string) => {
+    onChange(tags.map(t => (t.name === name ? { ...t, color: newColor } : t)));
+  };
+
+  // Suggestions = existing tags not already added, narrowed by what's typed.
+  const taken = new Set(tags.map(t => t.name.toLowerCase()));
+  const q = draft.trim().toLowerCase();
+  const suggestions = existingTags
+    .filter(t => !taken.has(t.name.toLowerCase()))
+    .filter(t => !q || t.name.toLowerCase().includes(q))
+    .slice(0, 8);
+
+  // Offer "Create <draft>" when typed text isn't an existing/added tag.
+  const canCreate = q !== '' && !suggestions.some(s => s.name.toLowerCase() === q) && !taken.has(q);
+  // Flat option list the dropdown + keyboard nav operate on.
+  const options: { value: string; color: string; create?: boolean }[] = [
+    ...(canCreate ? [{ value: draft.trim(), color, create: true }] : []),
+    ...suggestions.map(s => ({ value: s.name, color: s.color })),
+  ];
+
+  // Close the dropdown on outside click.
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [open]);
+
+  const onInputKeyDown = (e: React.KeyboardEvent) => {
+    if (open && options.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault();
+      setHighlight(h => {
+        const n = options.length;
+        return e.key === 'ArrowDown' ? (h + 1) % n : (h - 1 + n) % n;
+      });
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && options[highlight]) addTag(options[highlight].value);
+      else addTag(draft);
+      return;
+    }
+    if (e.key === 'Escape') { setOpen(false); return; }
+    if (e.key === 'Backspace' && draft === '' && tags.length > 0) {
+      removeTag(tags[tags.length - 1].name);
+    }
+  };
+
+  return (
+    <div className="space-y-2 relative" ref={boxRef}>
+      {/* Combined field: a color swatch, the existing chips, then the input —
+          all inside one focus-within-highlighted box (real tag-input feel). */}
+      <div className="flex flex-wrap items-center gap-1.5 rounded-md border border-input bg-transparent px-2 py-1.5 min-h-9 focus-within:border-ring focus-within:ring-3 focus-within:ring-ring/50 transition-colors">
+        {/* Color for the NEXT tag added. */}
+        <ColorGridPopover
+          value={color}
+          onPick={setColor}
+          trigger={
+            <span className="h-6 w-6 shrink-0 flex items-center justify-center rounded-full hover:bg-muted/60 transition-colors cursor-pointer" title="Color for the next tag">
+              <span className={`w-3.5 h-3.5 rounded-full ring-1 ring-black/10 dark:ring-white/15 ${colorFor(color).dot}`} />
+            </span>
+          }
+        />
+
+        {tags.map(t => {
+          const c = colorFor(t.color);
+          return (
+            <span
+              key={t.name}
+              className={`inline-flex items-center gap-1 text-[11px] font-medium pl-1 pr-1 py-0.5 rounded-full ${c.bg} ${c.text}`}
+            >
+              {/* Click the dot to recolor this tag. */}
+              <ColorGridPopover
+                value={t.color}
+                onPick={(col) => setTagColor(t.name, col)}
+                trigger={
+                  <span className={`w-2.5 h-2.5 rounded-full shrink-0 cursor-pointer ring-1 ring-black/15 dark:ring-white/20 ${colorFor(t.color).dot}`} title="Change color" />
+                }
+              />
+              {t.name}
+              <button
+                type="button"
+                onClick={() => removeTag(t.name)}
+                className="rounded-full hover:bg-black/10 dark:hover:bg-white/10 p-0.5 -my-0.5"
+                title="Remove tag"
+                aria-label={`Remove ${t.name}`}
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </span>
+          );
+        })}
+
+        <input
+          value={draft}
+          onChange={(e) => { setDraft(e.target.value); setOpen(true); setHighlight(0); }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={onInputKeyDown}
+          placeholder={tags.length === 0 ? 'Add tags…' : 'Add another…'}
+          className="flex-1 min-w-24 bg-transparent text-sm outline-none placeholder:text-muted-foreground py-0.5"
+        />
+      </div>
+
+      {/* Autocomplete dropdown: existing matches + a "Create" row. */}
+      {open && options.length > 0 && (
+        <div className="absolute left-0 right-0 top-full mt-1 z-50 max-h-56 overflow-y-auto rounded-md border border-border bg-popover py-1 shadow-md">
+          {options.map((opt, i) => {
+            const c = colorFor(opt.color);
+            return (
+              <button
+                key={`${opt.create ? 'create' : 'tag'}:${opt.value}`}
+                type="button"
+                onMouseEnter={() => setHighlight(i)}
+                onMouseDown={(e) => { e.preventDefault(); addTag(opt.value); }}
+                className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left transition-colors ${i === highlight ? 'bg-muted' : 'hover:bg-muted/60'}`}
+              >
+                {opt.create ? (
+                  <>
+                    <Plus className="w-3.5 h-3.5 shrink-0 text-muted-foreground" />
+                    <span className="text-muted-foreground">Create</span>
+                    <span className={`inline-flex items-center gap-1 text-[11px] font-medium px-1.5 py-0.5 rounded-full ${c.bg} ${c.text}`}>
+                      <span className={`w-2 h-2 rounded-full ${c.dot}`} /> {opt.value}
+                    </span>
+                  </>
+                ) : (
+                  <>
+                    <span className={`w-2 h-2 rounded-full shrink-0 ${c.dot}`} />
+                    <span className="truncate">{opt.value}</span>
+                  </>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }

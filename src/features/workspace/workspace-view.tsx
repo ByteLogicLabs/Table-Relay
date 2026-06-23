@@ -42,7 +42,10 @@ import { recordQueryLog, clearQueryLogStore } from "../../state/query-log-store"
 import { setDebugPage } from "../../state/debug";
 import { getAppState, setAppState } from "../../lib/app-state-store";
 import {
-  SIDEBAR_WIDTH,
+  SIDEBAR_WIDTH_KEY,
+  SIDEBAR_MIN_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_DEFAULT_WIDTH,
   CHAT_WIDTH_KEY,
   CHAT_MIN_WIDTH,
   CHAT_MAX_WIDTH,
@@ -110,6 +113,7 @@ export default function WorkspaceView({
         storedActiveByConn,
         storedFocusedTile,
         storedChatWidth,
+        storedSidebarWidth,
       ] = await Promise.all([
         getAppState<AppTab[]>(TABS_STORAGE_KEY).catch(() => null),
         getAppState<Record<string, string>>(ACTIVE_TAB_BY_CONN_KEY).catch(
@@ -117,6 +121,7 @@ export default function WorkspaceView({
         ),
         getAppState<string>(FOCUSED_TILE_KEY).catch(() => null),
         getAppState<number>(CHAT_WIDTH_KEY).catch(() => null),
+        getAppState<number>(SIDEBAR_WIDTH_KEY).catch(() => null),
       ]);
       if (cancelled) return;
 
@@ -199,12 +204,31 @@ export default function WorkspaceView({
         }
       }
 
+      if (
+        typeof storedSidebarWidth === "number" &&
+        Number.isFinite(storedSidebarWidth) &&
+        storedSidebarWidth >= SIDEBAR_MIN_WIDTH &&
+        storedSidebarWidth <= SIDEBAR_MAX_WIDTH
+      ) {
+        setSidebarWidth(storedSidebarWidth);
+      } else {
+        try {
+          const raw = window.localStorage.getItem(SIDEBAR_WIDTH_KEY);
+          const n = raw ? Number(raw) : NaN;
+          if (Number.isFinite(n) && n >= SIDEBAR_MIN_WIDTH && n <= SIDEBAR_MAX_WIDTH)
+            setSidebarWidth(n);
+        } catch {
+          /* noop */
+        }
+      }
+
       try {
         window.localStorage.removeItem(TABS_STORAGE_KEY);
         window.localStorage.removeItem(ACTIVE_TAB_BY_CONN_KEY);
         window.localStorage.removeItem(ACTIVE_TAB_KEY);
         window.localStorage.removeItem(FOCUSED_TILE_KEY);
         window.localStorage.removeItem(CHAT_WIDTH_KEY);
+        window.localStorage.removeItem(SIDEBAR_WIDTH_KEY);
         window.localStorage.removeItem(OLD_TABS_STORAGE_KEY);
         window.localStorage.removeItem(OLD_ACTIVE_TAB_BY_CONN_KEY);
         window.localStorage.removeItem(OLD_ACTIVE_TAB_KEY);
@@ -245,15 +269,40 @@ export default function WorkspaceView({
   useEffect(() => {
     connectionsRef.current = connections;
   }, [connections]);
+
+  // Unique, sorted tags across all connections — feeds the tag suggestions.
+  const connectionTags = useMemo(() => {
+    // Dedupe by name, keeping the first-seen color so existing tags reuse it.
+    const byName = new Map<string, { name: string; color: string }>();
+    for (const c of connections) {
+      const tags = c.tags && c.tags.length > 0
+        ? c.tags
+        : c.tag ? [{ name: c.tag, color: c.tagColor || 'Gray' }] : [];
+      for (const t of tags) {
+        if (t.name.trim() === '' || byName.has(t.name)) continue;
+        byName.set(t.name, { name: t.name, color: t.color });
+      }
+    }
+    return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
+  }, [connections]);
   // Grey out the connection-dependent native menu items (Edit Current / Open
   // Database / Import Data / Export Data) whenever no connection is focused.
   // They all act on the focused connection, so on the home screen they would
   // only toast an error — disabling them is the honest affordance.
   useEffect(() => {
+    const hasFocus = focusedConnectionId != null;
     void invoke("set_connection_menu_enabled", {
-      enabled: focusedConnectionId != null,
+      enabled: hasFocus,
     }).catch(() => {
       /* menu state is best-effort; the listeners still guard with a toast */
+    });
+    // Hide the whole Connection submenu on the home screen — the home view
+    // already surfaces Connect / New / List Connections, so it's redundant
+    // there. Show it again once a connection is focused.
+    void invoke("set_connection_menu_visible", {
+      visible: hasFocus,
+    }).catch(() => {
+      /* best-effort; submenu just stays in its current state on failure */
     });
   }, [focusedConnectionId]);
   const openEditConnection = (
@@ -280,6 +329,11 @@ export default function WorkspaceView({
     if (!workspaceStateHydrated.current) return;
     void setAppState(CHAT_WIDTH_KEY, chatWidth);
   }, [chatWidth]);
+  const [sidebarWidth, setSidebarWidth] = useState<number>(SIDEBAR_DEFAULT_WIDTH);
+  useEffect(() => {
+    if (!workspaceStateHydrated.current) return;
+    void setAppState(SIDEBAR_WIDTH_KEY, sidebarWidth);
+  }, [sidebarWidth]);
   const [railExpanded, setRailExpanded] = useState(false);
 
   // Any view with a toolbar (data-grid, sql-editor, etc.) can ask to toggle
@@ -459,7 +513,7 @@ export default function WorkspaceView({
   const railWidth = railExpanded ? RAIL_EXPANDED_WIDTH : RAIL_COLLAPSED_WIDTH;
   const chatColumnPx = chatOpen ? chatWidth : 0;
   const contentMaxWidthStyle: CSSProperties = {
-    ["--content-max-w" as string]: `calc(100vw - ${railWidth + SIDEBAR_WIDTH + chatColumnPx}px)`,
+    ["--content-max-w" as string]: `calc(100vw - ${railWidth + sidebarWidth + chatColumnPx}px)`,
   };
   const [queryLogs, setQueryLogs] = useState<Record<string, QueryLogEntry[]>>(
     {},
@@ -1773,78 +1827,112 @@ export default function WorkspaceView({
         onExpandChange={setRailExpanded}
       />
 
-      <Sidebar
-        focusedConnection={focusedConnection}
-        focusedDatabase={focusedTile?.databaseName ?? null}
-        connections={connections}
-        onOpenTable={handleOpenTable}
-        onOpenStructure={handleOpenStructure}
-        onNewQuery={handleNewQuery}
-        onOpenErd={handleOpenErd}
-        onPickConnection={handlePickConnection}
-        onEditConnection={(conn) => openEditConnection(conn, true)}
-        onDeleteConnection={onDeleteConnection}
-        onOpenNewServer={() => setNewConnectionOpen(true)}
-        onPinDatabase={handlePinDatabase}
-        onImportSql={(id) => setImportSqlForId(id)}
-        onExport={handleExportForConnection}
-        onOpenDefinition={handleOpenDefinition}
-        onOpenRoutine={handleOpenRoutine}
-        onOpenTrigger={handleOpenTrigger}
-        onNewTable={handleNewTable}
-        onNewView={handleNewView}
-        onNewRoutine={handleNewRoutine}
-        onNewTrigger={handleNewTrigger}
-        onOpenRealtime={handleNewRealtime}
-        activeItem={(() => {
-          const tab = visibleTabs.find((t) => t.id === activeTabId);
-          if (!tab || !tab.schema) return null;
-          // Data + structure tabs represent a table or view — we distinguish
-          // by whether that name appears in the view list for the schema.
-          if (
-            (tab.type === "data" || tab.type === "structure") &&
-            tab.table &&
-            tab.table !== "(new)"
-          ) {
-            const schemas = connState.schemasById.get(tab.connectionId) ?? [];
-            const schema = schemas.find((s) => s.name === tab.schema);
-            const kind = schema?.tables.find((t) => t.name === tab.table)?.kind;
-            return {
-              type: kind === "view" ? "view" : "table",
-              connectionId: tab.connectionId,
-              schema: tab.schema,
-              name: tab.table,
+      <div
+        className="shrink-0 relative h-full"
+        style={{ width: sidebarWidth }}
+      >
+        <Sidebar
+          focusedConnection={focusedConnection}
+          focusedDatabase={focusedTile?.databaseName ?? null}
+          connections={connections}
+          onOpenTable={handleOpenTable}
+          onOpenStructure={handleOpenStructure}
+          onNewQuery={handleNewQuery}
+          onOpenErd={handleOpenErd}
+          onPickConnection={handlePickConnection}
+          onEditConnection={(conn) => openEditConnection(conn, true)}
+          onDeleteConnection={onDeleteConnection}
+          onDisconnect={onDisconnect}
+          onOpenNewServer={() => setNewConnectionOpen(true)}
+          onPinDatabase={handlePinDatabase}
+          onImportSql={(id) => setImportSqlForId(id)}
+          onExport={handleExportForConnection}
+          onOpenDefinition={handleOpenDefinition}
+          onOpenRoutine={handleOpenRoutine}
+          onOpenTrigger={handleOpenTrigger}
+          onNewTable={handleNewTable}
+          onNewView={handleNewView}
+          onNewRoutine={handleNewRoutine}
+          onNewTrigger={handleNewTrigger}
+          onOpenRealtime={handleNewRealtime}
+          activeItem={(() => {
+            const tab = visibleTabs.find((t) => t.id === activeTabId);
+            if (!tab || !tab.schema) return null;
+            // Data + structure tabs represent a table or view — we distinguish
+            // by whether that name appears in the view list for the schema.
+            if (
+              (tab.type === "data" || tab.type === "structure") &&
+              tab.table &&
+              tab.table !== "(new)"
+            ) {
+              const schemas = connState.schemasById.get(tab.connectionId) ?? [];
+              const schema = schemas.find((s) => s.name === tab.schema);
+              const kind = schema?.tables.find((t) => t.name === tab.table)?.kind;
+              return {
+                type: kind === "view" ? "view" : "table",
+                connectionId: tab.connectionId,
+                schema: tab.schema,
+                name: tab.table,
+              };
+            }
+            if (
+              tab.type === "routine" &&
+              tab.routine &&
+              tab.routine.name !== "(new)"
+            ) {
+              return {
+                type: tab.routine.kind === "view" ? "view" : "routine",
+                connectionId: tab.connectionId,
+                schema: tab.schema,
+                name: tab.routine.name,
+                routineKind:
+                  tab.routine.kind === "view" ? undefined : tab.routine.kind,
+              };
+            }
+            if (
+              tab.type === "trigger" &&
+              tab.trigger &&
+              tab.trigger.name !== "(new)"
+            ) {
+              return {
+                type: "trigger",
+                connectionId: tab.connectionId,
+                schema: tab.schema,
+                name: tab.trigger.name,
+              };
+            }
+            return null;
+          })()}
+        />
+        <div
+          onMouseDown={(e) => {
+            e.preventDefault();
+            const startX = e.clientX;
+            const startW = sidebarWidth;
+            const onMove = (ev: MouseEvent) => {
+              const dx = ev.clientX - startX;
+              const next = Math.max(
+                SIDEBAR_MIN_WIDTH,
+                Math.min(SIDEBAR_MAX_WIDTH, startW + dx),
+              );
+              setSidebarWidth(next);
             };
-          }
-          if (
-            tab.type === "routine" &&
-            tab.routine &&
-            tab.routine.name !== "(new)"
-          ) {
-            return {
-              type: tab.routine.kind === "view" ? "view" : "routine",
-              connectionId: tab.connectionId,
-              schema: tab.schema,
-              name: tab.routine.name,
-              routineKind:
-                tab.routine.kind === "view" ? undefined : tab.routine.kind,
+            const onUp = () => {
+              window.removeEventListener("mousemove", onMove);
+              window.removeEventListener("mouseup", onUp);
+              document.body.style.cursor = "";
+              document.body.style.userSelect = "";
             };
-          }
-          if (
-            tab.type === "trigger" &&
-            tab.trigger &&
-            tab.trigger.name !== "(new)"
-          ) {
-            return {
-              type: "trigger",
-              connectionId: tab.connectionId,
-              schema: tab.schema,
-              name: tab.trigger.name,
-            };
-          }
-          return null;
-        })()}
-      />
+            window.addEventListener("mousemove", onMove);
+            window.addEventListener("mouseup", onUp);
+            document.body.style.cursor = "ew-resize";
+            document.body.style.userSelect = "none";
+          }}
+          role="separator"
+          aria-orientation="vertical"
+          className="absolute -right-0.5 top-0 bottom-0 w-1.5 cursor-ew-resize z-20"
+        />
+      </div>
 
       <div className="flex-1 flex flex-col min-w-0 bg-background border-l border-border">
         <TabsShell
@@ -1935,6 +2023,7 @@ export default function WorkspaceView({
         isOpen={newConnectionOpen}
         onClose={() => setNewConnectionOpen(false)}
         onSave={handleSaveNewConnection}
+        existingTags={connectionTags}
       />
 
       <ConnectionModal
@@ -1942,6 +2031,7 @@ export default function WorkspaceView({
         onClose={closeEditConnection}
         onSave={handleSaveEditedConnection}
         initialData={editingConnection ?? undefined}
+        existingTags={connectionTags}
       />
 
       <ImportSqlDialog

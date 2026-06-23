@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, GripVertical, Settings, Unplug, Pencil, FileUp, FileDown, Loader2 } from 'lucide-react';
+import { Database, Settings, Unplug, Pencil, FileUp, FileDown, Loader2 } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -10,10 +10,11 @@ import {
   ContextMenuTrigger,
   ContextMenuSeparator,
 } from '../../components/ui/context-menu';
-import { refreshRail, unpinTile, useRail, unpinManyTiles, reorderTiles } from '../../state/rail';
+import { refreshRail, unpinTile, useRail, unpinManyTiles } from '../../state/rail';
 import { useConnections } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { copyText } from '../../lib/clipboard';
+import { SSH_BADGE_CLASS } from '../../lib/driver-colors';
 import type { RailTile } from '../../lib/rail';
 import DbIcon from '../../components/db-icon';
 
@@ -70,9 +71,6 @@ export default function ConnectionRail({
     window.addEventListener('tablerelay:open-settings', handler);
     return () => window.removeEventListener('tablerelay:open-settings', handler);
   }, []);
-  const [draggingId, setDraggingId] = useState<string | null>(null);
-  const [overId, setOverId] = useState<string | null>(null);
-  const dragSrcRef = useRef<string | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   // True while a tile's context menu is open. Its popup renders in a portal
   // that can sit outside the rail's bounds, so we must NOT auto-collapse the
@@ -91,10 +89,8 @@ export default function ConnectionRail({
     // pointer and the rail should stay put until they close.
     if (menuOpen || settingsOpen) return;
     // Collapse if the pointer ends up outside the rail for any reason — covers
-    // portals/overlays that eat `pointerleave`. Skipped while dragging so the
-    // drop target stays visible.
+    // portals/overlays that eat `pointerleave`.
     const checkOutside = (e: PointerEvent) => {
-      if (draggingId) return;
       const el = rootRef.current;
       if (!el) return;
       const r = el.getBoundingClientRect();
@@ -109,41 +105,8 @@ export default function ConnectionRail({
       document.removeEventListener('pointermove', checkOutside);
       window.removeEventListener('blur', onBlur);
     };
-  }, [expanded, draggingId, menuOpen, settingsOpen, onExpandChange]);
+  }, [expanded, menuOpen, settingsOpen, onExpandChange]);
 
-  const handleDragStart = (id: string) => {
-    dragSrcRef.current = id;
-    setDraggingId(id);
-  };
-
-  const handleDragOver = (e: React.DragEvent, id: string) => {
-    e.preventDefault();
-    if (dragSrcRef.current !== id) setOverId(id);
-  };
-
-  const handleDrop = (targetId: string) => {
-    const srcId = dragSrcRef.current;
-    if (!srcId || srcId === targetId) return;
-    const ids = rail.tiles.map(t => t.id);
-    const from = ids.indexOf(srcId);
-    const to = ids.indexOf(targetId);
-    if (from === -1 || to === -1) return;
-    const next = [...ids];
-    next.splice(from, 1);
-    next.splice(to, 0, srcId);
-    reorderTiles(next);
-  };
-
-  const handleDragEnd = () => {
-    setDraggingId(null);
-    setOverId(null);
-    dragSrcRef.current = null;
-    // A drag can swallow the `pointerleave` that would normally collapse the
-    // rail, leaving it stuck open. The pointermove safety net re-syncs on the
-    // next move, but collapse immediately if the pointer already rests outside.
-    const el = rootRef.current;
-    if (el && !el.matches(':hover')) onExpandChange(false);
-  };
 
   const serversById = new Map(servers.map(s => [s.id, s]));
   const connState = useConnections();
@@ -184,10 +147,8 @@ export default function ConnectionRail({
       ref={rootRef}
       onPointerEnter={() => onExpandChange(true)}
       onPointerLeave={() => {
-        // Don't collapse mid-drag — the user needs the expanded tiles as drop
-        // targets — nor while a menu/dialog is open. The drag-end handler +
-        // pointermove net handle collapse for those cases.
-        if (!draggingId && !menuOpen && !settingsOpen) onExpandChange(false);
+        // Don't collapse while a menu/dialog is open — those own the pointer.
+        if (!menuOpen && !settingsOpen) onExpandChange(false);
       }}
       style={{ width: expanded ? RAIL_EXPANDED_WIDTH : RAIL_COLLAPSED_WIDTH }}
       className="shrink-0 flex flex-col bg-sidebar-bg/70 border-r border-border h-full transition-[width] duration-200 ease-out overflow-hidden"
@@ -206,20 +167,10 @@ export default function ConnectionRail({
             : `${server?.driver ?? '?'} · ${dbLabel}`;
           const connected = connectedServerIds.has(tile.serverId);
           const isConnecting = connState.connectingIds.has(tile.serverId);
-          const isDragging = draggingId === tile.id;
-          const isOver = overId === tile.id;
           return (
             <ContextMenu key={tile.id} onOpenChange={setMenuOpen}>
               <ContextMenuTrigger>
-                <div
-                  draggable
-                  onDragStart={() => handleDragStart(tile.id)}
-                  onDragOver={(e) => handleDragOver(e, tile.id)}
-                  onDrop={() => handleDrop(tile.id)}
-                  onDragEnd={handleDragEnd}
-                  className={`relative group/tile transition-opacity ${isDragging ? 'opacity-40' : 'opacity-100'}`}
-                >
-                  {isOver && <div className="absolute -top-px left-1 right-1 h-0.5 rounded-full bg-primary z-10" />}
+                <div className="relative group/tile">
                 <button
                   type="button"
                   // Focusing a tile must always work — even while it (or
@@ -237,9 +188,6 @@ export default function ConnectionRail({
                       ? 'bg-primary/15 text-foreground'
                       : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'}`}
                 >
-                  {expanded && (
-                    <GripVertical className="absolute left-0.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground/30 opacity-0 group-hover/tile:opacity-100 transition-opacity cursor-grab" />
-                  )}
                   <span
                     className="relative flex items-center justify-center shrink-0"
                     style={server?.color ? { color: server.color } : undefined}
@@ -261,7 +209,7 @@ export default function ConnectionRail({
                       <span className="flex items-center gap-1 text-[10.5px] text-muted-foreground leading-tight min-w-0">
                         {server?.sshEnabled && (
                           <span
-                            className="shrink-0 rounded px-1 py-px text-[8px] font-semibold tracking-wide leading-none bg-primary text-primary-foreground"
+                            className={`shrink-0 rounded px-1 py-px text-[8px] font-semibold tracking-wide leading-none ${SSH_BADGE_CLASS}`}
                             title={server.sshHost ? `SSH tunnel via ${server.sshHost}` : 'SSH tunnel'}
                           >
                             SSH
@@ -274,7 +222,7 @@ export default function ConnectionRail({
                     <span className="flex w-full items-center justify-center gap-0.5 text-[9px] font-medium leading-tight min-w-0">
                       {server?.sshEnabled && (
                         <span
-                          className="shrink-0 rounded px-0.5 text-[7px] font-semibold tracking-wide leading-none bg-primary text-primary-foreground"
+                          className={`shrink-0 rounded px-0.5 text-[7px] font-semibold tracking-wide leading-none ${SSH_BADGE_CLASS}`}
                           title="SSH tunnel"
                         >
                           SSH
@@ -287,7 +235,6 @@ export default function ConnectionRail({
                 </div>
               </ContextMenuTrigger>
               <ContextMenuContent className="w-56">
-                <ContextMenuItem onClick={() => onFocusTile(tile)}>Focus</ContextMenuItem>
                 {server && (
                   <ContextMenuItem onClick={() => onEditServer(server.id)}>
                     <Pencil className="w-3.5 h-3.5 mr-2" /> Edit connection

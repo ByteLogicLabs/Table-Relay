@@ -22,6 +22,9 @@ pub struct MongoConfig {
     pub password: Option<String>,
     pub database: Option<String>,
     pub ssl_mode: Option<String>,
+    /// Explicit auth database. When set, it's tried first (and only) instead of
+    /// the admin/selected-db auto-detect. Comes from the `authSource` field.
+    pub auth_source: Option<String>,
 }
 
 pub struct MongoDriver {
@@ -47,12 +50,18 @@ impl MongoDriver {
         let with_source = auth.is_some();
         let mut sources: Vec<Option<String>> = Vec::new();
         if with_source {
-            // Many clusters create users in `admin` even when the app's
-            // working DB is different. Try admin first, then the selected DB.
-            sources.push(Some("admin".to_string()));
-            if let Some(db) = cfg.database.clone() {
-                if db != "admin" {
-                    sources.push(Some(db));
+            if let Some(explicit) = cfg.auth_source.clone() {
+                // User specified the auth database — honor it exactly.
+                sources.push(Some(explicit));
+            } else {
+                // Auto-detect: many clusters create users in `admin` even when
+                // the app's working DB differs. Try admin first, then the
+                // selected DB.
+                sources.push(Some("admin".to_string()));
+                if let Some(db) = cfg.database.clone().filter(|s| !s.trim().is_empty()) {
+                    if db != "admin" {
+                        sources.push(Some(db));
+                    }
                 }
             }
         } else {
@@ -70,8 +79,15 @@ impl MongoDriver {
                 Ok(client) => {
                     // Validate auth upfront so "Connection test" reports the
                     // error in the connect stage instead of surprising later.
-                    let admin = client.database("admin");
-                    match admin.run_command(doc! { "ping": 1 }, None).await {
+                    // Ping the auth/selected DB (not always `admin`) — a user
+                    // scoped to their own DB may have no `admin` access, which
+                    // would otherwise look like an auth failure.
+                    // Never ping an empty database name (Mongo rejects "" with
+                    // InvalidNamespace). Fall back through source → selected DB →
+                    // "admin", skipping any blank candidate.
+                    let ping_db = resolve_ping_db(source.as_deref(), cfg.database.as_deref());
+                    let probe = client.database(&ping_db);
+                    match probe.run_command(doc! { "ping": 1 }, None).await {
                         Ok(_) => {
                             log_line!(
                                 "mongo_connect",
@@ -332,8 +348,19 @@ impl MongoDriver {
             })
             .collect::<Vec<_>>();
 
+        // Counting is the slow part for large collections. An unfiltered
+        // `count_documents({})` forces a full scan (it runs a `$group`
+        // aggregation), which is why a 100-row page felt slow vs Compass.
+        // When there's no filter, use `estimatedDocumentCount` — it reads the
+        // collection's metadata count and returns instantly (this is what
+        // Compass shows). Only pay for an accurate count when a filter narrows
+        // the result, where an estimate would be wrong.
         let total = if req.include_total {
-            Some(coll.count_documents(filter, None).await.map_err(map_err)?)
+            if req.filters.is_empty() {
+                coll.estimated_document_count(None).await.ok()
+            } else {
+                Some(coll.count_documents(filter, None).await.map_err(map_err)?)
+            }
         } else {
             None
         };
@@ -356,7 +383,13 @@ impl MongoDriver {
     pub async fn count_records(&self, req: CountRequest) -> Result<Option<u64>, AdapterError> {
         let coll = self.collection(&req.schema, &req.table);
         let filter = filters_to_doc(&req.filters)?;
-        let n = coll.count_documents(filter, None).await.map_err(map_err)?;
+        // Same trade-off as `browse`: an unfiltered exact count is a full scan,
+        // so use the instant metadata estimate when there's no filter.
+        let n = if req.filters.is_empty() {
+            coll.estimated_document_count(None).await.map_err(map_err)?
+        } else {
+            coll.count_documents(filter, None).await.map_err(map_err)?
+        };
         Ok(Some(n))
     }
 
@@ -467,20 +500,54 @@ struct NormalizedAuth {
     password: String,
 }
 
-fn normalized_auth_fields(cfg: &MongoConfig) -> Option<NormalizedAuth> {
-    let user = cfg.user.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let pass = cfg
-        .password
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    match (user, pass) {
-        (Some(u), Some(p)) => Some(NormalizedAuth {
-            user: u.to_string(),
-            password: p.to_string(),
-        }),
-        _ => None,
+/// Strip `authMechanism=DEFAULT` from a Mongo URI. `DEFAULT` is a Compass/legacy
+/// placeholder meaning "auto-negotiate", but the Rust driver rejects it with
+/// "invalid mechanism string: DEFAULT". Removing it lets the driver pick SCRAM
+/// on its own. Other params are left untouched.
+fn sanitize_mongo_uri(uri: &str) -> String {
+    let Some((base, query)) = uri.split_once('?') else {
+        return uri.to_string();
+    };
+    let kept: Vec<&str> = query
+        .split('&')
+        .filter(|param| {
+            let (k, v) = param.split_once('=').unwrap_or((*param, ""));
+            !(k.eq_ignore_ascii_case("authMechanism") && v.eq_ignore_ascii_case("DEFAULT"))
+        })
+        .collect();
+    if kept.is_empty() {
+        base.to_string()
+    } else {
+        format!("{base}?{}", kept.join("&"))
     }
+}
+
+/// Resolve which database to ping after connecting, never returning "".
+/// Prefers the auth source, then the selected DB, then "admin", skipping any
+/// blank candidate (Mongo rejects an empty database name with InvalidNamespace).
+fn resolve_ping_db(source: Option<&str>, database: Option<&str>) -> String {
+    source
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| database.map(str::to_string).filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| "admin".to_string())
+}
+
+fn normalized_auth_fields(cfg: &MongoConfig) -> Option<NormalizedAuth> {
+    // A username is the trigger for auth. Password may be empty for some auth
+    // setups, and a username-only profile should still attempt authentication
+    // rather than connect anonymously (which fails later with the confusing
+    // "command X requires authentication"). When the host is a full mongodb://
+    // URI we skip this so the URI's own credentials are used as-is.
+    if cfg.host.starts_with("mongodb://") || cfg.host.starts_with("mongodb+srv://") {
+        return None;
+    }
+    let user = cfg.user.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+    let pass = cfg.password.as_deref().map(str::trim).unwrap_or("");
+    Some(NormalizedAuth {
+        user: user.to_string(),
+        password: pass.to_string(),
+    })
 }
 
 async fn build_client(
@@ -489,7 +556,7 @@ async fn build_client(
     auth: Option<&NormalizedAuth>,
 ) -> Result<Client, AdapterError> {
     let mut opts = if cfg.host.starts_with("mongodb://") || cfg.host.starts_with("mongodb+srv://") {
-        ClientOptions::parse(&cfg.host).await.map_err(map_err)?
+        ClientOptions::parse(&sanitize_mongo_uri(&cfg.host)).await.map_err(map_err)?
     } else {
         let mut o = ClientOptions::default();
         o.hosts = vec![mongodb::options::ServerAddress::Tcp {
@@ -995,6 +1062,57 @@ fn quote_unquoted_object_keys(input: &str) -> String {
     }
 
     out
+}
+
+#[cfg(test)]
+mod sanitize_uri_tests {
+    use super::sanitize_mongo_uri;
+
+    #[test]
+    fn strips_authmechanism_default() {
+        assert_eq!(
+            sanitize_mongo_uri("mongodb://u:p@h/db?authMechanism=DEFAULT"),
+            "mongodb://u:p@h/db"
+        );
+        assert_eq!(
+            sanitize_mongo_uri("mongodb://u:p@h/db?authSource=admin&authMechanism=DEFAULT"),
+            "mongodb://u:p@h/db?authSource=admin"
+        );
+        assert_eq!(
+            sanitize_mongo_uri("mongodb://u:p@h/db?authMechanism=DEFAULT&retryWrites=true"),
+            "mongodb://u:p@h/db?retryWrites=true"
+        );
+    }
+
+    #[test]
+    fn keeps_real_mechanism_and_no_query() {
+        assert_eq!(
+            sanitize_mongo_uri("mongodb://h/db?authMechanism=SCRAM-SHA-256"),
+            "mongodb://h/db?authMechanism=SCRAM-SHA-256"
+        );
+        assert_eq!(sanitize_mongo_uri("mongodb://h/db"), "mongodb://h/db");
+    }
+}
+
+#[cfg(test)]
+mod ping_db_tests {
+    use super::resolve_ping_db;
+
+    #[test]
+    fn falls_back_to_admin_when_all_blank() {
+        // The bug: a URI with no database path (`/?authMechanism=DEFAULT`) left
+        // both source and database empty, producing a ping against "".
+        assert_eq!(resolve_ping_db(None, None), "admin");
+        assert_eq!(resolve_ping_db(Some(""), Some("")), "admin");
+        assert_eq!(resolve_ping_db(Some("  "), None), "admin");
+    }
+
+    #[test]
+    fn prefers_source_then_database() {
+        assert_eq!(resolve_ping_db(Some("admin"), Some("app")), "admin");
+        assert_eq!(resolve_ping_db(None, Some("app")), "app");
+        assert_eq!(resolve_ping_db(Some(""), Some("app")), "app");
+    }
 }
 
 #[cfg(test)]

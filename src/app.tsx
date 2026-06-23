@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ConnectionProfile } from './types';
+import { ConnectionProfile, type ConnectionTag } from './types';
 import WorkspaceView from './features/workspace/workspace-view';
 import WelcomeView from './features/workspace/welcome-view';
 import { Toaster } from './components/ui/sonner';
@@ -40,7 +40,33 @@ function fromRecord(p: ConnectionProfileRecord): ConnectionProfile {
     sshKeyPassphrase: p.sshKeyPassphrase ?? undefined,
     color: p.color ?? undefined,
     isFavorite: p.isFavorite,
+    tag: p.tag ?? undefined,
+    tagColor: p.tagColor ?? undefined,
+    tags: parseTags(p.tags, p.tag, p.tagColor),
   };
+}
+
+/** Parse the stored tags JSON; fall back to the legacy single tag/tagColor so
+ *  pre-multi-tag connections still show their tag. */
+function parseTags(
+  tagsJson: string | null | undefined,
+  legacyTag: string | null | undefined,
+  legacyColor: string | null | undefined,
+): ConnectionTag[] {
+  if (tagsJson) {
+    try {
+      const arr = JSON.parse(tagsJson);
+      if (Array.isArray(arr)) {
+        return arr
+          .filter((t) => t && typeof t.name === 'string' && t.name.trim() !== '')
+          .map((t) => ({ name: String(t.name), color: String(t.color || 'Gray') }));
+      }
+    } catch { /* fall through to legacy */ }
+  }
+  if (legacyTag && legacyTag.trim() !== '') {
+    return [{ name: legacyTag, color: legacyColor || 'Gray' }];
+  }
+  return [];
 }
 
 export default function App() {
@@ -63,6 +89,7 @@ function UnlockedApp() {
   // Track the toast id per connection so we can replace "Reconnecting..." with
   // the success/failure variant instead of stacking three unrelated toasts.
   const reconnectToastIds = useRef<Map<string, string | number>>(new Map());
+  const connectingToastIds = useRef<Map<string, string | number>>(new Map());
   const bootReconnectAttempted = useRef(false);
 
   const reload = useCallback(async () => {
@@ -118,6 +145,20 @@ function UnlockedApp() {
     window.addEventListener('tablerelay:connections-changed', onChanged);
     return () => window.removeEventListener('tablerelay:connections-changed', onChanged);
   }, [reload]);
+
+  // Instantly dismiss connecting toasts when a connection is cancelled
+  useEffect(() => {
+    const onCancel = (e: Event) => {
+      const { connectionId } = (e as CustomEvent<{ connectionId: string }>).detail;
+      const toastId = connectingToastIds.current.get(connectionId);
+      if (toastId) {
+        toast.dismiss(toastId);
+        connectingToastIds.current.delete(connectionId);
+      }
+    };
+    window.addEventListener('tablerelay:cancel-connect', onCancel);
+    return () => window.removeEventListener('tablerelay:cancel-connect', onCancel);
+  }, []);
 
   // Listen for reconnect lifecycle events emitted by the Rust supervisor. On
   // `connection:lost` we drop the id from the active set so the rail tile and
@@ -247,8 +288,10 @@ function UnlockedApp() {
   const handleConnect = async (id: string) => {
     const name = connectionsRef.current.find(c => c.id === id)?.name ?? 'database';
     const toastId = toast.loading(`Connecting to ${name}…`);
+    connectingToastIds.current.set(id, toastId);
     try {
       const meta = await connectAndLoad(id);
+      connectingToastIds.current.delete(id);
       if (!meta) {
         // User cancelled the in-flight connect (or it was superseded). Don't
         // open the connection or claim success — just clear the toast.
@@ -258,6 +301,7 @@ function UnlockedApp() {
       setActiveConnectionIds(prev => (prev.includes(id) ? prev : [...prev, id]));
       toast.success(`Connected to ${name}`, { id: toastId });
     } catch (err) {
+      connectingToastIds.current.delete(id);
       toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
     }
   };
@@ -288,6 +332,11 @@ function UnlockedApp() {
       sshKeyPassphrase: conn.sshKeyPassphrase || undefined,
       color: conn.color,
       isFavorite: !!conn.isFavorite,
+      // Multi-tag: persist the array as JSON, and mirror the first tag into the
+      // legacy tag/tagColor columns for back-compat.
+      tags: conn.tags && conn.tags.length > 0 ? JSON.stringify(conn.tags) : undefined,
+      tag: conn.tags?.[0]?.name ?? conn.tag ?? undefined,
+      tagColor: conn.tags?.[0]?.color ?? conn.tagColor ?? undefined,
     });
     await reload();
     return saved.id;
@@ -319,10 +368,18 @@ function UnlockedApp() {
     // an unexplained blank pane for those seconds.
     setActiveConnectionIds(prev => (prev.includes(savedId) ? prev : [...prev, savedId]));
     const toastId = toast.loading(`Connecting to ${conn.name}…`);
+    connectingToastIds.current.set(savedId, toastId);
     try {
-      await connectAndLoad(savedId);
+      const meta = await connectAndLoad(savedId);
+      connectingToastIds.current.delete(savedId);
+      if (!meta) {
+        toast.dismiss(toastId);
+        setActiveConnectionIds(prev => prev.filter(cId => cId !== savedId));
+        return;
+      }
       toast.success(`Connected to ${conn.name}`, { id: toastId });
     } catch (err) {
+      connectingToastIds.current.delete(savedId);
       toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
       // Remove the optimistically-added id so handleEditConnection doesn't
       // treat this as an active connection and attempt a spurious reconnect.
@@ -341,8 +398,10 @@ function UnlockedApp() {
       if (idChanged) {
         await connectionsStore.remove(previousId);
         setActiveConnectionIds(prev => prev.filter(cId => cId !== previousId));
-        await reload();
       }
+      // Always refresh the in-memory list so edits (tags, name, color, …) show
+      // immediately in the sidebar / cards, not just when the id changed.
+      await reload();
     } catch (e) {
       toast.error(`Failed to save connection: ${String(e)}`);
       throw e;
@@ -352,14 +411,22 @@ function UnlockedApp() {
     if (!wasActive) return;
 
     const toastId = toast.loading(`Reconnecting to ${conn.name}…`);
+    connectingToastIds.current.set(conn.id, toastId);
     try {
       if (!idChanged) {
         await disconnectDb(conn.id);
       }
       setActiveConnectionIds(prev => (prev.includes(conn.id) ? prev : [...prev, conn.id]));
-      await connectAndLoad(conn.id, true);
+      const meta = await connectAndLoad(conn.id, true);
+      connectingToastIds.current.delete(conn.id);
+      if (!meta) {
+        toast.dismiss(toastId);
+        setActiveConnectionIds(prev => prev.filter(cId => cId !== conn.id));
+        return;
+      }
       toast.success(`Reconnected to ${conn.name}`, { id: toastId });
     } catch (err) {
+      connectingToastIds.current.delete(conn.id);
       setActiveConnectionIds(prev => prev.filter(cId => cId !== conn.id));
       toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
       throw err;

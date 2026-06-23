@@ -11,6 +11,9 @@ import {
 } from '../../components/ui/context-menu';
 import { ConnectionProfile } from '../../types';
 import DbIcon from '../../components/db-icon';
+import { tagsOf, visibleTags, getTagColors } from '../workspace/favorites-types';
+import { displayHost, isUriHost } from '../../lib/connection-display';
+import { getDriverColor, SSH_BADGE_CLASS } from '../../lib/driver-colors';
 
 interface ConnectPickerDialogProps {
   open: boolean;
@@ -43,7 +46,8 @@ export default function ConnectPickerDialog({
       (c) =>
         c.name.toLowerCase().includes(q) ||
         c.host.toLowerCase().includes(q) ||
-        c.driver.toLowerCase().includes(q),
+        c.driver.toLowerCase().includes(q) ||
+        tagsOf(c).some((t) => t.name.toLowerCase().includes(q)),
     );
   }, [connections, query]);
 
@@ -147,19 +151,35 @@ export default function ConnectPickerDialog({
                         <DbIcon driver={conn.driver} className="w-4 h-4" />
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="text-sm font-medium truncate">{conn.name}</div>
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span className="text-sm font-medium truncate">{conn.name}</span>
+                          {visibleTags(conn).shown.map((t) => (
+                            <span
+                              key={t.name}
+                              className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full select-none shrink-0 ${getTagColors(t.color).bg} ${getTagColors(t.color).text}`}
+                            >
+                              {t.name}
+                            </span>
+                          ))}
+                          {visibleTags(conn).overflow > 0 && (
+                            <span className="text-[9px] font-medium px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground shrink-0">
+                              +{visibleTags(conn).overflow}
+                            </span>
+                          )}
+                        </div>
                         <div className="text-[11px] text-muted-foreground truncate">
-                          {conn.host}:{conn.port}
-                          {conn.database ? ` / ${conn.database}` : ''}
+                          {isUriHost(conn.host)
+                            ? displayHost(conn.host)
+                            : `${conn.host}:${conn.port}${conn.database ? ` / ${conn.database}` : ''}`}
                         </div>
                       </div>
                       <div className="flex items-center gap-1.5 shrink-0">
                         {conn.sshEnabled && (
-                          <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-primary/15 text-primary">
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${SSH_BADGE_CLASS}`}>
                             SSH
                           </span>
                         )}
-                        <span className="text-[10px] text-muted-foreground">{conn.driver}</span>
+                        <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${getDriverColor(conn.driver).bg} ${getDriverColor(conn.driver).text}`}>{conn.driver}</span>
                       </div>
                     </button>
                   </ContextMenuTrigger>

@@ -22,6 +22,16 @@ export interface ConnectionProfile {
   sshKeyPassphrase?: string;
   color?: string;
   isFavorite?: boolean;
+  tag?: string;
+  tagColor?: string;
+  /** Multiple tags per connection. `tag`/`tagColor` mirror the first one for
+   *  back-compat. */
+  tags?: ConnectionTag[];
+}
+
+export interface ConnectionTag {
+  name: string;
+  color: string;
 }
 
 export type TabType = 'data' | 'structure' | 'query' | 'erd' | 'routine' | 'trigger' | 'realtime';

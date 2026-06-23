@@ -62,13 +62,30 @@ impl Factory for MongoFactory {
             (profile.host.clone(), profile.port, None)
         };
 
+        let auth_source = profile
+            .extras
+            .get("authSource")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        // Normalize a blank database to None — an empty string later becomes a
+        // ping/connect against database "" which Mongo rejects with
+        // "InvalidNamespace: Invalid database name: ''".
+        let database = profile
+            .database
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let cfg = MongoConfig {
             host: db_host,
             port: db_port,
             user: profile.user.clone(),
             password: profile.password.clone(),
-            database: profile.database.clone(),
+            database,
             ssl_mode: profile.ssl_mode.clone(),
+            auth_source,
         };
         let driver = MongoDriver::connect(cfg).await?;
 

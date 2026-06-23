@@ -103,11 +103,29 @@ impl Store {
                     schema::migrate(&mut conn)?;
                     conn
                 }
-                Err(_) => {
-                    // Back up the incompatible file before writing a fresh store.
-                    // Only proceed if the rename succeeds — if it fails we would
-                    // overwrite the only copy of the user's data, which is worse
-                    // than crashing, so surface the error instead.
+                // A wrong/missing key means the data is INTACT but this build
+                // can't read it — most often a release compiled without the
+                // right `APP_TOKEN`. Resetting here silently wiped a user's
+                // store once already. Hard-fail instead so the data is left
+                // untouched and a correctly-built app can still open it.
+                Err(DecryptFailure::WrongKey) => {
+                    return Err(StoreError::Crypto(
+                        "store could not be decrypted with this build's encryption \
+                         token — refusing to reset so your data is not lost. This \
+                         usually means the app was built without the correct \
+                         encryption token."
+                            .into(),
+                    ));
+                }
+                Err(DecryptFailure::KeyUnavailable(e)) => {
+                    return Err(e);
+                }
+                // Only a genuinely foreign/legacy envelope (wrong magic) is set
+                // aside — that data can never be read by this scheme, so starting
+                // fresh is the right call. Back it up before writing a new store;
+                // only proceed if the rename succeeds, else surface the error
+                // rather than overwrite the only copy.
+                Err(DecryptFailure::LegacyFormat) => {
                     let bad = self.encrypted_path.with_extension("enc.incompatible");
                     std::fs::rename(&self.encrypted_path, &bad).map_err(StoreError::Io)?;
                     let mut conn = Connection::open_in_memory().map_err(StoreError::Sqlite)?;
@@ -219,18 +237,34 @@ fn write_encrypted(path: &PathBuf, plaintext: &[u8]) -> Result<(), StoreError> {
     std::fs::write(path, out).map_err(StoreError::Io)
 }
 
-fn decrypt_store(bytes: &[u8]) -> Result<Vec<u8>, StoreError> {
+/// Why decryption of an existing store failed. The caller treats these very
+/// differently: a `LegacyFormat` store (wrong magic) genuinely can't be read by
+/// this scheme and is safe to set aside, but a `WrongKey` failure almost always
+/// means the build was compiled with the wrong (or no) `APP_TOKEN` — the data is
+/// intact and a correct build will read it, so we must NOT discard it.
+enum DecryptFailure {
+    /// File isn't in our `TRDBE02` envelope — a legacy/foreign format.
+    LegacyFormat,
+    /// Correct envelope, but AES-GCM authentication failed: wrong key, or the
+    /// ciphertext was tampered with. Resetting here would wipe recoverable data.
+    WrongKey,
+    /// The app key itself couldn't be derived (e.g. `APP_TOKEN` not configured
+    /// for this build). Never a reason to touch the user's store.
+    KeyUnavailable(StoreError),
+}
+
+fn decrypt_store(bytes: &[u8]) -> Result<Vec<u8>, DecryptFailure> {
     if bytes.len() < MAGIC.len() + NONCE_LEN || &bytes[..MAGIC.len()] != MAGIC {
-        return Err(StoreError::Crypto("invalid or legacy store format — store will be reset".into()));
+        return Err(DecryptFailure::LegacyFormat);
     }
     let nonce = &bytes[MAGIC.len()..MAGIC.len() + NONCE_LEN];
     let ciphertext = &bytes[MAGIC.len() + NONCE_LEN..];
-    let key = app_key()?;
+    let key = app_key().map_err(DecryptFailure::KeyUnavailable)?;
     let cipher = Aes256Gcm::new_from_slice(&key)
-        .map_err(|e| StoreError::Crypto(format!("cipher init: {e}")))?;
+        .map_err(|e| DecryptFailure::KeyUnavailable(StoreError::Crypto(format!("cipher init: {e}"))))?;
     cipher
         .decrypt(Nonce::from_slice(nonce), ciphertext)
-        .map_err(|_| StoreError::Crypto("decryption failed — store may be corrupted".into()))
+        .map_err(|_| DecryptFailure::WrongKey)
 }
 
 #[derive(Debug, thiserror::Error)]

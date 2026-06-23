@@ -21,6 +21,10 @@ export interface ConnectionProfileRecord {
   sshKeyPassphrase?: string | null;
   color?: string | null;
   isFavorite: boolean;
+  tag?: string | null;
+  tagColor?: string | null;
+  /** JSON-encoded array of { name, color }. */
+  tags?: string | null;
 }
 
 export interface ConnectionProfileInput {
@@ -43,6 +47,10 @@ export interface ConnectionProfileInput {
   sshKeyPassphrase?: string;
   color?: string;
   isFavorite?: boolean;
+  tag?: string;
+  tagColor?: string;
+  /** JSON-encoded array of { name, color }. */
+  tags?: string;
 }
 
 export const connectionsStore = {

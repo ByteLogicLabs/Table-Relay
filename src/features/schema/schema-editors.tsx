@@ -460,9 +460,9 @@ export function FkField({ label, children }: { label: string; children: React.Re
 
 // -------- table shell --------
 
-export function Th({ children, last }: { children?: React.ReactNode; last?: boolean }) {
+export function Th({ children, last, className }: { children?: React.ReactNode; last?: boolean; className?: string }) {
   return (
-    <th className={`px-4 py-2 border-b ${last ? '' : 'border-r'} border-border font-medium whitespace-nowrap`}>
+    <th className={`px-4 py-2 border-b ${last ? '' : 'border-r'} border-border font-medium whitespace-nowrap ${className ?? ''}`}>
       {children}
     </th>
   );
@@ -491,7 +491,10 @@ export function MongoFieldsTable({ columns }: { columns: DraftColumn[] }) {
           <Th>bson_types</Th>
           <Th>presence</Th>
           <Th>indexed</Th>
-          <Th last></Th>
+          {/* Spacer column absorbs all remaining width so the four real
+              columns size to their content instead of spreading apart with
+              wide empty gaps (which read as phantom "data" columns). */}
+          <Th last className="w-full"></Th>
         </tr>
       </thead>
       <tbody>

@@ -54,6 +54,8 @@ pub struct Registry {
     /// the loading toast orphaned because no `reconnected`/`lost` event
     /// ever fires on the happy path.
     reconnecting: Mutex<std::collections::HashSet<ConnectionId>>,
+    /// Senders to abort/cancel active queries, keyed by (ConnectionId, tab_id).
+    active_queries: Mutex<HashMap<(ConnectionId, String), tokio::sync::oneshot::Sender<()>>>,
 }
 
 impl Registry {
@@ -62,6 +64,7 @@ impl Registry {
             inner: RwLock::new(HashMap::new()),
             reconnect_locks: Mutex::new(HashMap::new()),
             reconnecting: Mutex::new(std::collections::HashSet::new()),
+            active_queries: Mutex::new(HashMap::new()),
         }
     }
 
@@ -184,6 +187,23 @@ impl Registry {
 
     pub async fn list(&self) -> Vec<ConnectionMeta> {
         self.inner.read().await.values().map(|c| c.meta.clone()).collect()
+    }
+
+    pub async fn register_query(&self, connection_id: ConnectionId, tab_id: String, cancel_tx: tokio::sync::oneshot::Sender<()>) {
+        self.active_queries.lock().await.insert((connection_id, tab_id), cancel_tx);
+    }
+
+    pub async fn remove_query(&self, connection_id: &str, tab_id: &str) {
+        self.active_queries.lock().await.remove(&(connection_id.to_string(), tab_id.to_string()));
+    }
+
+    pub async fn cancel_query(&self, connection_id: &str, tab_id: &str) -> bool {
+        if let Some(cancel_tx) = self.active_queries.lock().await.remove(&(connection_id.to_string(), tab_id.to_string())) {
+            let _ = cancel_tx.send(());
+            true
+        } else {
+            false
+        }
     }
 }
 
