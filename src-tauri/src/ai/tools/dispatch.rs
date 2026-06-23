@@ -428,10 +428,10 @@ pub async fn dispatch(
         "call_query" | "call_sql" | "run_query" => {
             let sql = match args.get("sql").and_then(|v| v.as_str()) {
                 Some(s) => s.trim().to_string(),
-                None => return ToolResult::error("`sql` argument is required"),
+                None => return ToolResult::error("`query` argument is required"),
             };
             if sql.is_empty() {
-                return ToolResult::error("sql is empty");
+                return ToolResult::error("query is empty");
             }
 
             // Lock to the active database unless cross-database access is granted.
@@ -576,10 +576,10 @@ pub async fn dispatch(
         "write_query_tab" => {
             let sql = match args.get("sql").and_then(|v| v.as_str()) {
                 Some(s) => s.trim().to_string(),
-                None => return ToolResult::error("`sql` argument is required"),
+                None => return ToolResult::error("`query` argument is required"),
             };
             if sql.is_empty() {
-                return ToolResult::error("sql is empty");
+                return ToolResult::error("query is empty");
             }
             let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("new");
             if mode != "new" && mode != "replace" {

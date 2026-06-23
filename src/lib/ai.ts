@@ -564,6 +564,9 @@ export const ai = {
       maxTokens?: number;
       reasoningEffort?: 'low' | 'medium' | 'high';
       recentQueryLog?: string;
+      /** Stream tokens live (true) or deliver the reply once complete (false).
+       *  Defaults to true on the backend when omitted. */
+      stream?: boolean;
     },
   ) =>
     invoke<void>('ai_chat_send', {
@@ -581,6 +584,7 @@ export const ai = {
         max_tokens: opts?.maxTokens,
         reasoning_effort: opts?.reasoningEffort,
         recent_query_log: opts?.recentQueryLog,
+        stream: opts?.stream ?? true,
       },
     }),
 

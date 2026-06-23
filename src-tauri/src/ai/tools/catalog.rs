@@ -85,11 +85,11 @@ fn catalog_all() -> Vec<ToolDef> {
             kind: "function",
             function: ToolFunction {
                 name: "call_query",
-                description: "YOU execute this SQL against the live database and receive the rows back — this is how you actually run queries and get data. May require user approval (the user sees the SQL and approves or denies); with auto-approval granted it runs without prompting. Use whenever the task needs real data or a real change: SELECT / counts / samples, and INSERT/UPDATE/CREATE the user asked you to perform. This is the tool for getting an answer or doing the work. Keep queries single-statement and add LIMIT to SELECTs unless the user explicitly asked for everything.",
+                description: "YOU execute this query against the live database and receive the rows back — this is how you actually run queries and get data. Works for any database: write SQL for SQL databases, or the native query (e.g. a Mongo `db.collection.find(...)`) for document/other stores. May require user approval (the user sees the query and approves or denies); with auto-approval granted it runs without prompting. Use whenever the task needs real data or a real change: reads / counts / samples, and writes the user asked you to perform. This is the tool for getting an answer or doing the work. Keep it to a single statement and add a limit to reads unless the user explicitly asked for everything.",
                 parameters: json!({
                     "type": "object",
                     "properties": {
-                        "sql": { "type": "string", "description": "The SQL to execute. One statement. Prefer SELECT with LIMIT." }
+                        "sql": { "type": "string", "description": "The query to execute (SQL, or the database's native query syntax). One statement. Prefer a limited read." }
                     },
                     "required": ["sql"]
                 }),

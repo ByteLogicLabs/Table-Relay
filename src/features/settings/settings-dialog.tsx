@@ -628,7 +628,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
 
             {/* ── Appearance ── */}
             {section === 'appearance' && (
-              <AppearanceSettings theme={theme} onSelectTheme={handleTheme} />
+              <AppearanceSettings theme={theme} onSelectTheme={handleTheme} settings={settings} />
             )}
 
             {/* ── General ── */}

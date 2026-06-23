@@ -12,6 +12,7 @@ import ConnectionRail, {
   RAIL_COLLAPSED_WIDTH,
   RAIL_EXPANDED_WIDTH,
 } from "../connections/connection-rail";
+import { useSettings } from "../../lib/settings-store";
 import ConnectionModal from "../connections/connection-modal";
 import ImportSqlDialog from "../connections/import-sql-dialog";
 import ConnectionExportDialog from "../connections/connection-export-dialog";
@@ -334,7 +335,17 @@ export default function WorkspaceView({
     if (!workspaceStateHydrated.current) return;
     void setAppState(SIDEBAR_WIDTH_KEY, sidebarWidth);
   }, [sidebarWidth]);
-  const [railExpanded, setRailExpanded] = useState(false);
+  // Connection rail (sidebar 1) behaviour is user-configurable and persisted in
+  // settings (Appearance). `auto` keeps the hover-to-expand behaviour; the other
+  // two pin the rail open or closed and ignore hover.
+  const railMode = useSettings().connectionRailMode;
+  const [railHoverExpanded, setRailHoverExpanded] = useState(false);
+  const railExpanded =
+    railMode === 'expanded' ? true : railMode === 'collapsed' ? false : railHoverExpanded;
+  // Only `auto` mode reacts to hover; the pinned modes swallow expand requests.
+  const setRailExpanded = (next: boolean) => {
+    if (railMode === 'auto') setRailHoverExpanded(next);
+  };
 
   // Any view with a toolbar (data-grid, sql-editor, etc.) can ask to toggle
   // the chat panel by dispatching `tablerelay:toggle-chat`. Keeps each view

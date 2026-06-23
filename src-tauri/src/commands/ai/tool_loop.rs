@@ -13,6 +13,24 @@ use crate::ai::{AiError, AiProvider, ChatMessage, ChatRole};
 
 use super::chat::{ChunkEvent, DoneEvent};
 
+/// A tool call the user shouldn't see as a card because it's a malformed model
+/// mistake, not real work. Today: a query call (`call_query` / `run_query` /
+/// `call_sql`) with no usable `sql`. Dispatch still returns an error to the
+/// model so it can self-correct, but we suppress the UI card + finished event
+/// for it (no point showing "`query` argument is required" to the user).
+fn unrenderable_tool_call(name: &str, arguments: &str) -> bool {
+    if !matches!(name, "call_query" | "run_query" | "call_sql") {
+        return false;
+    }
+    let sql = serde_json::from_str::<serde_json::Value>(arguments)
+        .ok()
+        .and_then(|v| v.get("sql").and_then(|s| s.as_str()).map(str::to_string));
+    match sql {
+        Some(s) => s.trim().is_empty(),
+        None => true,
+    }
+}
+
 /// One non-streaming round-trip with bounded auto-retry for transient errors.
 /// Used directly when a provider doesn't stream tool turns, and as the safe
 /// fallback when a stream fails before emitting any content.
@@ -152,10 +170,19 @@ pub(super) async fn run_tool_loop(
         // `streamed` tracks whether content reached the UI as deltas, so the
         // final-answer block below doesn't re-emit it as a duplicate chunk.
         let mut streamed = false;
-        let turn = match provider
-            .complete_once_stream(&history, Some(&tools_catalog), turn_opts)
-            .await
-        {
+        // When the user turns stream mode off, skip the streaming path entirely
+        // and do one buffered round-trip — the reply is emitted once complete
+        // (the non-streaming branch below). `Ok(None)` makes the match fall
+        // through to `complete_once_with_retry` exactly like a provider that
+        // can't stream tool turns.
+        let stream_attempt = if turn_opts.stream {
+            provider
+                .complete_once_stream(&history, Some(&tools_catalog), turn_opts)
+                .await
+        } else {
+            Ok(None)
+        };
+        let turn = match stream_attempt {
             Ok(Some(mut stream)) => {
                 let mut done_turn: Option<ToolTurn> = None;
                 let mut emitted = false;
@@ -270,8 +297,18 @@ pub(super) async fn run_tool_loop(
         // Let the UI render a tool-call card per call so the user sees the
         // model "thinking out loud." These events are advisory; the chat
         // bubble renders from `session.messages` on the frontend after done.
+        //
+        // Exception: a malformed query call (e.g. `call_query` with no `sql`)
+        // is a model mistake, not real work. We still let dispatch return an
+        // error to the model so it can correct itself, but we DON'T emit a card
+        // for it — surfacing "`query` argument is required" to the user is just
+        // noise. `unrenderable_tool_call` flags these; their result is committed
+        // for the model but no UI event fires.
         for tc in &turn.tool_calls {
             crate::log_chat!("tool_call", "{}({})", tc.name, tc.arguments);
+            if unrenderable_tool_call(&tc.name, &tc.arguments) {
+                continue;
+            }
             let _ = app.emit(
                 "ai://tool/call_started",
                 serde_json::json!({
@@ -341,14 +378,18 @@ pub(super) async fn run_tool_loop(
                 }
             }
 
-            let _ = app.emit(
-                "ai://tool/call_finished",
-                serde_json::json!({
-                    "request_id": request_id,
-                    "tool_call_id": tc.id,
-                    "result": result.content,
-                }),
-            );
+            // Skip the UI event for calls we never rendered a card for (see the
+            // `call_started` loop above) — the result still went to the model.
+            if !unrenderable_tool_call(&tc.name, &tc.arguments) {
+                let _ = app.emit(
+                    "ai://tool/call_finished",
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "tool_call_id": tc.id,
+                        "result": result.content,
+                    }),
+                );
+            }
 
             // Loop-guard: count consecutive identical `(name::arguments)`
             // calls — whether they errored or succeeded. A model stuck
@@ -682,5 +723,18 @@ mod history_sanitizer_tests {
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0].role, ChatRole::User));
         assert!(matches!(out[1].role, ChatRole::Assistant));
+    }
+
+    #[test]
+    fn malformed_query_calls_are_unrenderable() {
+        // Missing `sql`, empty, or whitespace-only → suppressed (model mistake).
+        assert!(unrenderable_tool_call("call_query", "{}"));
+        assert!(unrenderable_tool_call("call_query", r#"{"sql": ""}"#));
+        assert!(unrenderable_tool_call("call_query", r#"{"sql": "   "}"#));
+        assert!(unrenderable_tool_call("run_query", "not json"));
+        // A real query → rendered as usual.
+        assert!(!unrenderable_tool_call("call_query", r#"{"sql": "SELECT 1"}"#));
+        // Non-query tools are never suppressed by this rule.
+        assert!(!unrenderable_tool_call("describe_table", "{}"));
     }
 }

@@ -6,6 +6,18 @@ export type AppTheme = 'one-dark' | 'latte' | 'monokai' | 'dracula' | 'nord' | '
 /** How a NULL / undefined cell renders in the data grid. */
 export type NullDisplay = 'blank' | 'null-text' | 'symbol';
 
+/** Behaviour of the connection rail (sidebar 1):
+ *  - `auto`: collapsed, expands on hover, collapses on leave (default).
+ *  - `expanded`: always expanded.
+ *  - `collapsed`: always collapsed (icons only). */
+export type RailMode = 'auto' | 'expanded' | 'collapsed';
+
+export const RAIL_MODE_OPTIONS: { value: RailMode; label: string; desc: string }[] = [
+  { value: 'auto', label: 'Auto', desc: 'Expand on hover, collapse on leave' },
+  { value: 'expanded', label: 'Expanded', desc: 'Always show labels' },
+  { value: 'collapsed', label: 'Collapsed', desc: 'Icons only' },
+];
+
 /** How hard the AI works per turn. A preset that expands into concrete knobs
  *  (tool-call budget, response length, and — where the provider supports it —
  *  reasoning effort). See `EFFORT_PRESETS`. */
@@ -46,6 +58,7 @@ export interface AppSettings {
   nullDisplay: NullDisplay;       // how NULL renders in the grid
   confirmDestructive: boolean;    // warn before DELETE/UPDATE/DROP
   restoreOnStartup: boolean;      // auto-reconnect pinned tiles on boot
+  connectionRailMode: RailMode;   // sidebar 1 behaviour: auto / expanded / collapsed
 
   // Editor (Monaco)
   editorFontSize: number;
@@ -55,6 +68,7 @@ export interface AppSettings {
   editorAutocomplete: boolean;
 
   // AI
+  aiStreamMode: boolean;          // stream the chat reply token-by-token (default off)
   persistAiApprovals: boolean;    // remember auto-approval flags across restarts
   aiMaxToolIterations: number;    // superseded by aiEffort/EFFORT_PRESETS; kept for back-compat
   aiMaxRepeatCalls: number;       // superseded by aiEffort/EFFORT_PRESETS; kept for back-compat
@@ -73,11 +87,13 @@ export const DEFAULTS: AppSettings = {
   nullDisplay: 'null-text',
   confirmDestructive: true,
   restoreOnStartup: true,
+  connectionRailMode: 'auto',
   editorFontSize: 13,
   editorTabSize: 2,
   editorWordWrap: true,
   editorMinimap: false,
   editorAutocomplete: true,
+  aiStreamMode: false,
   persistAiApprovals: false,
   aiMaxToolIterations: 50,
   aiMaxRepeatCalls: 50,

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Loader2, AlertCircle, Copy, CheckCircle2, Wrench, Check as CheckIcon, X as XIcon } from 'lucide-react';
+import { Loader2, AlertCircle, Copy, CheckCircle2, Wrench, Check as CheckIcon, X as XIcon, ChevronRight } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { approveToolCall, type ChatMessage as StoreChatMessage } from '../../state/ai';
 import { type QueryTier } from '../../lib/ai';
@@ -28,6 +28,25 @@ export function CopyButton({ text, className = '' }: { text: string; className?:
       {copied ? <CheckIcon className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
       {copied ? 'Copied' : 'Copy'}
     </button>
+  );
+}
+
+/** Collapsible section with a proper rotating chevron instead of the browser's
+ *  native `<details>` triangle. */
+function Disclosure({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div>
+      <button
+        type="button"
+        onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-0.5 cursor-pointer text-[10px] text-muted-foreground hover:text-foreground"
+      >
+        <ChevronRight className={`w-3 h-3 transition-transform ${open ? 'rotate-90' : ''}`} />
+        {label}
+      </button>
+      {open && children}
+    </div>
   );
 }
 
@@ -252,10 +271,7 @@ function ToolCardBody({
       {/* Fallback: raw JSON tucked inside a details so nothing is lost
           when the model adds a new tool we don't render specially. */}
       {!argSummary && !resultBlock && !resultErr && (parsedArgs || parsedResult !== undefined) && (
-        <details>
-          <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
-            Details
-          </summary>
+        <Disclosure label="Details">
           {parsedArgs && (
             <pre className="mt-1 text-[10px] font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1">
               {truncate(JSON.stringify(parsedArgs, null, 2), 400)}
@@ -266,7 +282,7 @@ function ToolCardBody({
               {truncate(typeof parsedResult === 'string' ? parsedResult : JSON.stringify(parsedResult, null, 2), 2000)}
             </pre>
           )}
-        </details>
+        </Disclosure>
       )}
     </div>
   );
@@ -441,10 +457,7 @@ function renderToolResult(name: string, result: unknown): ReactNode {
             {pk.length > 0 && <>, PK (<code className="font-mono text-foreground">{pk.join(', ')}</code>)</>}
             {fks.length > 0 && <>, {fks.length} FK</>}
           </div>
-          <details>
-            <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
-              Columns
-            </summary>
+          <Disclosure label="Columns">
             <div className="mt-1 flex flex-col gap-0.5 font-mono">
               {columns.map((c, i) => {
                 const n = typeof c.name === 'string' ? c.name : String(i);
@@ -461,7 +474,7 @@ function renderToolResult(name: string, result: unknown): ReactNode {
                 );
               })}
             </div>
-          </details>
+          </Disclosure>
         </div>
       );
     }
@@ -484,14 +497,11 @@ function renderToolResult(name: string, result: unknown): ReactNode {
             {cols.length > 0 && <> · {cols.length} col{cols.length === 1 ? '' : 's'}</>}
             {durationMs !== null && <> · {durationMs.toFixed(0)}ms</>}
           </div>
-          <details>
-            <summary className="cursor-pointer text-[10px] text-muted-foreground hover:text-foreground">
-              Preview
-            </summary>
+          <Disclosure label="Preview">
             <pre className="mt-1 font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1 max-h-48 overflow-auto text-[10.5px]">
               {truncate(JSON.stringify({ columns: cols, rows }, null, 2), 2000)}
             </pre>
-          </details>
+          </Disclosure>
         </div>
       );
     }
