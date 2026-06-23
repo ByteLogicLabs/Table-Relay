@@ -174,6 +174,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
   // Results pane height — user-resizable via the drag handle on its top edge.
   const [resultsHeight, setResultsHeight] = useState(() => seededSnapshot?.resultsHeight ?? 260);
   const [theme, setTheme] = useState<string>(pickMonacoTheme);
+  const [filterSearchText, setFilterSearchText] = useState('');
 
   // ── Auto-paging state ──────────────────────────────────────────────────────
   // When the user runs a plain SELECT (no LIMIT of its own), we transparently
@@ -407,7 +408,24 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
     setActiveResultEdit(null);
     setEditableStructure(null);
     setStructureError(null);
+    setFilterSearchText('');
   }, [activeResult?.sql, activeResultIndex]);
+
+  const filteredRows = useMemo(() => {
+    if (!activeResult || !activeResult.rows) return [];
+    const rowsWithIdx = activeResult.rows.map((row, idx) => ({ row, idx }));
+    if (!filterSearchText.trim()) return rowsWithIdx;
+    const term = filterSearchText.toLowerCase();
+    return rowsWithIdx.filter(({ row }) =>
+      row.some(val => {
+        if (val === null || val === undefined) return false;
+        if (typeof val === 'object') {
+          return JSON.stringify(val).toLowerCase().includes(term);
+        }
+        return String(val).toLowerCase().includes(term);
+      })
+    );
+  }, [activeResult?.rows, filterSearchText]);
   useEffect(() => {
     if (!queryAnalysis.editable) return;
     let cancelled = false;
@@ -686,14 +704,15 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
 
   const activeRowsAsObjects = useMemo(() => {
     if (!activeResult || activeResult.columns.length === 0) return [] as Record<string, unknown>[];
-    return activeResult.rows.map((row) => {
+    const rows = filteredRows.map(x => x.row);
+    return rows.map((row) => {
       const obj: Record<string, unknown> = {};
       activeResult.columns.forEach((col, idx) => {
         obj[col.name] = row[idx];
       });
       return obj;
     });
-  }, [activeResult]);
+  }, [activeResult, filteredRows]);
   const activeRowsAsJsonText = useMemo(() => JSON.stringify(activeRowsAsObjects, null, 2), [activeRowsAsObjects]);
 
   // Reset JSON-edit dirty/error whenever the underlying result changes —
@@ -1225,7 +1244,25 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                 actual tabular data. Statements that return no columns (UPDATE,
                 "executed successfully", errors) get no toolbar. */}
             {!isExecuting && !runError && activeResult && !activeResult.error && activeResult.columns.length > 0 && (
-              <div className="inline-flex items-center gap-1 shrink-0">
+              <div className="inline-flex items-center gap-2 shrink-0">
+                <div className="relative flex items-center w-48">
+                  <input
+                    type="text"
+                    placeholder="Search results..."
+                    value={filterSearchText}
+                    onChange={(e) => setFilterSearchText(e.target.value)}
+                    className="w-full h-5.5 px-2 pr-6 rounded border border-border bg-background/50 text-[11px] placeholder:text-muted-foreground/60 outline-none focus:ring-1 focus:ring-primary focus:border-primary text-foreground"
+                  />
+                  {filterSearchText && (
+                    <button
+                      type="button"
+                      onClick={() => setFilterSearchText('')}
+                      className="absolute right-1.5 text-muted-foreground/50 hover:text-muted-foreground focus:outline-none"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  )}
+                </div>
                 {supportsJsonResultView && (
                   <>
                     <Button
@@ -1293,9 +1330,20 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             </div>
           )}
           {runError && (
-            <div className="px-4 py-2 text-xs bg-destructive/10 text-destructive font-mono flex items-start gap-2 border-b border-destructive/30 shrink-0">
-              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-              <div className="min-w-0 wrap-break-word">{runError}</div>
+            <div className="px-4 py-2 text-xs bg-destructive/10 text-destructive font-mono flex items-start justify-between gap-2 border-b border-destructive/30 shrink-0 select-text">
+              <div className="flex items-start gap-2 min-w-0 flex-1">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 select-none" />
+                <div className="min-w-0 wrap-break-word select-text">{runError}</div>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5 shrink-0 text-destructive hover:bg-destructive/20 select-none"
+                onClick={() => { void copyText(runError, 'Error copied'); }}
+                title="Copy error message"
+              >
+                <Copy className="w-3 h-3" />
+              </Button>
             </div>
           )}
           {!runError && resultStatements.length > 1 && (
@@ -1332,9 +1380,20 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             const active = resultStatements[activeResultIndex];
             if (active.error) {
               return (
-                <div className="px-4 py-2 text-xs bg-destructive/10 text-destructive font-mono flex items-start gap-2 border-b border-destructive/30 shrink-0">
-                  <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                  <div className="min-w-0 wrap-break-word">{active.error}</div>
+                <div className="px-4 py-2 text-xs bg-destructive/10 text-destructive font-mono flex items-start justify-between gap-2 border-b border-destructive/30 shrink-0 select-text">
+                  <div className="flex items-start gap-2 min-w-0 flex-1">
+                    <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 select-none" />
+                    <div className="min-w-0 wrap-break-word select-text">{active.error}</div>
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-5 w-5 shrink-0 text-destructive hover:bg-destructive/20 select-none"
+                    onClick={() => { void copyText(active.error!, 'Error copied'); }}
+                    title="Copy error message"
+                  >
+                    <Copy className="w-3 h-3" />
+                  </Button>
                 </div>
               );
             }
@@ -1354,7 +1413,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                   {/* Action bar — hidden when clean and editable. Surfaces
                       only on parse error, unsaved changes, or to explain
                       why the result is read-only. */}
-                  {(jsonResultError || jsonResultDirty || (!resultIsEditable && editableReason)) && (
+                  {(jsonResultError || jsonResultDirty || (!resultIsEditable && editableReason) || !!filterSearchText.trim()) && (
                     <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-border bg-background/40 text-xs">
                       <div className="flex items-center gap-2 min-w-0 flex-1">
                         {jsonResultError ? (
@@ -1366,6 +1425,12 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                           <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border border-yellow-500/30 font-medium">
                             <span className="w-1.5 h-1.5 rounded-full bg-yellow-500" />
                             Unsaved changes
+                          </span>
+                        ) : !!filterSearchText.trim() ? (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-muted text-muted-foreground border border-border" title="Clear the search filter to edit query results.">
+                            <Lock className="w-3 h-3" />
+                            Read-only
+                            <span className="text-muted-foreground/70 truncate max-w-[420px]">— Cannot edit results when search filter is active</span>
                           </span>
                         ) : (
                           <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-muted text-muted-foreground border border-border" title={editableReason ?? ''}>
@@ -1453,7 +1518,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                         // Editing is gated on the same logic as the table
                         // view. Non-editable results stay read-only with a
                         // tooltip explanation in the action bar.
-                        readOnly: !resultIsEditable || jsonResultSaving,
+                        readOnly: !resultIsEditable || jsonResultSaving || !!filterSearchText.trim(),
                         minimap: { enabled: settings.editorMinimap },
                         fontFamily: EDITOR_FONT_FAMILY,
                         fontSize: settings.editorFontSize,
@@ -1569,7 +1634,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       </tr>
                     </thead>
                     <tbody>
-                      {active.rows.map((row, ri) => (
+                      {filteredRows.map(({ row, idx: ri }) => (
                         <tr key={ri} className="border-b border-border hover:bg-muted/20">
                           <td className="px-2 py-1 border-r border-border text-center text-muted-foreground bg-muted/10 whitespace-nowrap">
                             {ri + 1}
