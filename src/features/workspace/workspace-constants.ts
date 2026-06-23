@@ -1,4 +1,7 @@
-export const SIDEBAR_WIDTH = 256;
+export const SIDEBAR_WIDTH_KEY = "tablerelay:sidebarWidth:v1";
+export const SIDEBAR_MIN_WIDTH = 180;
+export const SIDEBAR_MAX_WIDTH = 600;
+export const SIDEBAR_DEFAULT_WIDTH = 256;
 export const CHAT_WIDTH_KEY = "tablerelay:chatWidth:v1";
 export const CHAT_MIN_WIDTH = 320;
 export const CHAT_MAX_WIDTH = 800;

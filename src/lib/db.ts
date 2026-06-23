@@ -555,6 +555,7 @@ export const db = {
     onStatement: (statement: StatementResult) => void,
     rowLimit?: number,
     schema?: string,
+    tabId?: string,
   ) => {
     const channel = new Channel<StatementResult>();
     channel.onmessage = onStatement;
@@ -564,8 +565,11 @@ export const db = {
       rowLimit,
       schema,
       onStatement: channel,
+      tabId,
     });
   },
+  cancelQuery: (connectionId: string, tabId: string) =>
+    invoke<boolean>('db_cancel_query', { connectionId, tabId }),
   insertRows: (connectionId: string, request: InsertRowsRequest) =>
     invoke<InsertRowsResult>('db_insert_rows', { connectionId, request }),
   updateRows: (connectionId: string, request: UpdateRowsRequest) =>

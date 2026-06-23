@@ -1089,7 +1089,7 @@ export default function Sidebar({
 
   if (!conn) {
     return (
-      <div className="w-64 shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border items-center justify-center gap-3 text-xs text-muted-foreground px-6 text-center">
+      <div className="w-full shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border items-center justify-center gap-3 text-xs text-muted-foreground px-6 text-center">
         <div>Connect to a server to start.</div>
         {connections.length > 0 ? (
           <Button
@@ -1119,7 +1119,7 @@ export default function Sidebar({
   const toggle = (k: SectionKey) => setCollapsed((c) => ({ ...c, [k]: !c[k] }));
 
   return (
-    <div className="w-64 shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border">
+    <div className="w-full shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border">
       {/* Quick-action toolbar */}
       <div
         data-tauri-drag-region
@@ -1477,6 +1477,7 @@ export default function Sidebar({
                               aria-selected={isSelected}
                               data-focused={isFocused || undefined}
                               tabIndex={-1}
+                              title={t.name}
                               className={
                                 rowCls(active) +
                                 // Only the ACTIVE table (the open data tab) gets a
@@ -1612,6 +1613,7 @@ export default function Sidebar({
                         <ContextMenuTrigger>
                           <button
                             className={rowCls(active)}
+                            title={v.name}
                             onClick={() =>
                               void openViewDefinition(
                                 conn.id,
@@ -1687,7 +1689,7 @@ export default function Sidebar({
                       .map((p) => `${p.mode ?? "IN"} ${p.name}:${p.dataType}`)
                       .join(", ");
                     const ret = r.returns ? ` → ${r.returns}` : "";
-                    const tooltip = `${r.kind}(${sig})${ret}`;
+                    const tooltip = `${r.kind} ${r.name}(${sig})${ret}`;
                     const routineKind = (
                       r.kind.toLowerCase() === "function"
                         ? "function"
@@ -1832,7 +1834,7 @@ export default function Sidebar({
                 {fTriggers.map((t, i) => {
                     const active = matchesActive("trigger", t.name);
                     const meta = [t.timing, t.event].filter(Boolean).join(" ");
-                    const tooltip = `${t.timing} ${t.event} ON ${t.table}`;
+                    const tooltip = `Trigger ${t.name}: ${t.timing} ${t.event} ON ${t.table}`;
                     return (
                       <ContextMenu key={`tg-${t.name}-${t.table}-${i}`}>
                         <ContextMenuTrigger>

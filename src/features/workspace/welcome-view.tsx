@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { ConnectionProfile } from '../../types';
 import { Button, buttonVariants } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -41,6 +41,19 @@ export default function WelcomeView({
   const connState = useConnections();
 
   const [viewMode, setViewMode] = useState<'card' | 'list'>('card');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        searchInputRef.current?.select();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
 
   useEffect(() => {
     void (async () => {
@@ -135,6 +148,7 @@ export default function WelcomeView({
             <div className="relative w-72">
               <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
               <Input
+                ref={searchInputRef}
                 placeholder="Search connections..."
                 className="pl-9 h-9 bg-muted/50 border-none focus-visible:ring-1"
                 value={search}
@@ -199,11 +213,10 @@ export default function WelcomeView({
                 title="Card view"
                 aria-label="Card view"
                 aria-pressed={viewMode === 'card'}
-                className={`flex items-center justify-center h-7 w-7 rounded transition-colors ${
-                  viewMode === 'card'
+                className={`flex items-center justify-center h-7 w-7 rounded transition-colors ${viewMode === 'card'
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
-                }`}
+                  }`}
               >
                 <LayoutGrid className="w-4 h-4" />
               </button>
@@ -213,11 +226,10 @@ export default function WelcomeView({
                 title="List view"
                 aria-label="List view"
                 aria-pressed={viewMode === 'list'}
-                className={`flex items-center justify-center h-7 w-7 rounded transition-colors ${
-                  viewMode === 'list'
+                className={`flex items-center justify-center h-7 w-7 rounded transition-colors ${viewMode === 'list'
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
-                }`}
+                  }`}
               >
                 <List className="w-4 h-4" />
               </button>
@@ -309,7 +321,11 @@ export default function WelcomeView({
                         <Button
                           variant="ghost"
                           size="icon"
-                          className={`h-8 w-8 hover:bg-transparent ${conn.isFavorite ? 'text-amber-500 hover:text-amber-600' : 'hidden! group-hover:inline-flex! focus:inline-flex! text-muted-foreground hover:text-amber-500'}`}
+                          className={`h-8 hover:bg-transparent transition-all duration-300 ease-out ${
+                            conn.isFavorite
+                              ? 'w-8 opacity-100 scale-100 pointer-events-auto text-amber-500 hover:text-amber-600'
+                              : 'w-0 opacity-0 scale-75 pointer-events-none overflow-hidden group-hover:w-8 group-hover:opacity-100 group-hover:scale-100 group-hover:pointer-events-auto focus:w-8 focus:opacity-100 focus:scale-100 focus:pointer-events-auto text-muted-foreground hover:text-amber-500'
+                          }`}
                           onClick={(e) => { e.stopPropagation(); onEditConnection({ ...conn, isFavorite: !conn.isFavorite }); }}
                           title={conn.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}
                         >
@@ -317,7 +333,11 @@ export default function WelcomeView({
                         </Button>
                         <DropdownMenu>
                           <DropdownMenuTrigger
-                            className={buttonVariants({ variant: 'ghost', size: 'icon', className: 'h-8 w-8 hidden! group-hover:inline-flex! focus:inline-flex! data-popup-open:inline-flex!' })}
+                            className={buttonVariants({
+                              variant: 'ghost',
+                              size: 'icon',
+                              className: 'h-8 w-0 opacity-0 scale-75 pointer-events-none overflow-hidden transition-all duration-300 ease-out group-hover:w-8 group-hover:opacity-100 group-hover:scale-100 group-hover:pointer-events-auto focus:w-8 focus:opacity-100 focus:scale-100 focus:pointer-events-auto data-popup-open:w-8 data-popup-open:opacity-100 data-popup-open:scale-100 data-popup-open:pointer-events-auto'
+                            })}
                             onClick={(e) => e.stopPropagation()}
                           >
                             <MoreVertical className="w-4 h-4" />
@@ -383,7 +403,11 @@ export default function WelcomeView({
                         <Button
                           variant="ghost"
                           size="icon"
-                          className={`h-8 w-8 hover:bg-transparent transition-colors duration-200 ${conn.isFavorite ? 'text-amber-500 hover:text-amber-600' : 'hidden! group-hover:inline-flex! text-muted-foreground hover:text-amber-500'}`}
+                          className={`h-8 hover:bg-transparent transition-all duration-300 ease-out ${
+                            conn.isFavorite
+                              ? 'w-8 opacity-100 scale-100 pointer-events-auto text-amber-500 hover:text-amber-600'
+                              : 'w-0 opacity-0 scale-75 pointer-events-none overflow-hidden group-hover:w-8 group-hover:opacity-100 group-hover:scale-100 group-hover:pointer-events-auto focus:w-8 focus:opacity-100 focus:scale-100 focus:pointer-events-auto text-muted-foreground hover:text-amber-500'
+                          }`}
                           onClick={(e) => { e.stopPropagation(); onEditConnection({ ...conn, isFavorite: !conn.isFavorite }); }}
                           title={conn.isFavorite ? 'Remove from Favorites' : 'Add to Favorites'}
                         >
@@ -394,7 +418,11 @@ export default function WelcomeView({
                             its menu is open. */}
                         <DropdownMenu>
                           <DropdownMenuTrigger
-                            className={buttonVariants({ variant: 'ghost', size: 'icon', className: 'h-8 w-8 hidden! group-hover:inline-flex! focus:inline-flex! data-popup-open:inline-flex!' })}
+                            className={buttonVariants({
+                              variant: 'ghost',
+                              size: 'icon',
+                              className: 'h-8 w-0 opacity-0 scale-75 pointer-events-none overflow-hidden transition-all duration-300 ease-out group-hover:w-8 group-hover:opacity-100 group-hover:scale-100 group-hover:pointer-events-auto focus:w-8 focus:opacity-100 focus:scale-100 focus:pointer-events-auto data-popup-open:w-8 data-popup-open:opacity-100 data-popup-open:scale-100 data-popup-open:pointer-events-auto'
+                            })}
                             onClick={(e) => e.stopPropagation()}
                           >
                             <MoreVertical className="w-4 h-4" />
