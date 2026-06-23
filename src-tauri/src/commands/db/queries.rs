@@ -41,6 +41,7 @@ pub async fn db_run_query_stream(
     on_statement: Channel<StatementResult>,
     factories: State<'_, Arc<FactoryRegistry>>,
     registry: State<'_, Arc<Registry>>,
+    tab_id: Option<String>,
 ) -> Result<QueryResult, AdapterError> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<StatementResult>();
     let forwarder = tokio::spawn(async move {
@@ -51,7 +52,13 @@ pub async fn db_run_query_stream(
         }
     });
 
-    let result = with_retry(&app, &registry, &factories, &connection_id, |a| {
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+
+    if let Some(ref tab_id_str) = tab_id {
+        registry.register_query(connection_id.clone(), tab_id_str.clone(), cancel_tx).await;
+    }
+
+    let query_fut = with_retry(&app, &registry, &factories, &connection_id, |a| {
         let statement = statement.clone();
         let schema = schema.clone();
         let sink = tx.clone();
@@ -59,12 +66,31 @@ pub async fn db_run_query_stream(
             a.execute_raw_scoped_stream(&statement, row_limit, schema.as_deref(), sink)
                 .await
         }
-    })
-    .await;
+    });
+
+    let result = tokio::select! {
+        res = query_fut => res,
+        _ = &mut cancel_rx => {
+            Err(AdapterError::Other("Query was cancelled by user".to_string()))
+        }
+    };
+
+    if let Some(ref tab_id_str) = tab_id {
+        registry.remove_query(&connection_id, tab_id_str).await;
+    }
 
     drop(tx);
     let _ = forwarder.await;
     result
+}
+
+#[tauri::command]
+pub async fn db_cancel_query(
+    connection_id: String,
+    tab_id: String,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<bool, AdapterError> {
+    Ok(registry.cancel_query(&connection_id, &tab_id).await)
 }
 
 /// Paginated + filtered + sorted rows from one table. Identifiers are

@@ -426,6 +426,7 @@ pub fn run() {
             commands::db::db_list_relations,
             commands::db::db_run_query,
             commands::db::db_run_query_stream,
+            commands::db::db_cancel_query,
             commands::db::db_insert_rows,
             commands::db::db_update_rows,
             commands::db::db_modify_indexes,

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download } from 'lucide-react';
+import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, Square } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -771,6 +771,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
         },
         undefined,
         effectiveSchema,
+        tabId,
       );
       if (collected.length === 0 && finalResult.statements.length > 0) {
         for (const s of finalResult.statements) {
@@ -870,6 +871,20 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
     }
     void handleRun(query);
   };
+
+  const handleCancelQuery = async () => {
+    if (!tabId) {
+      toast.error('Cannot cancel query: Tab ID is missing.');
+      return;
+    }
+    try {
+      await db.cancelQuery(connection.id, tabId);
+    } catch (err) {
+      const msg = isDbError(err) ? err.message : String(err);
+      toast.error(`Cancellation failed: ${msg}`);
+    }
+  };
+
   // Cmd/Ctrl+Enter runs the current statement (the primary action);
   // Cmd/Ctrl+Shift+Enter runs everything.
   handleRunRef.current = () => { handleRunCurrent(); };
@@ -1066,11 +1081,18 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
     <div className="flex flex-col h-full bg-background">
       {/* Toolbar */}
       <div className="h-12 border-b border-border flex items-center px-4 bg-muted/10 gap-2">
-        <Button size="sm" onClick={handleRunCurrent} disabled={isExecuting} className="bg-green-600 hover:bg-green-700 text-white" title="Run the statement under the cursor (or selection)">
-          {isExecuting ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-          Run Current
-          <kbd className="inline-flex h-4 items-center rounded border border-white/30 bg-white/15 px-1 text-[10px] font-medium font-sans">{RUN_SHORTCUT}</kbd>
-        </Button>
+        {isExecuting ? (
+          <Button size="sm" onClick={handleCancelQuery} className="bg-red-600 hover:bg-red-700 text-white gap-1.5" title="Stop current query execution">
+            <Square className="w-3.5 h-3.5 fill-current" />
+            Stop Query
+          </Button>
+        ) : (
+          <Button size="sm" onClick={handleRunCurrent} className="bg-green-600 hover:bg-green-700 text-white gap-1.5" title="Run the statement under the cursor (or selection)">
+            <Play className="w-3.5 h-3.5 fill-current" />
+            Run Current
+            <kbd className="inline-flex h-4 items-center rounded border border-white/30 bg-white/15 px-1 text-[10px] font-medium font-sans">{RUN_SHORTCUT}</kbd>
+          </Button>
+        )}
         <Button variant="outline" size="sm" onClick={() => { void handleRun(); }} disabled={isExecuting} className="border-emerald-600/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-700 dark:hover:text-emerald-300" title="Run all statements in the editor">
           <FastForward className="w-3.5 h-3.5" />
           Run All
