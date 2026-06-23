@@ -368,7 +368,7 @@ export default function TabsShell({
           title="New query"
           aria-label="New query"
         >
-          <Plus className="w-4 h-4" />
+          <Terminal className="w-4 h-4" />
         </Button>
       </div>
 
