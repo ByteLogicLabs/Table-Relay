@@ -73,6 +73,7 @@ export default function ConnectionManagerDialog({
           </div>
           <Button
             size="sm"
+            className="h-9"
             onClick={() => {
               onOpenChange(false);
               onCreateNew();

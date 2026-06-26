@@ -343,47 +343,16 @@ function UnlockedApp() {
   };
 
   const handleAddConnection = async (conn: ConnectionProfile) => {
-    // Save first — if that fails we never reach the connect step. The
-    // saved record carries the canonical id (persisted + validated by
-    // the store), which is what `connectAndLoad` needs.
-    let savedId: string;
+    // Save only — creating a connection does NOT auto-connect. The user can
+    // connect when they're ready via the connect action; this avoids a slow /
+    // failing test-connect on save. `saveConnectionRecord` refreshes the list
+    // so the new row appears immediately.
     try {
-      savedId = await saveConnectionRecord(conn);
+      await saveConnectionRecord(conn);
+      toast.success(`Saved ${conn.name}`);
     } catch (e) {
       toast.error(`Failed to save connection: ${String(e)}`);
       throw e;
-    }
-
-    // Auto-connect the freshly-saved profile — that's what "Save & Connect"
-    // in the modal implies. Keep the failure path noisy but non-fatal: the
-    // row is saved and visible in the sidebar, so the user can retry via
-    // the connect action without re-entering credentials.
-    //
-    // Push the id into `activeConnectionIds` BEFORE awaiting `connectAndLoad`
-    // so the sidebar mounts for this connection immediately and sees
-    // `isConnecting=true` → renders the "Connecting to X…" spinner. If we
-    // wait for `connectAndLoad` to resolve first, fast adapters (SQLite,
-    // local MySQL) finish the connect + first schema fetch before the
-    // sidebar has a chance to render any loading UI, and the user perceives
-    // an unexplained blank pane for those seconds.
-    setActiveConnectionIds(prev => (prev.includes(savedId) ? prev : [...prev, savedId]));
-    const toastId = toast.loading(`Connecting to ${conn.name}…`);
-    connectingToastIds.current.set(savedId, toastId);
-    try {
-      const meta = await connectAndLoad(savedId);
-      connectingToastIds.current.delete(savedId);
-      if (!meta) {
-        toast.dismiss(toastId);
-        setActiveConnectionIds(prev => prev.filter(cId => cId !== savedId));
-        return;
-      }
-      toast.success(`Connected to ${conn.name}`, { id: toastId });
-    } catch (err) {
-      connectingToastIds.current.delete(savedId);
-      toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
-      // Remove the optimistically-added id so handleEditConnection doesn't
-      // treat this as an active connection and attempt a spurious reconnect.
-      setActiveConnectionIds(prev => prev.filter(cId => cId !== savedId));
     }
   };
 

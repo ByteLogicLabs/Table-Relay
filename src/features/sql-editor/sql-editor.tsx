@@ -1101,7 +1101,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
       {/* Toolbar */}
       <div className="h-12 border-b border-border flex items-center px-4 bg-muted/10 gap-2">
         {isExecuting ? (
-          <Button size="sm" onClick={handleCancelQuery} className="bg-red-600 hover:bg-red-700 text-white gap-1.5" title="Stop current query execution">
+          <Button size="sm" onClick={handleCancelQuery} className="bg-destructive hover:bg-destructive/90 text-destructive-foreground gap-1.5" title="Stop current query execution">
             <Square className="w-3.5 h-3.5 fill-current" />
             Stop Query
           </Button>

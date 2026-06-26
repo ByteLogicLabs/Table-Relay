@@ -286,26 +286,6 @@ export default function WorkspaceView({
     }
     return [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   }, [connections]);
-  // Grey out the connection-dependent native menu items (Edit Current / Open
-  // Database / Import Data / Export Data) whenever no connection is focused.
-  // They all act on the focused connection, so on the home screen they would
-  // only toast an error — disabling them is the honest affordance.
-  useEffect(() => {
-    const hasFocus = focusedConnectionId != null;
-    void invoke("set_connection_menu_enabled", {
-      enabled: hasFocus,
-    }).catch(() => {
-      /* menu state is best-effort; the listeners still guard with a toast */
-    });
-    // Hide the whole Connection submenu on the home screen — the home view
-    // already surfaces Connect / New / List Connections, so it's redundant
-    // there. Show it again once a connection is focused.
-    void invoke("set_connection_menu_visible", {
-      visible: hasFocus,
-    }).catch(() => {
-      /* best-effort; submenu just stays in its current state on failure */
-    });
-  }, [focusedConnectionId]);
   const openEditConnection = (
     connection: ConnectionProfile,
     returnToManager = false,
@@ -535,6 +515,26 @@ export default function WorkspaceView({
   useEffect(() => {
     void refreshRail();
   }, []);
+
+  // Native "Connection" menu: show the whole submenu, and enable its
+  // connection-dependent items, whenever a connection is actually OPEN — not
+  // just when one was explicitly picked. `focusedConnectionId` alone missed the
+  // common cases (connecting via a rail tile, session restore), which left the
+  // menu hidden forever. The active-connections store is the real signal.
+  const hasOpenConnection =
+    connState.activeById.size > 0 || focusedConnectionId != null;
+  useEffect(() => {
+    void invoke("set_connection_menu_enabled", { enabled: hasOpenConnection }).catch(
+      () => {
+        /* best-effort; listeners still guard with a toast */
+      },
+    );
+    void invoke("set_connection_menu_visible", { visible: hasOpenConnection }).catch(
+      () => {
+        /* best-effort; submenu just stays in its current state on failure */
+      },
+    );
+  }, [hasOpenConnection]);
 
   const appendQueryLog = (
     entry: Omit<QueryLogEntry, "id" | "timestamp"> & {

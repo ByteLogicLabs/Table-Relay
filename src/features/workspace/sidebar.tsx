@@ -1111,6 +1111,7 @@ export default function Sidebar({
           onConnect={onPickConnection}
           onEditConnection={onEditConnection}
           onDeleteConnection={onDeleteConnection}
+          onCreateNew={onOpenNewServer}
         />
       </div>
     );
@@ -1272,6 +1273,7 @@ export default function Sidebar({
         onConnect={onPickConnection}
         onEditConnection={onEditConnection}
         onDeleteConnection={onDeleteConnection}
+        onCreateNew={onOpenNewServer}
       />
 
       <ConnectionManagerDialog

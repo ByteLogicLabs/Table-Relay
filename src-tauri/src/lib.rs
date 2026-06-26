@@ -580,6 +580,7 @@ fn set_query_menu_visible(
 /// `set_query_menu_visible`).
 #[tauri::command]
 fn set_connection_menu_visible(
+    app: tauri::AppHandle,
     visible: bool,
     state: tauri::State<'_, ConnectionMenu>,
 ) -> Result<(), String> {
@@ -588,9 +589,14 @@ fn set_connection_menu_visible(
         return Ok(()); // already in the requested state — nothing to do
     }
     if visible {
+        // Clamp the index so a wrong constant can never make insert fail (which,
+        // swallowed by the frontend's `.catch`, made the menu silently never
+        // appear). Append at the end as a safe fallback.
+        let len = state.menu.items().map(|i| i.len()).unwrap_or(0);
+        let idx = state.index.min(len);
         state
             .menu
-            .insert(&state.submenu as &dyn IsMenuItem<Wry>, state.index)
+            .insert(&state.submenu as &dyn IsMenuItem<Wry>, idx)
             .map_err(|e| e.to_string())?;
     } else {
         state
@@ -598,6 +604,11 @@ fn set_connection_menu_visible(
             .remove(&state.submenu as &dyn IsMenuItem<Wry>)
             .map_err(|e| e.to_string())?;
     }
+    // macOS quirk: mutating the TOP-LEVEL menu bar after `set_menu` doesn't
+    // refresh the live NSMenu — the change is recorded but not shown. Re-applying
+    // the menu forces the menu bar to redraw. (Submenu mutations like the query
+    // File items don't need this; top-level ones do.) Harmless on other OSes.
+    app.set_menu(state.menu.clone()).map_err(|e| e.to_string())?;
     *shown = visible;
     Ok(())
 }
