@@ -728,10 +728,10 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
               {isSaving ? (
                 <>
                   <Loader2 className="w-3 h-3 mr-1.5 animate-spin" />
-                  {initialData ? 'Saving…' : 'Connecting…'}
+                  Saving…
                 </>
               ) : (
-                initialData ? 'Save' : 'Save & Connect'
+                'Save'
               )}
             </Button>
           </div>
@@ -815,8 +815,13 @@ function FieldControl({
   const help = field.help ? (
     <div className="text-xs text-muted-foreground">{field.help}</div>
   ) : null;
+  // `self-start` + `content-start`: when this cell sits in a 2-col row next to a
+  // field WITHOUT help text, the parent grid would stretch both cells to equal
+  // height and the inner auto-rows would redistribute the slack — pushing this
+  // cell's input/select out of line with its neighbour. Pinning to the top keeps
+  // label + input aligned across the row regardless of help text.
   const container = (input: React.ReactNode) => (
-    <div className="grid gap-2">
+    <div className="grid gap-2 content-start self-start">
       <label className="text-sm font-medium">{label}</label>
       {input}
       {help}

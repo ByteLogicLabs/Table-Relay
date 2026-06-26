@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Search, Edit, Trash2 } from 'lucide-react';
+import { Search, Edit, Trash2, Plus } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
+import { Button } from '../../components/ui/button';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -22,6 +23,8 @@ interface ConnectPickerDialogProps {
   onConnect: (connectionId: string) => void;
   onEditConnection: (connection: ConnectionProfile) => void;
   onDeleteConnection: (connectionId: string) => void;
+  /** Open the new-connection modal. The picker closes first. */
+  onCreateNew: () => void;
 }
 
 export default function ConnectPickerDialog({
@@ -31,6 +34,7 @@ export default function ConnectPickerDialog({
   onConnect,
   onEditConnection,
   onDeleteConnection,
+  onCreateNew,
 }: ConnectPickerDialogProps) {
   const [query, setQuery] = useState('');
   // Keyboard-highlighted row index into `filtered`. Arrow up/down move it,
@@ -78,6 +82,12 @@ export default function ConnectPickerDialog({
     onOpenChange(false);
     setQuery('');
     onDeleteConnection(conn.id);
+  };
+
+  const createNew = () => {
+    onOpenChange(false);
+    setQuery('');
+    onCreateNew();
   };
 
   return (
@@ -201,6 +211,15 @@ export default function ConnectPickerDialog({
           )}
         </div>
 
+        <div className="border-t border-border p-2 flex justify-end">
+          <Button
+            size="sm"
+            className="h-9 text-sm"
+            onClick={createNew}
+          >
+            <Plus className="w-4 h-4 mr-2" /> New connection
+          </Button>
+        </div>
       </DialogContent>
     </Dialog>
   );

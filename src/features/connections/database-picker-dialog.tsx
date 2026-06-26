@@ -27,6 +27,12 @@ const DEFAULT_LABEL = 'Default (Server Pick)';
 // CLI tools accept without quoting.
 const NAME_RE = /^[A-Za-z0-9_-]+$/;
 
+// Per-connection cache of the database catalog (Postgres/Mongo `list_databases`).
+// Lets the picker render instantly on reopen while a fresh list loads in the
+// background. Module-level so it survives dialog unmount within a session;
+// invalidated implicitly when the app restarts. Keyed by connection id.
+const dbCatalogCache = new Map<string, string[]>();
+
 export interface DatabasePickerDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -51,6 +57,9 @@ export default function DatabasePickerDialog({
   const [creating, setCreating] = useState(false);
   const [pgDatabases, setPgDatabases] = useState<string[] | null>(null);
   const [pgLoading, setPgLoading] = useState(false);
+  // True while a background refresh runs over already-shown cached data (so the
+  // list stays visible — no full-screen spinner — but we can hint "Refreshing…").
+  const [pgRefreshing, setPgRefreshing] = useState(false);
   const listRef = useRef<HTMLDivElement | null>(null);
 
   // Adapters that expose a discoverable database catalog (Postgres'
@@ -82,13 +91,26 @@ export default function DatabasePickerDialog({
       return;
     }
     let cancelled = false;
-    setPgLoading(true);
+    // Show cached databases instantly, then refresh in the background. The
+    // spinner only appears on the FIRST load for this connection (no cache);
+    // on reopen the cached list shows immediately and updates silently when the
+    // fresh fetch resolves.
+    const cached = dbCatalogCache.get(connection.id);
+    if (cached) setPgDatabases(cached);
+    setPgLoading(!cached);
+    setPgRefreshing(!!cached);
     db.listDatabases(connection.id)
-      .then(names => { if (!cancelled) setPgDatabases(names); })
-      .catch(err => {
-        if (!cancelled) toast.error(isDbError(err) ? err.message : String(err));
+      .then(names => {
+        if (cancelled) return;
+        dbCatalogCache.set(connection.id, names);
+        setPgDatabases(names);
       })
-      .finally(() => { if (!cancelled) setPgLoading(false); });
+      .catch(err => {
+        // Only surface the error if we had nothing cached to show; a background
+        // refresh failure shouldn't blow away a working list with a toast.
+        if (!cancelled && !cached) toast.error(isDbError(err) ? err.message : String(err));
+      })
+      .finally(() => { if (!cancelled) { setPgLoading(false); setPgRefreshing(false); } });
     return () => { cancelled = true; };
   }, [open, usesDatabaseCatalog, connection?.id]);
 
@@ -249,6 +271,7 @@ export default function DatabasePickerDialog({
         // and let them double-click to switch the pool.
         try {
           const names = await db.listDatabases(connection.id);
+          dbCatalogCache.set(connection.id, names);
           setPgDatabases(names);
         } catch {
           /* non-fatal */
@@ -380,7 +403,12 @@ export default function DatabasePickerDialog({
           /* ---------- Picker view ---------- */
           <>
             <div className="px-4 pt-4 pb-3 border-b border-border/50 text-center">
-              <div className="text-sm font-medium">Open database</div>
+              <div className="text-sm font-medium flex items-center justify-center gap-1.5">
+                Open database
+                {pgRefreshing && (
+                  <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />
+                )}
+              </div>
             </div>
 
             <div className="p-3 border-b border-border/50">
