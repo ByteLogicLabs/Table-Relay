@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Loader2, FileDown, FileUp, AlertTriangle, ShieldAlert, Search, ChevronRight, ChevronLeft, Lock } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -374,6 +374,62 @@ export default function ConnectionTransferDialog({
 
   const isExport = mode === 'export';
 
+  // Factory: per-source click in the source list. Closes over the source `s`.
+  const makeHandleSelectSource = useCallback(
+    (s: ImportSource) => () => {
+      clearSourceState();
+      setSourceId(s.id);
+      // Jump straight to the OS file picker — one click instead of
+      // two. (TablePlus still shows its password step afterwards.)
+      void handlePickImportFile(s);
+    },
+    [handlePickImportFile],
+  );
+
+  const handleBackToSources = useCallback(() => {
+    clearSourceState();
+    setSourceId(null);
+  }, []);
+
+  const handlePickImportFileClick = useCallback(() => {
+    void handlePickImportFile();
+  }, [handlePickImportFile]);
+
+  const handlePasswordChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setPassword(e.target.value);
+  }, []);
+
+  const handlePasswordKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') void handleDecryptTablePlus();
+  }, [handleDecryptTablePlus]);
+
+  const handleDecryptClick = useCallback(() => {
+    void handleDecryptTablePlus();
+  }, [handleDecryptTablePlus]);
+
+  const handleFilterChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setFilter(e.target.value);
+  }, []);
+
+  // Factory: per-row toggle in the checklist. Closes over the row index `i`.
+  const makeHandleToggle = useCallback((i: number) => () => toggle(i), []);
+
+  const handleCancel = useCallback(() => {
+    onOpenChange(false);
+  }, [onOpenChange]);
+
+  const handleConfirm = useCallback(() => {
+    void (isExport ? handleExport() : handleImport());
+  }, [isExport, handleExport, handleImport]);
+
+  const handlePwSubmit = useCallback((pw: string) => {
+    resolvePassword(pw);
+  }, [resolvePassword]);
+
+  const handlePwOpenChange = useCallback((v: boolean) => {
+    if (!v) resolvePassword(null);
+  }, [resolvePassword]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-2xl w-[92vw] flex flex-col max-h-[70vh]">
@@ -392,13 +448,7 @@ export default function ConnectionTransferDialog({
                 <button
                   key={s.id}
                   type="button"
-                  onClick={() => {
-                    clearSourceState();
-                    setSourceId(s.id);
-                    // Jump straight to the OS file picker — one click instead of
-                    // two. (TablePlus still shows its password step afterwards.)
-                    void handlePickImportFile(s);
-                  }}
+                  onClick={makeHandleSelectSource(s)}
                   className="w-full flex items-center gap-3 rounded-md border border-border px-3 py-2.5 text-left hover:bg-muted/50 transition-colors"
                 >
                   <div className="min-w-0 flex-1">
@@ -416,10 +466,7 @@ export default function ConnectionTransferDialog({
             <>
               <button
                 type="button"
-                onClick={() => {
-                  clearSourceState();
-                  setSourceId(null);
-                }}
+                onClick={handleBackToSources}
                 className="shrink-0 flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground self-start"
               >
                 <ChevronLeft className="w-3.5 h-3.5" /> Choose a different source
@@ -440,7 +487,7 @@ export default function ConnectionTransferDialog({
                     size="sm"
                     variant="outline"
                     className="h-7 text-xs gap-1.5"
-                    onClick={() => void handlePickImportFile()}
+                    onClick={handlePickImportFileClick}
                     disabled={busy}
                   >
                     <FileUp className="w-3.5 h-3.5" />
@@ -458,14 +505,14 @@ export default function ConnectionTransferDialog({
                           className="pl-8 h-8 text-sm"
                           placeholder="Export password"
                           value={password}
-                          onChange={(e) => setPassword(e.target.value)}
-                          onKeyDown={(e) => { if (e.key === 'Enter') void handleDecryptTablePlus(); }}
+                          onChange={handlePasswordChange}
+                          onKeyDown={handlePasswordKeyDown}
                         />
                       </div>
                       <Button
                         size="sm"
                         className="h-7 text-xs"
-                        onClick={() => void handleDecryptTablePlus()}
+                        onClick={handleDecryptClick}
                         disabled={busy}
                       >
                         {busy && <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />}
@@ -507,7 +554,7 @@ export default function ConnectionTransferDialog({
                   placeholder="Filter connections…"
                   className="pl-8 h-8 text-sm"
                   value={filter}
-                  onChange={(e) => setFilter(e.target.value)}
+                  onChange={handleFilterChange}
                 />
               </div>
               <div className="shrink-0 flex items-center justify-between text-xs text-muted-foreground px-1">
@@ -530,7 +577,7 @@ export default function ConnectionTransferDialog({
                   <button
                     key={i}
                     type="button"
-                    onClick={() => toggle(i)}
+                    onClick={makeHandleToggle(i)}
                     className={cn(
                       'w-full flex items-center gap-3 px-3 py-2 text-left transition-colors',
                       selected.has(i) ? 'bg-primary/10 hover:bg-primary/15' : 'hover:bg-muted/50',
@@ -562,13 +609,13 @@ export default function ConnectionTransferDialog({
               connections, or an import with connections loaded from a file.
               Always shown so the dialog keeps a consistent footer. */}
           <div className="shrink-0 flex justify-end gap-2 pt-1">
-            <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} disabled={busy}>
+            <Button variant="ghost" size="sm" onClick={handleCancel} disabled={busy}>
               Cancel
             </Button>
             <Button
               size="sm"
               disabled={busy || selected.size === 0}
-              onClick={() => void (isExport ? handleExport() : handleImport())}
+              onClick={handleConfirm}
             >
               {busy && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
               {isExport ? `Export ${selected.size || ''}`.trim() : `Import ${selected.size || ''}`.trim()}
@@ -583,8 +630,8 @@ export default function ConnectionTransferDialog({
           mode={pwPrompt.mode}
           title={pwPrompt.title}
           description={pwPrompt.description}
-          onSubmit={(pw) => resolvePassword(pw)}
-          onOpenChange={(v) => { if (!v) resolvePassword(null); }}
+          onSubmit={handlePwSubmit}
+          onOpenChange={handlePwOpenChange}
         />
       )}
     </Dialog>

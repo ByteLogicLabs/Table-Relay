@@ -1,4 +1,4 @@
-import { forwardRef, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from 'react';
 import { ConnectionProfile } from '../../types';
 import { db, isDbError, type IndexKeyValue, type IndexSpecPayload, type TableStructure } from '../../lib/db';
 import { ensureTableStructure, refreshTableStructure } from '../../state/connections';
@@ -464,6 +464,16 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
     save: doSave,
   }), [dirty, structure, columns, indexes, foreignKeys, connection.id, effectiveSchema, tableName, isNew, newTableName]);
 
+  const handleNewTableNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setNewTableName(e.target.value), []);
+  const handleSaveClick = useCallback(async () => {
+    setLocalSaving(true);
+    try {
+      await doSave();
+    } finally {
+      setLocalSaving(false);
+    }
+  }, [doSave]);
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -516,6 +526,17 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
       return [{ ...c, pendingDelete: !c.pendingDelete }];
     }));
   };
+  // Per-row handler factories — the map closes over the column id; these
+  // produce the named handlers without inlining arrows in JSX.
+  const makeColumnNameCommit = (id: string) => (v: string) => updateColumn(id, { name: v });
+  const makeColumnDataTypeCommit = (id: string) => (v: string) => updateColumn(id, { dataType: v });
+  const makeColumnNullableChange = (id: string) => (v: string) => updateColumn(id, { nullable: v === 'YES' });
+  const makeColumnDefaultCommit = (id: string) => (v: string) => updateColumn(id, { defaultValue: v === '' ? null : v });
+  const makeColumnKeyChange = (id: string) => (v: string) => updateColumn(id, { key: v as ColumnKey });
+  const makeColumnExtraCommit = (id: string) => (v: string) => updateColumn(id, { extra: v === 'NONE' ? '' : v });
+  const makeColumnCharsetCommit = (id: string) => (v: string) => updateColumn(id, { characterSet: v });
+  const makeColumnCollationCommit = (id: string) => (v: string) => updateColumn(id, { collation: v });
+  const makeToggleDeleteColumn = (id: string) => () => toggleDeleteColumn(id);
 
   const updateIndex = (id: string, patch: Partial<DraftIndex>) => {
     if (!schemaEditable) return;
@@ -541,6 +562,12 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
       return [{ ...i, pendingDelete: !i.pendingDelete }];
     }));
   };
+  // Per-row handler factories for the indexes table.
+  const makeIndexNameCommit = (id: string) => (v: string) => updateIndex(id, { name: v });
+  const makeIndexAlgorithmChange = (id: string) => (v: string) => updateIndex(id, { algorithm: v as IndexAlgorithm });
+  const makeIndexUniqueChange = (id: string) => (v: string) => updateIndex(id, { isUnique: v === 'TRUE' });
+  const makeIndexColumnsCommit = (id: string) => (v: string) => updateIndex(id, { columns: v });
+  const makeToggleDeleteIndex = (id: string) => () => toggleDeleteIndex(id);
 
   const upsertFk = (colName: string, patch: Omit<DraftForeignKey, 'id' | 'pendingDelete' | 'originalName' | 'name'> & { name?: string }) => {
     if (!columnsEditable) return;
@@ -575,6 +602,10 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
     }));
   };
 
+  // Per-row FK handler factories — close over the column's effective name.
+  const makeFkApply = (colName: string) => (patch: Omit<DraftForeignKey, 'id' | 'pendingDelete' | 'originalName' | 'name'> & { name?: string }) => upsertFk(colName, patch);
+  const makeFkRemove = (colName: string) => () => dropFkForColumn(colName);
+
   const fkByColumn = new Map<string, DraftForeignKey>();
   for (const fk of foreignKeys) {
     if (fk.pendingDelete) continue;
@@ -594,7 +625,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
           <>
             <input
               value={newTableName}
-              onChange={e => setNewTableName(e.target.value)}
+              onChange={handleNewTableNameChange}
               placeholder="new_table_name"
               aria-invalid={newNameCollides}
               className={`font-mono text-foreground bg-transparent outline-none focus:bg-muted/40 px-1.5 py-0.5 rounded border border-dashed ${newNameCollides ? 'border-destructive' : 'border-border'}`}
@@ -640,7 +671,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                 size="xs"
                 variant={dirty ? 'default' : 'outline'}
                 disabled={saveDisabled}
-                onClick={async () => { setLocalSaving(true); try { await doSave(); } finally { setLocalSaving(false); } }}
+                onClick={handleSaveClick}
               >
                 <Check className="w-3 h-3 mr-1" />
                 {localSaving
@@ -734,7 +765,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="font-mono font-medium text-foreground p-0">
                       <CellInput
                         value={c.name}
-                        onCommit={v => updateColumn(c.id, { name: v })}
+                        onCommit={makeColumnNameCommit(c.id)}
                         disabled={!columnsEditable || c.pendingDelete}
                         placeholder="column_name"
                       />
@@ -742,7 +773,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="font-mono text-muted-foreground p-0">
                       <CellCombobox
                         value={c.dataType}
-                        onCommit={v => updateColumn(c.id, { dataType: v })}
+                        onCommit={makeColumnDataTypeCommit(c.id)}
                         options={dataTypeOptions}
                         disabled={!columnsEditable || c.pendingDelete}
                         placeholder="varchar(255)"
@@ -751,7 +782,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="p-0">
                       <CellSelect
                         value={c.nullable ? 'YES' : 'NO'}
-                        onChange={v => updateColumn(c.id, { nullable: v === 'YES' })}
+                        onChange={makeColumnNullableChange(c.id)}
                         disabled={!columnsEditable || c.pendingDelete}
                         options={[{ value: 'YES', label: 'YES' }, { value: 'NO', label: 'NO' }]}
                       />
@@ -759,7 +790,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="font-mono text-muted-foreground p-0">
                       <CellInput
                         value={c.defaultValue ?? ''}
-                        onCommit={v => updateColumn(c.id, { defaultValue: v === '' ? null : v })}
+                        onCommit={makeColumnDefaultCommit(c.id)}
                         disabled={!columnsEditable || c.pendingDelete}
                         placeholder="NULL"
                       />
@@ -767,7 +798,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="p-0">
                       <CellSelect
                         value={c.key}
-                        onChange={v => updateColumn(c.id, { key: v as ColumnKey })}
+                        onChange={makeColumnKeyChange(c.id)}
                         disabled={!columnsEditable || c.pendingDelete}
                         options={[
                           { value: 'NONE', label: '—' },
@@ -779,7 +810,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="font-mono text-muted-foreground p-0">
                       <CellCombobox
                         value={c.extra}
-                        onCommit={v => updateColumn(c.id, { extra: v === 'NONE' ? '' : v })}
+                        onCommit={makeColumnExtraCommit(c.id)}
                         options={extraOptionsFor(c.dataType, dialect)}
                         disabled={!columnsEditable || c.pendingDelete}
                         placeholder="—"
@@ -794,7 +825,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                       <Td className="font-mono text-muted-foreground p-0">
                         <CellInput
                           value={c.characterSet}
-                          onCommit={v => updateColumn(c.id, { characterSet: v })}
+                          onCommit={makeColumnCharsetCommit(c.id)}
                           disabled={!columnsEditable || c.pendingDelete || !isStringyType(c.dataType)}
                           placeholder={isStringyType(c.dataType) ? 'utf8mb4' : ''}
                         />
@@ -805,7 +836,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                         {allCollations.length > 0 ? (
                           <CellCombobox
                             value={c.collation}
-                            onCommit={v => updateColumn(c.id, { collation: v })}
+                            onCommit={makeColumnCollationCommit(c.id)}
                             options={allCollations}
                             disabled={!columnsEditable || c.pendingDelete || !isStringyType(c.dataType)}
                             placeholder={isStringyType(c.dataType) ? 'utf8mb4_unicode_ci' : ''}
@@ -813,7 +844,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                         ) : (
                           <CellInput
                             value={c.collation}
-                            onCommit={v => updateColumn(c.id, { collation: v })}
+                            onCommit={makeColumnCollationCommit(c.id)}
                             disabled={!columnsEditable || c.pendingDelete || !isStringyType(c.dataType)}
                             placeholder={isStringyType(c.dataType) ? 'utf8mb4_unicode_ci' : ''}
                           />
@@ -831,15 +862,15 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                           connectionId={connection.id}
                           schema={effectiveSchema}
                           disabled={!columnsEditable || c.pendingDelete}
-                          onApply={(patch) => upsertFk(c.originalName ?? c.name, patch)}
-                          onRemove={() => dropFkForColumn(c.originalName ?? c.name)}
+                          onApply={makeFkApply(c.originalName ?? c.name)}
+                          onRemove={makeFkRemove(c.originalName ?? c.name)}
                         />
                       </Td>
                     )}
                     <Td last className="p-0 w-8">
                       <button
                         type="button"
-                        onClick={() => toggleDeleteColumn(c.id)}
+                        onClick={makeToggleDeleteColumn(c.id)}
                         disabled={!columnsEditable}
                         className="p-1.5 text-muted-foreground hover:text-destructive"
                         title={c.pendingDelete ? 'Restore' : 'Delete'}
@@ -900,7 +931,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="font-mono font-medium p-0">
                       <CellInput
                         value={idx.name}
-                        onCommit={v => updateIndex(idx.id, { name: v })}
+                        onCommit={makeIndexNameCommit(idx.id)}
                         disabled={!schemaEditable || idx.pendingDelete}
                         placeholder="idx_name"
                       />
@@ -909,7 +940,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                       <Td className="p-0">
                         <CellSelect
                           value={idx.algorithm}
-                          onChange={v => updateIndex(idx.id, { algorithm: v as IndexAlgorithm })}
+                          onChange={makeIndexAlgorithmChange(idx.id)}
                           disabled={!schemaEditable || idx.pendingDelete}
                           options={SQL_INDEX_ALGORITHMS.map(a => ({ value: a, label: a }))}
                         />
@@ -918,7 +949,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="p-0">
                       <CellSelect
                         value={idx.isUnique ? 'TRUE' : 'FALSE'}
-                        onChange={v => updateIndex(idx.id, { isUnique: v === 'TRUE' })}
+                        onChange={makeIndexUniqueChange(idx.id)}
                         disabled={!schemaEditable || idx.pendingDelete}
                         options={[{ value: 'TRUE', label: 'TRUE' }, { value: 'FALSE', label: 'FALSE' }]}
                       />
@@ -926,7 +957,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td className="font-mono p-0">
                       <CellInput
                         value={idx.columns}
-                        onCommit={v => updateIndex(idx.id, { columns: v })}
+                        onCommit={makeIndexColumnsCommit(idx.id)}
                         disabled={!schemaEditable || idx.pendingDelete}
                         placeholder={indexesOnlyMode
                           ? 'email, score:desc, location:2dsphere'
@@ -936,7 +967,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                     <Td last className="p-0 w-8">
                       <button
                         type="button"
-                        onClick={() => toggleDeleteIndex(idx.id)}
+                        onClick={makeToggleDeleteIndex(idx.id)}
                         disabled={!schemaEditable}
                         className="p-1.5 text-muted-foreground hover:text-destructive"
                         title={idx.pendingDelete ? 'Restore' : 'Delete'}

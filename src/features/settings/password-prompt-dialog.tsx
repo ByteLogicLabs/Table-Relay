@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Lock, Eye, EyeOff } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog';
 import { Button } from '../../components/ui/button';
@@ -50,7 +50,7 @@ export default function PasswordPromptDialog({
     }
   }, [open]);
 
-  const submit = () => {
+  const submit = useCallback(() => {
     if (!password) {
       setLocalError('Enter a password.');
       return;
@@ -67,7 +67,19 @@ export default function PasswordPromptDialog({
     }
     setLocalError(null);
     onSubmit(password);
-  };
+  }, [password, confirm, mode, onSubmit]);
+
+  const handlePasswordChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setPassword(e.target.value), []);
+
+  const handlePasswordKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter' && mode === 'enter') submit(); }, [mode, submit]);
+
+  const handleToggleShow = useCallback(() => setShow((s) => !s), []);
+
+  const handleConfirmChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setConfirm(e.target.value), []);
+
+  const handleConfirmKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => { if (e.key === 'Enter') submit(); }, [submit]);
+
+  const handleCancel = useCallback(() => onOpenChange(false), [onOpenChange]);
 
   const shownError = error ?? localError;
 
@@ -90,12 +102,12 @@ export default function PasswordPromptDialog({
               className="pr-9 h-9 text-sm"
               placeholder={mode === 'set' ? 'New password' : 'Password'}
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter' && mode === 'enter') submit(); }}
+              onChange={handlePasswordChange}
+              onKeyDown={handlePasswordKeyDown}
             />
             <button
               type="button"
-              onClick={() => setShow((s) => !s)}
+              onClick={handleToggleShow}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
               aria-label={show ? 'Hide password' : 'Show password'}
             >
@@ -109,15 +121,15 @@ export default function PasswordPromptDialog({
               className="h-9 text-sm"
               placeholder="Confirm password"
               value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') submit(); }}
+              onChange={handleConfirmChange}
+              onKeyDown={handleConfirmKeyDown}
             />
           )}
 
           {shownError && <p className="text-xs text-destructive">{shownError}</p>}
 
           <div className="flex justify-end gap-2 pt-1">
-            <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)} disabled={busy}>
+            <Button variant="ghost" size="sm" onClick={handleCancel} disabled={busy}>
               Cancel
             </Button>
             <Button size="sm" onClick={submit} disabled={busy}>

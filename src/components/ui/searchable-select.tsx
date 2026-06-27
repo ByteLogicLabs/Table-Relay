@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Check, ChevronsUpDown, Loader2, Search } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from './popover';
 import { Input } from './input';
@@ -92,16 +92,40 @@ export function SearchableSelect({
     el?.scrollIntoView({ block: 'nearest' });
   }, [activeIndex, open]);
 
-  const commit = (idx: number) => {
-    if (idx < filtered.length) {
-      onChange(filtered[idx].value);
-    } else if (showCustom) {
-      onChange(trimmedQuery);
-    }
-    setOpen(false);
-  };
+  const commit = useCallback(
+    (idx: number) => {
+      if (idx < filtered.length) {
+        onChange(filtered[idx].value);
+      } else if (showCustom) {
+        onChange(trimmedQuery);
+      }
+      setOpen(false);
+    },
+    [filtered, showCustom, onChange, trimmedQuery],
+  );
 
-  const onInputKeyDown = (e: React.KeyboardEvent) => {
+  // Factory handlers for per-row events inside the option .map() (and the
+  // custom row), which close over the row index.
+  const makeHandleRowClick = useCallback((idx: number) => () => commit(idx), [commit]);
+  const makeHandleRowMouseMove = useCallback(
+    (idx: number) => () => setActiveIndex(idx),
+    [],
+  );
+
+  const handleQueryChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => setQuery(e.target.value),
+    [],
+  );
+
+  const handleOpenChange = useCallback((o: boolean) => {
+    setOpen(o);
+    if (o) {
+      setQuery('');
+      setTimeout(() => inputRef.current?.focus(), 30);
+    }
+  }, []);
+
+  const onInputKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (rowCount > 0) setActiveIndex((i) => (i + 1) % rowCount);
@@ -115,18 +139,12 @@ export function SearchableSelect({
       e.preventDefault();
       setOpen(false);
     }
-  };
+  }, [rowCount, commit, activeIndex]);
 
   return (
     <Popover
       open={open}
-      onOpenChange={(o) => {
-        setOpen(o);
-        if (o) {
-          setQuery('');
-          setTimeout(() => inputRef.current?.focus(), 30);
-        }
-      }}
+      onOpenChange={handleOpenChange}
     >
       <PopoverTrigger
         disabled={disabled}
@@ -149,7 +167,7 @@ export function SearchableSelect({
           <Input
             ref={inputRef}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={handleQueryChange}
             onKeyDown={onInputKeyDown}
             placeholder={searchPlaceholder}
             className="h-9 pl-8 text-sm border-0 rounded-none shadow-none focus-visible:ring-0 focus-visible:border-0"
@@ -171,8 +189,8 @@ export function SearchableSelect({
                 key={o.value}
                 type="button"
                 data-idx={idx}
-                onClick={() => commit(idx)}
-                onMouseMove={() => setActiveIndex(idx)}
+                onClick={makeHandleRowClick(idx)}
+                onMouseMove={makeHandleRowMouseMove(idx)}
                 className={cn(
                   'w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left transition-colors',
                   idx === activeIndex && 'bg-muted/60',
@@ -187,8 +205,8 @@ export function SearchableSelect({
             <button
               type="button"
               data-idx={filtered.length}
-              onClick={() => commit(filtered.length)}
-              onMouseMove={() => setActiveIndex(filtered.length)}
+              onClick={makeHandleRowClick(filtered.length)}
+              onMouseMove={makeHandleRowMouseMove(filtered.length)}
               className={cn(
                 'w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left transition-colors border-t border-border/40 mt-1',
                 activeIndex === filtered.length && 'bg-muted/60',

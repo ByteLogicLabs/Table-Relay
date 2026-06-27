@@ -70,6 +70,8 @@ export function UpdateNotice() {
     }
   };
 
+  const handleUpdateClick = () => void update();
+
   const installing = phase === 'installing';
   const done = phase === 'done';
 
@@ -123,7 +125,7 @@ export function UpdateNotice() {
           </Button>
         ) : (
           <>
-            <Button size="sm" className="h-7 text-xs flex-1" onClick={() => void update()}>
+            <Button size="sm" className="h-7 text-xs flex-1" onClick={handleUpdateClick}>
               {canAutoInstall() ? 'Update now' : 'Download'}
             </Button>
             <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={dismiss}>

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Loader2, CheckCircle2, XCircle, Ban } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from './dialog';
 import { Button } from './button';
@@ -58,14 +58,19 @@ export default function ProgressDialog({
   const running = phase === 'running';
   const pct = state?.fraction != null ? Math.round(state.fraction * 100) : null;
 
+  const handleOpenChange = useCallback(
+    (o: boolean) => {
+      // While running, the backdrop / Esc shouldn't silently abort — the user
+      // must press Cancel. Allow close only once settled.
+      if (!o && !running) onClose();
+    },
+    [running, onClose],
+  );
+
   return (
     <Dialog
       open={open}
-      onOpenChange={(o) => {
-        // While running, the backdrop / Esc shouldn't silently abort — the user
-        // must press Cancel. Allow close only once settled.
-        if (!o && !running) onClose();
-      }}
+      onOpenChange={handleOpenChange}
     >
       <DialogContent className="sm:max-w-md" showCloseButton={!running}>
         <DialogHeader>

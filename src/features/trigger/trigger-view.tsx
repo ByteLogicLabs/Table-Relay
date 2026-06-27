@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
@@ -367,6 +367,15 @@ export default function TriggerView({
     setDraft(formatted);
   };
 
+  const handleRefresh = useCallback(() => void load(), [load]);
+
+  const handleAskAi = useCallback(
+    () => window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat')),
+    [],
+  );
+
+  const handleEditorChange = useCallback((v: string | undefined) => setDraft(v ?? ''), [setDraft]);
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -389,7 +398,7 @@ export default function TriggerView({
       <div className="h-12 shrink-0 border-b border-border flex items-center justify-between gap-3 px-4 bg-muted/10">
         <div className="flex items-center gap-2">
           {!isNew && (
-            <Button variant="ghost" size="sm" onClick={() => void load()} disabled={loading}>
+            <Button variant="ghost" size="sm" onClick={handleRefresh} disabled={loading}>
               <RefreshCw className={`w-4 h-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
               Refresh
             </Button>
@@ -416,7 +425,7 @@ export default function TriggerView({
             variant="ghost"
             size="sm"
             className="shrink-0"
-            onClick={() => window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'))}
+            onClick={handleAskAi}
             title="Ask AI — have the assistant edit this trigger"
           >
             <Sparkles className="w-4 h-4 mr-2 text-primary" />
@@ -430,7 +439,7 @@ export default function TriggerView({
         <Editor
           language={editorLanguage}
           value={draft}
-          onChange={v => setDraft(v ?? '')}
+          onChange={handleEditorChange}
           theme={theme}
           options={ddlEditorOptions({
             fontSize: settings.editorFontSize,

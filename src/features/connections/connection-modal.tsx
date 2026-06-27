@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from '../../components/ui/dialog';
@@ -443,8 +443,36 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
     }
   };
 
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) onClose();
+  }, [onClose]);
+
+  const handleConnStringChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    onConnStringChange(e.target.value);
+  }, []);
+
+  const handleDriverChange = useCallback((v: string) => {
+    handleChange('driver', v);
+  }, [handleChange]);
+
+  // Factory: build a stable input-change handler for a given form field.
+  const makeFieldChange = useCallback((field: keyof ConnectionProfile) =>
+    (e: React.ChangeEvent<HTMLInputElement>) => handleChange(field, e.target.value), []);
+
+  const handleTagsChange = useCallback((tags: ConnectionTag[]) => {
+    setFormData(prev => ({ ...prev, tags }));
+  }, []);
+
+  const handleSshToggle = useCallback(() => {
+    handleChange('sshEnabled', !formData.sshEnabled);
+  }, [formData.sshEnabled]);
+
+  const handleSshAuthKindChange = useCallback((v: string) => {
+    handleChange('sshAuthKind', v as SshAuthKind);
+  }, []);
+
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={isOpen} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="sm:max-w-3xl w-[95vw] max-h-[90vh] flex flex-col gap-0 p-0 overflow-hidden">
         <DialogHeader className="shrink-0 px-6 pt-6 pb-3 border-b border-border">
           <DialogTitle>{initialData ? 'Edit Connection' : 'New Connection'}</DialogTitle>
@@ -458,7 +486,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
             <label className="text-sm font-medium">Connection string</label>
             <Input
               value={connString}
-              onChange={(e) => onConnStringChange(e.target.value)}
+              onChange={handleConnStringChange}
               placeholder="mysql://user:pass@host:3306/db  ·  mongodb://…?authSource=admin"
               className="font-mono text-xs"
               spellCheck={false}
@@ -470,7 +498,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
 
           <div className="grid gap-2">
             <label className="text-sm font-medium">Adapter</label>
-            <Select value={formData.driver} onValueChange={(v) => handleChange('driver', v)}>
+            <Select value={formData.driver} onValueChange={handleDriverChange}>
               <SelectTrigger className="w-full">
                 <div className="flex items-center gap-2 min-w-0">
                   {formData.driver && <DbIcon driver={formData.driver} className="w-4 h-4 shrink-0" />}
@@ -523,7 +551,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
               className="w-full"
               placeholder="e.g. Production DB"
               value={formData.name || ''}
-              onChange={(e) => handleChange('name', e.target.value)}
+              onChange={makeFieldChange('name')}
               autoFocus
             />
           </div>
@@ -548,7 +576,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                     className="w-full"
                     placeholder="localhost"
                     value={formData.host || ''}
-                    onChange={(e) => handleChange('host', e.target.value)}
+                    onChange={makeFieldChange('host')}
                   />
                 </div>
                 <div className="grid gap-2">
@@ -557,7 +585,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                     className="w-full"
                     placeholder="Port"
                     value={formData.port || ''}
-                    onChange={(e) => handleChange('port', e.target.value)}
+                    onChange={makeFieldChange('port')}
                   />
                 </div>
               </div>
@@ -567,7 +595,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                   <Input
                     className="w-full"
                     value={formData.user || ''}
-                    onChange={(e) => handleChange('user', e.target.value)}
+                    onChange={makeFieldChange('user')}
                   />
                 </div>
                 <div className="grid gap-2">
@@ -577,7 +605,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                     className="w-full"
                     placeholder="••••••••"
                     value={formData.password || ''}
-                    onChange={(e) => handleChange('password', e.target.value)}
+                    onChange={makeFieldChange('password')}
                   />
                 </div>
               </div>
@@ -587,7 +615,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                   className="w-full"
                   placeholder="Optional default database"
                   value={formData.database || ''}
-                  onChange={(e) => handleChange('database', e.target.value)}
+                  onChange={makeFieldChange('database')}
                 />
               </div>
             </>
@@ -598,7 +626,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
             <TagsEditor
               tags={formData.tags ?? []}
               existingTags={existingTags}
-              onChange={(tags) => setFormData(prev => ({ ...prev, tags }))}
+              onChange={handleTagsChange}
             />
           </div>
 
@@ -619,7 +647,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                 type="button"
                 variant={formData.sshEnabled ? 'default' : 'outline'}
                 size="sm"
-                onClick={() => handleChange('sshEnabled', !formData.sshEnabled)}
+                onClick={handleSshToggle}
               >
                 {formData.sshEnabled ? 'Enabled' : 'Disabled'}
               </Button>
@@ -634,7 +662,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                       className="w-full"
                       placeholder="bastion.example.com"
                       value={formData.sshHost || ''}
-                      onChange={(e) => handleChange('sshHost', e.target.value)}
+                      onChange={makeFieldChange('sshHost')}
                     />
                   </div>
                   <div className="grid gap-2">
@@ -643,7 +671,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                       className="w-full"
                       placeholder="22"
                       value={formData.sshPort ?? ''}
-                      onChange={(e) => handleChange('sshPort', e.target.value)}
+                      onChange={makeFieldChange('sshPort')}
                     />
                   </div>
                 </div>
@@ -654,7 +682,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                     className="w-full"
                     placeholder="ubuntu"
                     value={formData.sshUser || ''}
-                    onChange={(e) => handleChange('sshUser', e.target.value)}
+                    onChange={makeFieldChange('sshUser')}
                   />
                 </div>
 
@@ -662,7 +690,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                   <label className="text-sm font-medium">Auth Method</label>
                   <Select
                     value={formData.sshAuthKind ?? 'key'}
-                    onValueChange={(v) => handleChange('sshAuthKind', v as SshAuthKind)}
+                    onValueChange={handleSshAuthKindChange}
                   >
                     <SelectTrigger className="w-full">
                       <SelectValue />
@@ -682,7 +710,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                       className="w-full"
                       placeholder="••••••••"
                       value={formData.sshPassword || ''}
-                      onChange={(e) => handleChange('sshPassword', e.target.value)}
+                      onChange={makeFieldChange('sshPassword')}
                     />
                   </div>
                 ) : (
@@ -693,7 +721,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                         className="w-full"
                         placeholder="~/.ssh/id_rsa (leave blank for default)"
                         value={formData.sshKeyPath || ''}
-                        onChange={(e) => handleChange('sshKeyPath', e.target.value)}
+                        onChange={makeFieldChange('sshKeyPath')}
                       />
                       <div className="text-xs text-muted-foreground">
                         If blank, falls back to ~/.ssh/id_rsa, ~/.ssh/id_ed25519, ~/.ssh/id_ecdsa (in that order).
@@ -706,7 +734,7 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
                         className="w-full"
                         placeholder="Only if the key is encrypted"
                         value={formData.sshKeyPassphrase || ''}
-                        onChange={(e) => handleChange('sshKeyPassphrase', e.target.value)}
+                        onChange={makeFieldChange('sshKeyPassphrase')}
                       />
                     </div>
                   </>
@@ -777,6 +805,12 @@ function ManifestFields({
   }
   if (pending) groups.push([pending]);
 
+  // Factory: stable per-field change handler closing over the field.
+  const makeFieldControlChange = useCallback(
+    (f: ConnectionField) => (v: string | boolean) => setFieldValue(f, v),
+    [setFieldValue],
+  );
+
   return (
     <>
       {groups.map((group, i) => (
@@ -793,7 +827,7 @@ function ManifestFields({
               key={f.key}
               field={f}
               value={fieldValue(f)}
-              onChange={(v) => setFieldValue(f, v)}
+              onChange={makeFieldControlChange(f)}
             />
           ))}
         </div>
@@ -811,6 +845,14 @@ function FieldControl({
   value: string;
   onChange: (value: string) => void;
 }) {
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    onChange(e.target.value);
+  }, [onChange]);
+
+  const handleBoolToggle = useCallback(() => {
+    onChange(value === 'true' ? 'false' : 'true');
+  }, [onChange, value]);
+
   const label = `${field.label}${field.required ? ' *' : ''}`;
   const help = field.help ? (
     <div className="text-xs text-muted-foreground">{field.help}</div>
@@ -836,7 +878,7 @@ function FieldControl({
           className="w-full"
           placeholder="••••••••"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={handleInputChange}
         />,
       );
     case 'int':
@@ -845,7 +887,7 @@ function FieldControl({
           type="number"
           className="w-full"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={handleInputChange}
           min={field.kind.min}
           max={field.kind.max}
         />,
@@ -871,7 +913,7 @@ function FieldControl({
           type="button"
           variant={value === 'true' ? 'default' : 'outline'}
           size="sm"
-          onClick={() => onChange(value === 'true' ? 'false' : 'true')}
+          onClick={handleBoolToggle}
         >
           {value === 'true' ? 'On' : 'Off'}
         </Button>,
@@ -904,7 +946,7 @@ function FieldControl({
             className="w-full"
             placeholder="/path/to/file"
             value={value}
-            onChange={(e) => onChange(e.target.value)}
+            onChange={handleInputChange}
           />
           <Button type="button" variant="outline" onClick={pick}>
             Browse…
@@ -918,7 +960,7 @@ function FieldControl({
         <Input
           className="w-full"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={handleInputChange}
         />,
       );
   }
@@ -936,6 +978,11 @@ function ColorGridPopover({
   trigger: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  // Factory: stable per-color click handler closing over the color name.
+  const makeColorPick = useCallback((name: string) => () => {
+    onPick(name);
+    setOpen(false);
+  }, [onPick]);
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger className="inline-flex items-center">{trigger}</PopoverTrigger>
@@ -945,7 +992,7 @@ function ColorGridPopover({
             <button
               key={c.name}
               type="button"
-              onClick={() => { onPick(c.name); setOpen(false); }}
+              onClick={makeColorPick(c.name)}
               title={c.name}
               aria-label={c.name}
               className={`w-6 h-6 rounded-full transition-transform hover:scale-110 ${c.dot} ${
@@ -1037,6 +1084,27 @@ function TagsEditor({
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [open]);
 
+  // Factory: per-tag recolor handler. Depends on setTagColor (recreated each
+  // render over the current tags) so it never recolors a stale tag list.
+  const makeTagColorPick = useCallback((name: string) => (col: string) => setTagColor(name, col), [setTagColor]);
+  // Factory: per-tag remove handler.
+  const makeTagRemove = useCallback((name: string) => () => removeTag(name), [removeTag]);
+  // Factory: stable per-option highlight handler.
+  const makeOptionMouseEnter = useCallback((i: number) => () => setHighlight(i), []);
+  // Factory: per-option mousedown handler (preventDefault keeps focus).
+  const makeOptionMouseDown = useCallback((optValue: string) => (e: React.MouseEvent) => {
+    e.preventDefault();
+    addTag(optValue);
+  }, [addTag]);
+
+  const handleDraftChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setDraft(e.target.value);
+    setOpen(true);
+    setHighlight(0);
+  }, []);
+
+  const handleInputFocus = useCallback(() => setOpen(true), []);
+
   const onInputKeyDown = (e: React.KeyboardEvent) => {
     if (open && options.length > 0 && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault();
@@ -1084,7 +1152,7 @@ function TagsEditor({
               {/* Click the dot to recolor this tag. */}
               <ColorGridPopover
                 value={t.color}
-                onPick={(col) => setTagColor(t.name, col)}
+                onPick={makeTagColorPick(t.name)}
                 trigger={
                   <span className={`w-2.5 h-2.5 rounded-full shrink-0 cursor-pointer ring-1 ring-black/15 dark:ring-white/20 ${colorFor(t.color).dot}`} title="Change color" />
                 }
@@ -1092,7 +1160,7 @@ function TagsEditor({
               {t.name}
               <button
                 type="button"
-                onClick={() => removeTag(t.name)}
+                onClick={makeTagRemove(t.name)}
                 className="rounded-full hover:bg-black/10 dark:hover:bg-white/10 p-0.5 -my-0.5"
                 title="Remove tag"
                 aria-label={`Remove ${t.name}`}
@@ -1105,8 +1173,8 @@ function TagsEditor({
 
         <input
           value={draft}
-          onChange={(e) => { setDraft(e.target.value); setOpen(true); setHighlight(0); }}
-          onFocus={() => setOpen(true)}
+          onChange={handleDraftChange}
+          onFocus={handleInputFocus}
           onKeyDown={onInputKeyDown}
           placeholder={tags.length === 0 ? 'Add tags…' : 'Add another…'}
           className="flex-1 min-w-24 bg-transparent text-sm outline-none placeholder:text-muted-foreground py-0.5"
@@ -1122,8 +1190,8 @@ function TagsEditor({
               <button
                 key={`${opt.create ? 'create' : 'tag'}:${opt.value}`}
                 type="button"
-                onMouseEnter={() => setHighlight(i)}
-                onMouseDown={(e) => { e.preventDefault(); addTag(opt.value); }}
+                onMouseEnter={makeOptionMouseEnter(i)}
+                onMouseDown={makeOptionMouseDown(opt.value)}
                 className={`w-full flex items-center gap-2 px-2.5 py-1.5 text-sm text-left transition-colors ${i === highlight ? 'bg-muted' : 'hover:bg-muted/60'}`}
               >
                 {opt.create ? (

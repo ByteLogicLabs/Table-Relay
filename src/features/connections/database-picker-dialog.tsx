@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Database, Search, Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Dialog, DialogContent } from '../../components/ui/dialog';
@@ -299,6 +299,46 @@ export default function DatabasePickerDialog({
     setNewCollation(DEFAULT_OPT);
   };
 
+  const handleCreateFormKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && nameValid && !creating) {
+      e.preventDefault();
+      void handleCreate();
+    }
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      resetCreateForm();
+    }
+  }, [nameValid, creating, handleCreate, resetCreateForm]);
+
+  const handleNewNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setNewName(e.target.value);
+  }, []);
+
+  const handleQueryChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setQuery(e.target.value);
+  }, []);
+
+  const handleCreateClick = useCallback(() => {
+    void handleCreate();
+  }, [handleCreate]);
+
+  const handleCancel = useCallback(() => {
+    onOpenChange(false);
+  }, [onOpenChange]);
+
+  const handleOpenNewMode = useCallback(() => {
+    setNewMode(true);
+  }, []);
+
+  const handleConfirmHighlight = useCallback(() => {
+    void confirm(highlight);
+  }, [highlight, confirm]);
+
+  // Per-item handlers in the list close over `s.name`, so they're produced by
+  // factories keyed on the database name rather than hoisted directly.
+  const makeHandleHighlight = useCallback((name: string) => () => setHighlight(name), []);
+  const makeHandleConfirm = useCallback((name: string) => () => void confirm(name), [confirm]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
@@ -315,16 +355,7 @@ export default function DatabasePickerDialog({
 
             <div
               className="p-4 space-y-3"
-              onKeyDown={e => {
-                if (e.key === 'Enter' && nameValid && !creating) {
-                  e.preventDefault();
-                  void handleCreate();
-                }
-                if (e.key === 'Escape') {
-                  e.preventDefault();
-                  resetCreateForm();
-                }
-              }}
+              onKeyDown={handleCreateFormKeyDown}
             >
               <div className="space-y-1.5">
                 <Label htmlFor="db-new-name" className="text-xs">Name</Label>
@@ -334,7 +365,7 @@ export default function DatabasePickerDialog({
                   placeholder="database_name"
                   className="h-9 text-sm"
                   value={newName}
-                  onChange={e => setNewName(e.target.value)}
+                  onChange={handleNewNameChange}
                   aria-invalid={!!nameError}
                 />
                 {nameError && (
@@ -393,7 +424,7 @@ export default function DatabasePickerDialog({
               <Button
                 size="sm"
                 disabled={creating || !nameValid}
-                onClick={() => void handleCreate()}
+                onClick={handleCreateClick}
               >
                 {creating ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Create'}
               </Button>
@@ -419,7 +450,7 @@ export default function DatabasePickerDialog({
                   placeholder="Search for database…"
                   className="pl-8 h-9 text-sm"
                   value={query}
-                  onChange={e => setQuery(e.target.value)}
+                  onChange={handleQueryChange}
                 />
               </div>
             </div>
@@ -444,9 +475,9 @@ export default function DatabasePickerDialog({
                     className={`w-full text-left px-3 py-2 text-sm flex items-center gap-2.5 transition-colors ${
                       isActive ? 'bg-primary/10 text-primary' : 'hover:bg-muted/40'
                     }`}
-                    onMouseEnter={() => setHighlight(s.name)}
-                    onClick={() => void confirm(s.name)}
-                    onDoubleClick={() => void confirm(s.name)}
+                    onMouseEnter={makeHandleHighlight(s.name)}
+                    onClick={makeHandleConfirm(s.name)}
+                    onDoubleClick={makeHandleConfirm(s.name)}
                   >
                     <Database className="w-4 h-4 shrink-0" />
                     <span className="flex-1 truncate">{s.name}</span>
@@ -457,17 +488,17 @@ export default function DatabasePickerDialog({
             </div>
 
             <div className="px-3 py-3 border-t border-border/50 flex items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+              <Button variant="ghost" size="sm" onClick={handleCancel}>
                 Cancel
               </Button>
               <div className="flex-1" />
-              <Button variant="outline" size="sm" onClick={() => setNewMode(true)}>
+              <Button variant="outline" size="sm" onClick={handleOpenNewMode}>
                 New…
               </Button>
               <Button
                 size="sm"
                 disabled={!highlight || switching}
-                onClick={() => void confirm(highlight)}
+                onClick={handleConfirmHighlight}
               >
                 {switching ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'Open'}
               </Button>

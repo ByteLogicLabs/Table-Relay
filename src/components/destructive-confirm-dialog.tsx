@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { Button } from './ui/button';
 import {
   Dialog,
@@ -45,6 +46,12 @@ export function DestructiveConfirmDialog({
   const visibleNames = itemNames.slice(0, 20);
   const overflow = count - visibleNames.length;
 
+  const handleCancel = useCallback(() => onOpenChange(false), [onOpenChange]);
+  const handleConfirm = useCallback(() => {
+    onConfirm();
+    onOpenChange(false);
+  }, [onConfirm, onOpenChange]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-md">
@@ -70,15 +77,12 @@ export function DestructiveConfirmDialog({
           <p className="text-xs text-muted-foreground">{warning}</p>
         )}
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={handleCancel}>
             Cancel
           </Button>
           <Button
             variant="destructive"
-            onClick={() => {
-              onConfirm();
-              onOpenChange(false);
-            }}
+            onClick={handleConfirm}
             autoFocus
           >
             {buttonLabel}

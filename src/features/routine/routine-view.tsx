@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
 import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
@@ -349,6 +349,15 @@ export default function RoutineView({
     setDraftState(formatted);
   };
 
+  const handleAskAi = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'));
+  }, []);
+
+  const handleDraftChange = useCallback((v: string | undefined) => {
+    setUserEdited(true);
+    setDraftState(v ?? '');
+  }, []);
+
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center text-muted-foreground">
@@ -399,7 +408,7 @@ export default function RoutineView({
             variant="ghost"
             size="sm"
             className="shrink-0"
-            onClick={() => window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'))}
+            onClick={handleAskAi}
             title="Ask AI — have the assistant edit this routine"
           >
             <Sparkles className="w-4 h-4 mr-2 text-primary" />
@@ -413,7 +422,7 @@ export default function RoutineView({
         <Editor
           language={editorLanguage}
           value={draft}
-          onChange={v => { setUserEdited(true); setDraftState(v ?? ''); }}
+          onChange={handleDraftChange}
           theme={theme}
           options={ddlEditorOptions({
             fontSize: settings.editorFontSize,

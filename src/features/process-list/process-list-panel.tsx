@@ -71,24 +71,24 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
     };
   }, [autoRefresh, open, fetchProcesses]);
 
-  const toggleSelect = (idx: number, checked: boolean) => {
+  const toggleSelect = useCallback((idx: number, checked: boolean) => {
     setSelected((prev) => {
       const next = new Set(prev);
       if (checked) next.add(idx);
       else next.delete(idx);
       return next;
     });
-  };
+  }, []);
 
-  const toggleAll = (checked: boolean) => {
+  const toggleAll = useCallback((checked: boolean) => {
     if (checked) {
       setSelected(new Set(processes.map((_, i) => i)));
     } else {
       setSelected(new Set());
     }
-  };
+  }, [processes]);
 
-  const killSelected = async () => {
+  const killSelected = useCallback(async () => {
     if (selected.size === 0) return;
     const ids = Array.from(selected).map((i) => processes[i].id);
     setKilling(true);
@@ -107,16 +107,46 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
     } finally {
       setKilling(false);
     }
-  };
+  }, [selected, processes, connectionId, fetchProcesses]);
 
-  const killSingle = async (id: string) => {
+  const killSingle = useCallback(async (id: string) => {
     try {
       await db.killProcess(connectionId, id);
       await fetchProcesses();
     } catch (err) {
       setError(isDbError(err) ? err.message : String(err));
     }
-  };
+  }, [connectionId, fetchProcesses]);
+
+  const handleRefreshClick = useCallback(() => {
+    void fetchProcesses();
+  }, [fetchProcesses]);
+
+  const handleToggleAutoRefresh = useCallback(() => {
+    setAutoRefresh((prev) => !prev);
+  }, []);
+
+  const handleKillSelectedClick = useCallback(() => {
+    void killSelected();
+  }, [killSelected]);
+
+  const handleToggleAllChange = useCallback((v: boolean | 'indeterminate') => {
+    toggleAll(v === true);
+  }, [toggleAll]);
+
+  const makeHandleToggleSelect = useCallback(
+    (idx: number) => (v: boolean | 'indeterminate') => toggleSelect(idx, v === true),
+    [toggleSelect],
+  );
+
+  const makeHandleKillSingle = useCallback(
+    (id: string) => () => void killSingle(id),
+    [killSingle],
+  );
+
+  const handleClose = useCallback(() => {
+    onOpenChange(false);
+  }, [onOpenChange]);
 
   const allSelected = processes.length > 0 && selected.size === processes.length;
 
@@ -131,7 +161,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => void fetchProcesses()}
+            onClick={handleRefreshClick}
             disabled={loading}
           >
             {loading ? (
@@ -144,7 +174,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
           <Button
             variant={autoRefresh ? 'default' : 'outline'}
             size="sm"
-            onClick={() => setAutoRefresh(!autoRefresh)}
+            onClick={handleToggleAutoRefresh}
           >
             Auto {autoRefresh ? 'ON' : 'OFF'}
           </Button>
@@ -152,7 +182,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
             <Button
               variant="destructive"
               size="sm"
-              onClick={() => void killSelected()}
+              onClick={handleKillSelectedClick}
               disabled={killing}
             >
               {killing ? (
@@ -179,7 +209,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
                 <th className="px-4 py-2 border-b border-r border-border font-medium text-center w-8">
                   <Checkbox
                     checked={allSelected}
-                    onCheckedChange={(v) => toggleAll(v === true)}
+                    onCheckedChange={handleToggleAllChange}
                   />
                 </th>
                 <th className="px-4 py-2 border-b border-r border-border font-medium text-center">ID</th>
@@ -208,7 +238,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
                   <td className="px-4 py-1.5 border-r border-border">
                     <Checkbox
                       checked={selected.has(idx)}
-                      onCheckedChange={(v) => toggleSelect(idx, v === true)}
+                      onCheckedChange={makeHandleToggleSelect(idx)}
                     />
                   </td>
                   <td className="px-4 py-1.5 border-r border-border font-mono">{p.id}</td>
@@ -225,7 +255,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
                       variant="ghost"
                       size="sm"
                       className="h-6 w-6 p-0"
-                      onClick={() => void killSingle(p.id)}
+                      onClick={makeHandleKillSingle(p.id)}
                       title="Kill this process"
                     >
                       <X className="w-3 h-3 text-destructive" />
@@ -238,7 +268,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
         </div>
 
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={handleClose}>
             Close
           </Button>
         </DialogFooter>

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { toast } from "sonner";
 import {
   ConnectionProfile,
@@ -1808,6 +1808,106 @@ export default function WorkspaceView({
     focusedTile?.databaseName,
   ]);
 
+  const handleDisconnectServer = useCallback(
+    (id: string) => {
+      // Evict every cached grid belonging to tabs on this connection
+      // before the connection closes — otherwise stale rows would linger
+      // in memory (and reappear if the user reconnects).
+      const idsToClear = tabs
+        .filter((t) => t.connectionId === id)
+        .map((t) => t.id);
+      clearCachedGridsWhere((tid) => idsToClear.includes(tid));
+      onDisconnect(id);
+    },
+    [tabs, onDisconnect],
+  );
+
+  const handleEditServer = useCallback(
+    (id: string) => {
+      const conn = connections.find((c) => c.id === id);
+      if (conn) openEditConnection(conn);
+    },
+    [connections],
+  );
+
+  const handleImportSqlForId = useCallback((id: string) => {
+    setImportSqlForId(id);
+  }, []);
+
+  const handleSidebarResizeMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = sidebarWidth;
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        const next = Math.max(
+          SIDEBAR_MIN_WIDTH,
+          Math.min(SIDEBAR_MAX_WIDTH, startW + dx),
+        );
+        setSidebarWidth(next);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+    },
+    [sidebarWidth],
+  );
+
+  const handleChatResizeMouseDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startW = chatWidth;
+      const onMove = (ev: MouseEvent) => {
+        // Dragging left grows the panel (we're anchored right), so
+        // width = startW + (startX - currentX).
+        const dx = startX - ev.clientX;
+        const next = Math.max(
+          CHAT_MIN_WIDTH,
+          Math.min(CHAT_MAX_WIDTH, startW + dx),
+        );
+        setChatWidth(next);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+    },
+    [chatWidth],
+  );
+
+  const handleEditConnectionFromSidebar = useCallback(
+    (conn: ConnectionProfile) => openEditConnection(conn, true),
+    [],
+  );
+
+  const handleOpenNewServer = useCallback(() => setNewConnectionOpen(true), []);
+
+  const handleCloseChat = useCallback(() => setChatOpen(false), []);
+
+  const handleCloseNewConnection = useCallback(
+    () => setNewConnectionOpen(false),
+    [],
+  );
+
+  const handleCloseImportSql = useCallback(() => setImportSqlForId(null), []);
+
+  const handleCloseExport = useCallback(() => setExportForId(null), []);
+
   return (
     <div
       className="flex-1 flex bg-background relative mac-vibrancy min-w-0"
@@ -1817,21 +1917,9 @@ export default function WorkspaceView({
         servers={connections}
         focusedTileId={focusedTileId}
         onFocusTile={handleFocusTile}
-        onDisconnectServer={(id) => {
-          // Evict every cached grid belonging to tabs on this connection
-          // before the connection closes — otherwise stale rows would linger
-          // in memory (and reappear if the user reconnects).
-          const idsToClear = tabs
-            .filter((t) => t.connectionId === id)
-            .map((t) => t.id);
-          clearCachedGridsWhere((tid) => idsToClear.includes(tid));
-          onDisconnect(id);
-        }}
-        onEditServer={(id) => {
-          const conn = connections.find((c) => c.id === id);
-          if (conn) openEditConnection(conn);
-        }}
-        onImportSql={(id) => setImportSqlForId(id)}
+        onDisconnectServer={handleDisconnectServer}
+        onEditServer={handleEditServer}
+        onImportSql={handleImportSqlForId}
         onExport={handleExportForConnection}
         connectedServerIds={new Set(connState.activeById.keys())}
         expanded={railExpanded}
@@ -1851,12 +1939,12 @@ export default function WorkspaceView({
           onNewQuery={handleNewQuery}
           onOpenErd={handleOpenErd}
           onPickConnection={handlePickConnection}
-          onEditConnection={(conn) => openEditConnection(conn, true)}
+          onEditConnection={handleEditConnectionFromSidebar}
           onDeleteConnection={onDeleteConnection}
           onDisconnect={onDisconnect}
-          onOpenNewServer={() => setNewConnectionOpen(true)}
+          onOpenNewServer={handleOpenNewServer}
           onPinDatabase={handlePinDatabase}
-          onImportSql={(id) => setImportSqlForId(id)}
+          onImportSql={handleImportSqlForId}
           onExport={handleExportForConnection}
           onOpenDefinition={handleOpenDefinition}
           onOpenRoutine={handleOpenRoutine}
@@ -1916,29 +2004,7 @@ export default function WorkspaceView({
           })()}
         />
         <div
-          onMouseDown={(e) => {
-            e.preventDefault();
-            const startX = e.clientX;
-            const startW = sidebarWidth;
-            const onMove = (ev: MouseEvent) => {
-              const dx = ev.clientX - startX;
-              const next = Math.max(
-                SIDEBAR_MIN_WIDTH,
-                Math.min(SIDEBAR_MAX_WIDTH, startW + dx),
-              );
-              setSidebarWidth(next);
-            };
-            const onUp = () => {
-              window.removeEventListener("mousemove", onMove);
-              window.removeEventListener("mouseup", onUp);
-              document.body.style.cursor = "";
-              document.body.style.userSelect = "";
-            };
-            window.addEventListener("mousemove", onMove);
-            window.addEventListener("mouseup", onUp);
-            document.body.style.cursor = "ew-resize";
-            document.body.style.userSelect = "none";
-          }}
+          onMouseDown={handleSidebarResizeMouseDown}
           role="separator"
           aria-orientation="vertical"
           className="absolute -right-0.5 top-0 bottom-0 w-1.5 cursor-ew-resize z-20"
@@ -1954,7 +2020,7 @@ export default function WorkspaceView({
           onCloseTab={handleCloseTab}
           onCloseTabs={handleCloseTabs}
           onNewQuery={handleNewQuery}
-          onImportSql={(id) => setImportSqlForId(id)}
+          onImportSql={handleImportSqlForId}
           onOpenRealtime={handleNewRealtime}
           onTabViewModeChange={handleTabViewModeChange}
           onTabQueryChange={handleTabQueryChange}
@@ -1979,37 +2045,13 @@ export default function WorkspaceView({
               small invisible strip with hover/active highlight; width clamps
               to [CHAT_MIN_WIDTH, CHAT_MAX_WIDTH]. */}
           <div
-            onMouseDown={(e) => {
-              e.preventDefault();
-              const startX = e.clientX;
-              const startW = chatWidth;
-              const onMove = (ev: MouseEvent) => {
-                // Dragging left grows the panel (we're anchored right), so
-                // width = startW + (startX - currentX).
-                const dx = startX - ev.clientX;
-                const next = Math.max(
-                  CHAT_MIN_WIDTH,
-                  Math.min(CHAT_MAX_WIDTH, startW + dx),
-                );
-                setChatWidth(next);
-              };
-              const onUp = () => {
-                window.removeEventListener("mousemove", onMove);
-                window.removeEventListener("mouseup", onUp);
-                document.body.style.cursor = "";
-                document.body.style.userSelect = "";
-              };
-              window.addEventListener("mousemove", onMove);
-              window.addEventListener("mouseup", onUp);
-              document.body.style.cursor = "ew-resize";
-              document.body.style.userSelect = "none";
-            }}
+            onMouseDown={handleChatResizeMouseDown}
             role="separator"
             aria-orientation="vertical"
             className="absolute -left-0.5 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-primary/30 active:bg-primary/50 z-20"
           />
           <ChatPanel
-            onClose={() => setChatOpen(false)}
+            onClose={handleCloseChat}
             focusedConnectionId={focusedConnection?.id}
             // The SQL *schema* the AI should scope to — NOT the rail tile's
             // database name. For Postgres the tile is the database (e.g. `apex`)
@@ -2032,7 +2074,7 @@ export default function WorkspaceView({
 
       <ConnectionModal
         isOpen={newConnectionOpen}
-        onClose={() => setNewConnectionOpen(false)}
+        onClose={handleCloseNewConnection}
         onSave={handleSaveNewConnection}
         existingTags={connectionTags}
       />
@@ -2047,7 +2089,7 @@ export default function WorkspaceView({
 
       <ImportSqlDialog
         isOpen={importSqlForId !== null}
-        onClose={() => setImportSqlForId(null)}
+        onClose={handleCloseImportSql}
         connectionId={importSqlForId}
         connectionName={
           importSqlForId
@@ -2120,7 +2162,7 @@ export default function WorkspaceView({
 
       <ConnectionExportDialog
         isOpen={exportForId !== null}
-        onClose={() => setExportForId(null)}
+        onClose={handleCloseExport}
         connectionId={exportForId}
         schemas={exportForId ? (connState.schemasById.get(exportForId) ?? []) : []}
         initialSchema={

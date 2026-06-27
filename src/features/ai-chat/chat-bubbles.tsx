@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Loader2, AlertCircle, Copy, CheckCircle2, Wrench, Check as CheckIcon, X as XIcon, ChevronRight } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { approveToolCall, type ChatMessage as StoreChatMessage } from '../../state/ai';
@@ -10,14 +10,14 @@ import { formatMessageTime, prettyToolName, extractErrorString, truncate } from 
 
 export function CopyButton({ text, className = '' }: { text: string; className?: string }) {
   const [copied, setCopied] = useState(false);
-  const onCopy = async () => {
+  const onCopy = useCallback(async () => {
     // copyText surfaces its own error toast on failure; only flip the button to
     // "Copied" when the write actually succeeded.
     if (await copyText(text)) {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     }
-  };
+  }, [text]);
   return (
     <button
       type="button"
@@ -35,11 +35,12 @@ export function CopyButton({ text, className = '' }: { text: string; className?:
  *  native `<details>` triangle. */
 function Disclosure({ label, children }: { label: string; children: ReactNode }) {
   const [open, setOpen] = useState(false);
+  const handleToggle = useCallback(() => setOpen(o => !o), []);
   return (
     <div>
       <button
         type="button"
-        onClick={() => setOpen(o => !o)}
+        onClick={handleToggle}
         className="flex items-center gap-0.5 cursor-pointer text-[10px] text-muted-foreground hover:text-foreground"
       >
         <ChevronRight className={`w-3 h-3 transition-transform ${open ? 'rotate-90' : ''}`} />
@@ -81,6 +82,17 @@ export function AssistantOrUserBubble({ message: m }: { message: StoreChatMessag
     [renderMd, m.content]
   );
 
+  const handleMarkdownClick = useCallback(async (e: React.MouseEvent<HTMLDivElement>) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-md-copy]');
+    if (!btn) return;
+    const text = btn.dataset.mdCopy ?? '';
+    if (await copyText(text)) {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    }
+  }, []);
+
   return (
     <div className={`group/msg flex min-w-0 ${isUser ? 'justify-end' : 'justify-start'}`}>
       <div
@@ -114,16 +126,7 @@ export function AssistantOrUserBubble({ message: m }: { message: StoreChatMessag
         ) : renderMd ? (
           <div
             className={markdownClass}
-            onClick={async (e) => {
-              const btn = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-md-copy]');
-              if (!btn) return;
-              const text = btn.dataset.mdCopy ?? '';
-              if (await copyText(text)) {
-                const orig = btn.textContent;
-                btn.textContent = 'Copied';
-                setTimeout(() => { btn.textContent = orig; }, 1500);
-              }
-            }}
+            onClick={handleMarkdownClick}
             dangerouslySetInnerHTML={{ __html: html }}
           />
         ) : (
@@ -546,11 +549,13 @@ function ApprovalCard({
   objectName?: string | null;
 }) {
   const [busy, setBusy] = useState(false);
-  const doApprove = async (approve: boolean) => {
+  const doApprove = useCallback(async (approve: boolean) => {
     setBusy(true);
     try { await approveToolCall(toolCallId, approve); }
     finally { setBusy(false); }
-  };
+  }, [toolCallId]);
+  const handleApprove = useCallback(() => void doApprove(true), [doApprove]);
+  const handleDeny = useCallback(() => void doApprove(false), [doApprove]);
   const isTabWrite = toolName === 'write_query_tab';
   const isPublish = toolName === 'publish_notify';
   const isSubscribe = toolName === 'subscribe_channel';
@@ -626,7 +631,7 @@ function ApprovalCard({
           variant="default"
           className="h-7 text-xs"
           disabled={busy}
-          onClick={() => void doApprove(true)}
+          onClick={handleApprove}
         >
           <CheckIcon className="w-3 h-3 mr-1" />
           {approveLabel}
@@ -636,7 +641,7 @@ function ApprovalCard({
           variant="ghost"
           className="h-7 text-xs text-destructive"
           disabled={busy}
-          onClick={() => void doApprove(false)}
+          onClick={handleDeny}
         >
           <XIcon className="w-3 h-3 mr-1" />
           Deny

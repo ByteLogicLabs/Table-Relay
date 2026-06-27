@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useCallback, useEffect, useState } from "react"
 import { useTheme } from "next-themes"
 import { Toaster as Sonner, toast, type ToasterProps } from "sonner"
 import { CircleCheckIcon, InfoIcon, TriangleAlertIcon, CircleAlertIcon, Loader2Icon, XIcon } from "lucide-react"
@@ -70,6 +70,8 @@ const Toaster = ({ ...props }: ToasterProps) => {
 function ClearAllToasts({ position }: { position?: ToasterProps["position"] }) {
   const [count, setCount] = useState(0)
 
+  const handleClearAll = useCallback(() => toast.dismiss(), [])
+
   useEffect(() => {
     const read = () =>
       document.querySelectorAll("[data-sonner-toast]").length
@@ -106,7 +108,7 @@ function ClearAllToasts({ position }: { position?: ToasterProps["position"] }) {
     >
       <button
         type="button"
-        onClick={() => toast.dismiss()}
+        onClick={handleClearAll}
         className="pointer-events-auto inline-flex items-center gap-1 rounded-full border border-border bg-popover/95 px-2.5 py-1 text-[11px] font-medium text-muted-foreground shadow-sm backdrop-blur hover:text-foreground hover:bg-popover transition-colors"
       >
         <XIcon className="size-3" />

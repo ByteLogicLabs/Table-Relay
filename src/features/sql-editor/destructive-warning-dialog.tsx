@@ -1,3 +1,4 @@
+import { useCallback } from 'react';
 import { Button } from '../../components/ui/button';
 import {
   Dialog,
@@ -22,6 +23,8 @@ export function DestructiveWarningDialog({
   statements,
   onConfirm,
 }: Props) {
+  const handleCancel = useCallback(() => onOpenChange(false), [onOpenChange]);
+
   const details = statements
     .map((s) => `[${s.kind}] ${s.detail}: ${s.sql.length > 100 ? s.sql.slice(0, 100) + '…' : s.sql}`)
     .join('\n');
@@ -42,7 +45,7 @@ export function DestructiveWarningDialog({
           {details}
         </div>
         <DialogFooter>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
+          <Button variant="ghost" onClick={handleCancel}>
             Cancel
           </Button>
           <Button variant="destructive" onClick={onConfirm}>

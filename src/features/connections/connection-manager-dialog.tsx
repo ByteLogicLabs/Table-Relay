@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
 import { Database, Edit, MoreVertical, Plug, Plus, Search, Trash2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog';
 import { Button } from '../../components/ui/button';
@@ -53,6 +53,27 @@ export default function ConnectionManagerDialog({
     onDeleteConnection(connection.id);
   };
 
+  const handleQueryChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setQuery(e.target.value);
+  }, []);
+
+  const handleCreateNew = useCallback(() => {
+    onOpenChange(false);
+    onCreateNew();
+  }, [onOpenChange, onCreateNew]);
+
+  const makeHandleConnect = useCallback((id: string) => () => connect(id), [onConnect, onOpenChange]);
+
+  const makeHandleEdit = useCallback(
+    (connection: ConnectionProfile) => () => edit(connection),
+    [onEditConnection, onOpenChange],
+  );
+
+  const makeHandleRemove = useCallback(
+    (connection: ConnectionProfile) => () => remove(connection),
+    [onDeleteConnection],
+  );
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-4xl w-[92vw] max-h-[82vh] overflow-hidden p-0 gap-0">
@@ -68,16 +89,13 @@ export default function ConnectionManagerDialog({
               placeholder="Search connections..."
               className="pl-9 h-9"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={handleQueryChange}
             />
           </div>
           <Button
             size="sm"
             className="h-9"
-            onClick={() => {
-              onOpenChange(false);
-              onCreateNew();
-            }}
+            onClick={handleCreateNew}
           >
             <Plus className="w-4 h-4 mr-2" /> New connection
           </Button>
@@ -123,7 +141,7 @@ export default function ConnectionManagerDialog({
                   </div>
 
                   <div className="flex items-center justify-end gap-1">
-                    <Button size="sm" variant="outline" onClick={() => connect(conn.id)}>
+                    <Button size="sm" variant="outline" onClick={makeHandleConnect(conn.id)}>
                       <Plug className="w-3.5 h-3.5 mr-1.5" /> Connect
                     </Button>
                     <DropdownMenu>
@@ -134,12 +152,12 @@ export default function ConnectionManagerDialog({
                         <MoreVertical className="w-4 h-4" />
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="min-w-44">
-                        <DropdownMenuItem className="whitespace-nowrap" onClick={() => edit(conn)}>
+                        <DropdownMenuItem className="whitespace-nowrap" onClick={makeHandleEdit(conn)}>
                           <Edit className="w-3.5 h-3.5 mr-2" /> Edit connection
                         </DropdownMenuItem>
                         <DropdownMenuItem
                           className="text-destructive focus:text-destructive whitespace-nowrap"
-                          onClick={() => remove(conn)}
+                          onClick={makeHandleRemove(conn)}
                         >
                           <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
                         </DropdownMenuItem>

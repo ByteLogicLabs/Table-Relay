@@ -50,13 +50,19 @@ import {
   useAdapterManifests,
   resolveManifest,
 } from "../../state/adapter-manifests";
-import { db, type RoutineInfo, type TriggerInfo, type ViewInfo } from "../../lib/db";
+import {
+  db,
+  type RoutineInfo,
+  type TableInfo,
+  type TriggerInfo,
+  type ViewInfo,
+} from "../../lib/db";
 import DbIcon from "../../components/db-icon";
 import { SidebarListSkeleton } from "../../components/skeleton";
 import { DestructiveConfirmDialog } from "../../components/destructive-confirm-dialog";
 import { useMultiSelection } from "../../hooks/use-multi-selection";
 import { getClickIntent, getKeyIntent } from "../../lib/click-intent";
-import { dialectFromManifest } from "../data-grid/editor-kinds";
+import { dialectFromManifest, type Dialect } from "../data-grid/editor-kinds";
 import { copyText } from "../../lib/clipboard";
 import { displayHost } from "../../lib/connection-display";
 import { Section } from "./sidebar-section";
@@ -1087,6 +1093,121 @@ export default function Sidebar({
     }
   };
 
+  const toggle = useCallback(
+    (k: SectionKey) => setCollapsed((c) => ({ ...c, [k]: !c[k] })),
+    [],
+  );
+  const handleOpenConnectPicker = useCallback(
+    () => setConnectPickerOpen(true),
+    [],
+  );
+  const handleOpenDbPicker = useCallback(() => setDbPickerOpen(true), []);
+  const handleOpenProcessList = useCallback(
+    () => setProcessListOpen(true),
+    [],
+  );
+  const handleNewQuery = useCallback(() => {
+    if (conn) onNewQuery(conn.id);
+  }, [conn, onNewQuery]);
+  const handleNewTable = useCallback(() => {
+    if (conn) onNewTable?.(conn.id, schemaForActions);
+  }, [conn, onNewTable, schemaForActions]);
+  const handleOpenErd = useCallback(() => {
+    if (conn) onOpenErd(conn.id, schemaForActions);
+  }, [conn, onOpenErd, schemaForActions]);
+  const handleOpenRealtime = useCallback(() => {
+    if (conn) onOpenRealtime?.(conn.id);
+  }, [conn, onOpenRealtime]);
+  const handleImportSql = useCallback(() => {
+    if (conn) onImportSql?.(conn.id);
+  }, [conn, onImportSql]);
+  const handleExport = useCallback(() => {
+    if (conn) onExport?.(conn.id);
+  }, [conn, onExport]);
+  const handleDisconnect = useCallback(() => {
+    if (conn) onDisconnect?.(conn.id);
+  }, [conn, onDisconnect]);
+  const handlePickDatabase = useCallback(
+    (name: string) => {
+      if (!conn) return;
+      onPinDatabase(conn.id, name);
+    },
+    [conn, onPinDatabase],
+  );
+  const handleFilterChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => setFilter(e.target.value),
+    [],
+  );
+  const handleRefreshSchemas = useCallback(() => {
+    if (conn) void refreshSchemas(conn.id);
+  }, [conn]);
+  const handleNewView = useCallback(() => {
+    if (conn) onNewView?.(conn.id, schemaForActions);
+  }, [conn, onNewView, schemaForActions]);
+  const handleNewFunction = useCallback(() => {
+    if (conn) onNewRoutine?.(conn.id, schemaForActions, "function");
+  }, [conn, onNewRoutine, schemaForActions]);
+  const handleNewProcedure = useCallback(() => {
+    if (conn) onNewRoutine?.(conn.id, schemaForActions, "procedure");
+  }, [conn, onNewRoutine, schemaForActions]);
+  const handleNewTrigger = useCallback(() => {
+    if (conn) onNewTrigger?.(conn.id, schemaForActions);
+  }, [conn, onNewTrigger, schemaForActions]);
+  const handleToggleTables = useCallback(() => toggle("tables"), [toggle]);
+  const handleToggleViews = useCallback(() => toggle("views"), [toggle]);
+  const handleToggleRoutines = useCallback(
+    () => toggle("routines"),
+    [toggle],
+  );
+  const handleToggleTriggers = useCallback(
+    () => toggle("triggers"),
+    [toggle],
+  );
+  const handleRefreshTables = useCallback(
+    () => void refreshTables(),
+    [refreshTables],
+  );
+  const handleRefreshViews = useCallback(
+    () => void refreshViews(),
+    [refreshViews],
+  );
+  const handleRefreshRoutines = useCallback(
+    () => void refreshRoutines(),
+    [refreshRoutines],
+  );
+  const handleRefreshTriggers = useCallback(
+    () => void refreshTriggers(),
+    [refreshTriggers],
+  );
+  const handleAddTable = useCallback(
+    () => onNewTable?.(conn?.id ?? "", schemaForActions),
+    [onNewTable, conn, schemaForActions],
+  );
+  const handleAddView = useCallback(
+    () => onNewView?.(conn?.id ?? "", schemaForActions),
+    [onNewView, conn, schemaForActions],
+  );
+  const handleAddFunction = useCallback(
+    () => onNewRoutine?.(conn?.id ?? "", schemaForActions, "function"),
+    [onNewRoutine, conn, schemaForActions],
+  );
+  const handleAddTrigger = useCallback(
+    () => onNewTrigger?.(conn?.id ?? "", schemaForActions),
+    [onNewTrigger, conn, schemaForActions],
+  );
+  const handleTableConfirmOpenChange = useCallback((o: boolean) => {
+    if (!o) setTableConfirm(null);
+  }, []);
+  const handleTableConfirmConfirm = useCallback(() => {
+    void performTableDestructive();
+  }, [performTableDestructive]);
+  const handleTriggerConfirmOpenChange = useCallback((o: boolean) => {
+    if (!o) setTriggerConfirm(null);
+  }, []);
+  const handleTriggerConfirmConfirm = useCallback(() => {
+    void performTriggerDrop();
+  }, [performTriggerDrop]);
+
   if (!conn) {
     return (
       <div className="w-full shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border items-center justify-center gap-3 text-xs text-muted-foreground px-6 text-center">
@@ -1095,7 +1216,7 @@ export default function Sidebar({
           <Button
             size="sm"
             variant="outline"
-            onClick={() => setConnectPickerOpen(true)}
+            onClick={handleOpenConnectPicker}
           >
             <Plus className="w-3.5 h-3.5 mr-1.5" /> Open connection
           </Button>
@@ -1117,8 +1238,6 @@ export default function Sidebar({
     );
   }
 
-  const toggle = (k: SectionKey) => setCollapsed((c) => ({ ...c, [k]: !c[k] }));
-
   return (
     <div className="w-full shrink-0 flex flex-col bg-sidebar-bg/50 h-full border-r border-border">
       {/* Quick-action toolbar */}
@@ -1132,7 +1251,7 @@ export default function Sidebar({
           className="h-7 w-7"
           title="Open connection"
           aria-label="Open connection"
-          onClick={() => setConnectPickerOpen(true)}
+          onClick={handleOpenConnectPicker}
         >
           <Server className="w-4 h-4" />
         </Button>
@@ -1142,7 +1261,7 @@ export default function Sidebar({
           className="h-7 w-7"
           title="Change database"
           aria-label="Change database"
-          onClick={() => setDbPickerOpen(true)}
+          onClick={handleOpenDbPicker}
         >
           <Database className="w-4 h-4" />
         </Button>
@@ -1153,7 +1272,7 @@ export default function Sidebar({
             className="h-7 w-7"
             title="Processes"
             aria-label="Processes"
-            onClick={() => setProcessListOpen(true)}
+            onClick={handleOpenProcessList}
           >
             <Activity className="w-4 h-4" />
           </Button>
@@ -1194,34 +1313,30 @@ export default function Sidebar({
               )}
             />
             <DropdownMenuContent align="end" className="min-w-48">
-              <DropdownMenuItem onClick={() => setDbPickerOpen(true)}>
+              <DropdownMenuItem onClick={handleOpenDbPicker}>
                 <Database className="w-4 h-4 mr-2" /> Change database
               </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onNewQuery(conn.id)}>
+              <DropdownMenuItem onClick={handleNewQuery}>
                 <Plus className="w-4 h-4 mr-2" /> New query
               </DropdownMenuItem>
               {selectedDb && onNewTable && supportsCreateTable && (
-                <DropdownMenuItem
-                  onClick={() => onNewTable(conn.id, schemaForActions)}
-                >
+                <DropdownMenuItem onClick={handleNewTable}>
                   <TableIcon className="w-4 h-4 mr-2" />{" "}
                   {isDocumentStore ? "Create collection" : "Create table"}
                 </DropdownMenuItem>
               )}
               {selectedDb && supportsDiagram && (
-                <DropdownMenuItem
-                  onClick={() => onOpenErd(conn.id, schemaForActions)}
-                >
+                <DropdownMenuItem onClick={handleOpenErd}>
                   <Waypoints className="w-4 h-4 mr-2" /> Generate ER diagram
                 </DropdownMenuItem>
               )}
               {supportsRealtime && onOpenRealtime && (
-                <DropdownMenuItem onClick={() => onOpenRealtime(conn.id)}>
+                <DropdownMenuItem onClick={handleOpenRealtime}>
                   <Radio className="w-4 h-4 mr-2" /> Realtime
                 </DropdownMenuItem>
               )}
               {supportsProcessList && (
-                <DropdownMenuItem onClick={() => setProcessListOpen(true)}>
+                <DropdownMenuItem onClick={handleOpenProcessList}>
                   <Activity className="w-4 h-4 mr-2" /> Processes
                 </DropdownMenuItem>
               )}
@@ -1230,12 +1345,12 @@ export default function Sidebar({
                 <DropdownMenuSeparator />
               ) : null}
               {onImportSql && supportsImport && (
-                <DropdownMenuItem onClick={() => onImportSql(conn.id)}>
+                <DropdownMenuItem onClick={handleImportSql}>
                   <FileUp className="w-4 h-4 mr-2" /> Import data…
                 </DropdownMenuItem>
               )}
               {onExport && supportsExport && (
-                <DropdownMenuItem onClick={() => onExport(conn.id)}>
+                <DropdownMenuItem onClick={handleExport}>
                   <FileDown className="w-4 h-4 mr-2" /> Export data…
                 </DropdownMenuItem>
               )}
@@ -1246,7 +1361,7 @@ export default function Sidebar({
               {onDisconnect && (
                 <DropdownMenuItem
                   className="text-destructive focus:text-destructive"
-                  onClick={() => onDisconnect(conn.id)}
+                  onClick={handleDisconnect}
                 >
                   <Unplug className="w-4 h-4 mr-2" /> Disconnect
                 </DropdownMenuItem>
@@ -1260,10 +1375,7 @@ export default function Sidebar({
         open={dbPickerOpen}
         onOpenChange={setDbPickerOpen}
         connection={conn}
-        onPick={(name) => {
-          if (!conn) return;
-          onPinDatabase(conn.id, name);
-        }}
+        onPick={handlePickDatabase}
       />
 
       <ConnectPickerDialog
@@ -1302,7 +1414,7 @@ export default function Sidebar({
             placeholder="Filter…"
             className="pl-7 h-7 text-xs bg-muted/50 border-none focus-visible:ring-1"
             value={filter}
-            onChange={(e) => setFilter(e.target.value)}
+            onChange={handleFilterChange}
           />
         </div>
       </div>
@@ -1410,7 +1522,7 @@ export default function Sidebar({
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => void refreshSchemas(conn.id)}
+                  onClick={handleRefreshSchemas}
                 >
                   <RefreshCw className="w-3.5 h-3.5 mr-1.5" /> Refresh
                 </Button>
@@ -1427,7 +1539,7 @@ export default function Sidebar({
                 <Button
                   size="sm"
                   variant="outline"
-                  onClick={() => setDbPickerOpen(true)}
+                  onClick={handleOpenDbPicker}
                 >
                   <Database className="w-3.5 h-3.5 mr-1.5" /> Choose database
                 </Button>
@@ -1444,14 +1556,10 @@ export default function Sidebar({
                   label={entityNoun}
                   count={fTables.length}
                   collapsed={collapsed.tables}
-                  onToggle={() => toggle("tables")}
-                  onRefresh={() => void refreshTables()}
+                  onToggle={handleToggleTables}
+                  onRefresh={handleRefreshTables}
                   refreshing={refreshingSection === "tables"}
-                  onAdd={
-                    onNewTable
-                      ? () => onNewTable(conn.id, schemaForActions)
-                      : undefined
-                  }
+                  onAdd={onNewTable ? handleAddTable : undefined}
                   addTitle={isDocumentStore ? "New collection" : "New table"}
                 />
                 {!collapsed.tables && (
@@ -1472,118 +1580,31 @@ export default function Sidebar({
                         isSelected && tableSelection.selectedIds.size > 1;
                       const selectionCount = tableSelection.selectedIds.size;
                       return (
-                        <ContextMenu key={`t-${t.name}`}>
-                          <ContextMenuTrigger>
-                            <div
-                              role="option"
-                              aria-selected={isSelected}
-                              data-focused={isFocused || undefined}
-                              tabIndex={-1}
-                              title={t.name}
-                              className={
-                                rowCls(active) +
-                                // Only the ACTIVE table (the open data tab) gets a
-                                // highlight in normal use. A single
-                                // selected/focused row shows nothing extra, so we
-                                // never have two "active-looking" rows at once.
-                                // Multi-selection (2+ rows, for bulk drop/copy)
-                                // still highlights every selected row + the
-                                // keyboard cursor so the bulk target is visible.
-                                (inMultiSelection && !active
-                                  ? " bg-primary/10"
-                                  : "") +
-                                (inMultiSelection && isFocused
-                                  ? " ring-1 ring-inset ring-primary/40"
-                                  : "")
-                              }
-                              onClick={(e) => handleTableRowClick(e, t.name)}
-                              onContextMenu={() =>
-                                handleTableRowContextMenu(t.name)
-                              }
-                            >
-                              <TableIcon className={iconCls(active)} />
-                              <span className="flex-1 whitespace-nowrap">{t.name}</span>
-                            </div>
-                          </ContextMenuTrigger>
-                          <ContextMenuContent className="w-52">
-                            <ContextMenuItem
-                              onClick={() =>
-                                onOpenTable(conn.id, schemaForActions, t.name)
-                              }
-                            >
-                              Open data
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              onClick={() =>
-                                onOpenStructure(
-                                  conn.id,
-                                  schemaForActions,
-                                  t.name,
-                                )
-                              }
-                            >
-                              Open Schema
-                            </ContextMenuItem>
-                            <ContextMenuItem
-                              onClick={() => onNewQuery(conn.id, t.name)}
-                            >
-                              New query
-                            </ContextMenuItem>
-                            {supportsDiagram && (
-                              <>
-                                <ContextMenuSeparator />
-                                <ContextMenuItem
-                                  onClick={() =>
-                                    onOpenErd(conn.id, schemaForActions, t.name)
-                                  }
-                                >
-                                  View ER diagram
-                                </ContextMenuItem>
-                              </>
-                            )}
-                            <ContextMenuSeparator />
-                            <ContextMenuItem
-                              onClick={() => {
-                                const names = inMultiSelection
-                                  ? [...tableSelection.selectedIds]
-                                  : [t.name];
-                                void copyText(
-                                  names.join("\n"),
-                                  names.length === 1
-                                    ? "Name copied"
-                                    : `Copied ${names.length} names`,
-                                );
-                              }}
-                            >
-                              {inMultiSelection
-                                ? `Copy ${selectionCount} names`
-                                : "Copy name"}
-                            </ContextMenuItem>
-                            {supportsDdl && (
-                              <>
-                                <ContextMenuSeparator />
-                                <ContextMenuItem
-                                  onClick={() =>
-                                    requestTruncateSelected(t.name)
-                                  }
-                                >
-                                  {inMultiSelection
-                                    ? `Truncate ${selectionCount} tables…`
-                                    : "Truncate table…"}
-                                </ContextMenuItem>
-                                {supportsDropTable && (
-                                  <ContextMenuItem
-                                    onClick={() => requestDropSelected(t.name)}
-                                  >
-                                    {inMultiSelection
-                                      ? `Drop ${selectionCount} tables…`
-                                      : "Drop table…"}
-                                  </ContextMenuItem>
-                                )}
-                              </>
-                            )}
-                          </ContextMenuContent>
-                        </ContextMenu>
+                        <TableRow
+                          key={`t-${t.name}`}
+                          table={t}
+                          connId={conn.id}
+                          schemaForActions={schemaForActions}
+                          active={active}
+                          isSelected={isSelected}
+                          isFocused={isFocused}
+                          inMultiSelection={inMultiSelection}
+                          selectionCount={selectionCount}
+                          selectedIds={tableSelection.selectedIds}
+                          supportsDiagram={supportsDiagram}
+                          supportsDdl={supportsDdl}
+                          supportsDropTable={supportsDropTable}
+                          rowCls={rowCls}
+                          iconCls={iconCls}
+                          onRowClick={handleTableRowClick}
+                          onRowContextMenu={handleTableRowContextMenu}
+                          onOpenTable={onOpenTable}
+                          onOpenStructure={onOpenStructure}
+                          onNewQuery={onNewQuery}
+                          onOpenErd={onOpenErd}
+                          requestTruncateSelected={requestTruncateSelected}
+                          requestDropSelected={requestDropSelected}
+                        />
                       );
                     })}
                   </div>
@@ -1595,14 +1616,10 @@ export default function Sidebar({
                     count={fViews.length}
                     loading={loadingExtras && views.length === 0}
                     collapsed={collapsed.views}
-                    onToggle={() => toggle("views")}
-                    onRefresh={() => void refreshViews()}
+                    onToggle={handleToggleViews}
+                    onRefresh={handleRefreshViews}
                     refreshing={refreshingSection === "views"}
-                    onAdd={
-                      onNewView
-                        ? () => onNewView(conn.id, schemaForActions)
-                        : undefined
-                    }
+                    onAdd={onNewView ? handleAddView : undefined}
                     addTitle="New view"
                   />
                 )}
@@ -1611,56 +1628,18 @@ export default function Sidebar({
                 {fViews.map((v) => {
                     const active = matchesActive("view", v.name);
                     return (
-                      <ContextMenu key={`v-${v.name}`}>
-                        <ContextMenuTrigger>
-                          <button
-                            className={rowCls(active)}
-                            title={v.name}
-                            onClick={() =>
-                              void openViewDefinition(
-                                conn.id,
-                                schemaForActions,
-                                v.name,
-                              )
-                            }
-                          >
-                            <LayoutTemplate className={iconCls(active)} />
-                            <span className="flex-1 whitespace-nowrap">{v.name}</span>
-                            {v.isUpdatable && (
-                              <span className="text-[9px] text-muted-foreground/70">
-                                upd
-                              </span>
-                            )}
-                          </button>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent className="w-48">
-                          <ContextMenuItem
-                            onClick={() =>
-                              onOpenTable(conn.id, schemaForActions, v.name)
-                            }
-                          >
-                            Open data
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() =>
-                              void openViewDefinition(
-                                conn.id,
-                                schemaForActions,
-                                v.name,
-                              )
-                            }
-                          >
-                            Edit definition
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() =>
-                              onOpenStructure(conn.id, schemaForActions, v.name)
-                            }
-                          >
-                            Open Schema
-                          </ContextMenuItem>
-                        </ContextMenuContent>
-                      </ContextMenu>
+                      <ViewRow
+                        key={`v-${v.name}`}
+                        view={v}
+                        connId={conn.id}
+                        schemaForActions={schemaForActions}
+                        active={active}
+                        rowCls={rowCls}
+                        iconCls={iconCls}
+                        onOpenTable={onOpenTable}
+                        onOpenStructure={onOpenStructure}
+                        openViewDefinition={openViewDefinition}
+                      />
                     );
                   })}
                 </div>
@@ -1672,15 +1651,10 @@ export default function Sidebar({
                     count={fRoutines.length}
                     loading={loadingExtras && routines.length === 0}
                     collapsed={collapsed.routines}
-                    onToggle={() => toggle("routines")}
-                    onRefresh={() => void refreshRoutines()}
+                    onToggle={handleToggleRoutines}
+                    onRefresh={handleRefreshRoutines}
                     refreshing={refreshingSection === "routines"}
-                    onAdd={
-                      onNewRoutine
-                        ? () =>
-                            onNewRoutine(conn.id, schemaForActions, "function")
-                        : undefined
-                    }
+                    onAdd={onNewRoutine ? handleAddFunction : undefined}
                     addTitle="New function"
                   />
                 )}
@@ -1712,103 +1686,21 @@ export default function Sidebar({
                       // not unique. Include kind + index to guarantee a stable
                       // unique React key; duplicate keys silently break list
                       // reconciliation and wedge sidebar click handlers.
-                      <ContextMenu key={`r-${r.kind}-${r.name}-${i}`}>
-                        <ContextMenuTrigger>
-                          <button
-                            className={rowCls(active)}
-                            title={tooltip}
-                            onClick={() => {
-                              if (onOpenRoutine)
-                                onOpenRoutine(
-                                  conn.id,
-                                  schemaForActions,
-                                  r.name,
-                                  routineKind,
-                                );
-                              else
-                                void openRoutineDefinition(
-                                  conn.id,
-                                  schemaForActions,
-                                  r.name,
-                                  r.kind,
-                                );
-                            }}
-                          >
-                            <FunctionSquare className={iconCls(active)} />
-                            <span className="flex-1 whitespace-nowrap">{r.name}</span>
-                            <span
-                              className={`text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
-                            >
-                              {r.kind}
-                            </span>
-                          </button>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent className="w-48">
-                          <ContextMenuItem
-                            onClick={() => {
-                              const k = (
-                                r.kind.toLowerCase() === "function"
-                                  ? "function"
-                                  : "procedure"
-                              ) as "function" | "procedure";
-                              if (onOpenRoutine)
-                                onOpenRoutine(
-                                  conn.id,
-                                  schemaForActions,
-                                  r.name,
-                                  k,
-                                );
-                              else
-                                void openRoutineDefinition(
-                                  conn.id,
-                                  schemaForActions,
-                                  r.name,
-                                  r.kind,
-                                );
-                            }}
-                          >
-                            Edit definition
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() =>
-                              void openRoutineDefinition(
-                                conn.id,
-                                schemaForActions,
-                                r.name,
-                                r.kind,
-                              )
-                            }
-                          >
-                            Edit as SQL
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() => {
-                              // Quote per dialect (backticks on MySQL, ANSI
-                              // double-quotes on Postgres/SQLite) so the copied
-                              // call snippet runs as-is on the active engine.
-                              const qual = `${quoteIdentForDialect(schemaForActions, dialect)}.${quoteIdentForDialect(r.name, dialect)}`;
-                              const params = r.parameters
-                                .map(() => "?")
-                                .join(", ");
-                              const call =
-                                r.kind === "function"
-                                  ? `SELECT ${qual}(${params});`
-                                  : `CALL ${qual}(${params});`;
-                              onNewQuery(conn.id, r.name);
-                              void copyText(call, "Call copied to clipboard");
-                            }}
-                          >
-                            New query + copy call
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() => {
-                              void copyText(r.name, "Name copied");
-                            }}
-                          >
-                            Copy name
-                          </ContextMenuItem>
-                        </ContextMenuContent>
-                      </ContextMenu>
+                      <RoutineRow
+                        key={`r-${r.kind}-${r.name}-${i}`}
+                        routine={r}
+                        connId={conn.id}
+                        schemaForActions={schemaForActions}
+                        dialect={dialect}
+                        active={active}
+                        routineKind={routineKind}
+                        tooltip={tooltip}
+                        rowCls={rowCls}
+                        iconCls={iconCls}
+                        onOpenRoutine={onOpenRoutine}
+                        onNewQuery={onNewQuery}
+                        openRoutineDefinition={openRoutineDefinition}
+                      />
                     );
                   })}
                 </div>
@@ -1820,14 +1712,10 @@ export default function Sidebar({
                     count={fTriggers.length}
                     loading={loadingExtras && triggers.length === 0}
                     collapsed={collapsed.triggers}
-                    onToggle={() => toggle("triggers")}
-                    onRefresh={() => void refreshTriggers()}
+                    onToggle={handleToggleTriggers}
+                    onRefresh={handleRefreshTriggers}
                     refreshing={refreshingSection === "triggers"}
-                    onAdd={
-                      onNewTrigger
-                        ? () => onNewTrigger(conn.id, schemaForActions)
-                        : undefined
-                    }
+                    onAdd={onNewTrigger ? handleAddTrigger : undefined}
                     addTitle="New trigger"
                   />
                 )}
@@ -1838,60 +1726,19 @@ export default function Sidebar({
                     const meta = [t.timing, t.event].filter(Boolean).join(" ");
                     const tooltip = `Trigger ${t.name}: ${t.timing} ${t.event} ON ${t.table}`;
                     return (
-                      <ContextMenu key={`tg-${t.name}-${t.table}-${i}`}>
-                        <ContextMenuTrigger>
-                          <button
-                            className={`${rowCls(active)} min-w-max`}
-                            title={tooltip}
-                            onClick={() =>
-                              onOpenTrigger?.(
-                                conn.id,
-                                schemaForActions,
-                                t.name,
-                              )
-                            }
-                          >
-                            <Zap className={iconCls(active)} />
-                            <span className="flex-1 whitespace-nowrap">{t.name}</span>
-                            {/* nowrap + shrink-0 so a long timing/event label
-                                ("AFTER INSERT OR DELETE OR UPDATE") stays on one
-                                line and scrolls horizontally instead of wrapping
-                                and making the row tall. */}
-                            <span
-                              className={`shrink-0 whitespace-nowrap text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
-                            >
-                              {meta}
-                            </span>
-                          </button>
-                        </ContextMenuTrigger>
-                        <ContextMenuContent className="w-48">
-                          <ContextMenuItem
-                            onClick={() =>
-                              onOpenTrigger?.(
-                                conn.id,
-                                schemaForActions,
-                                t.name,
-                              )
-                            }
-                          >
-                            Edit definition
-                          </ContextMenuItem>
-                          <ContextMenuItem
-                            onClick={() => {
-                              void copyText(t.name, "Name copied");
-                            }}
-                          >
-                            Copy name
-                          </ContextMenuItem>
-                          <ContextMenuSeparator />
-                          <ContextMenuItem
-                            className="text-destructive focus:text-destructive"
-                            onClick={() => setTriggerConfirm(t)}
-                          >
-                            Drop trigger
-                          </ContextMenuItem>
-                        </ContextMenuContent>
-                      </ContextMenu>
+                      <TriggerRow
+                        key={`tg-${t.name}-${t.table}-${i}`}
+                        trigger={t}
+                        connId={conn.id}
+                        schemaForActions={schemaForActions}
+                        active={active}
+                        meta={meta}
+                        tooltip={tooltip}
+                        rowCls={rowCls}
+                        iconCls={iconCls}
+                        onOpenTrigger={onOpenTrigger}
+                        onDropTrigger={setTriggerConfirm}
+                      />
                     );
                   })}
                 </div>
@@ -1933,47 +1780,31 @@ export default function Sidebar({
             />
             <DropdownMenuContent align="start" side="top" className="w-52 mb-1">
               {supportsCreateTable && (
-                <DropdownMenuItem
-                  onClick={() =>
-                    conn && onNewTable?.(conn.id, schemaForActions)
-                  }
-                >
+                <DropdownMenuItem onClick={handleNewTable}>
                   <TableIcon className="w-4 h-4 mr-2" />
                   {isDocumentStore ? "New collection" : "New table"}
                 </DropdownMenuItem>
               )}
               {supportsViews && onNewView && (
-                <DropdownMenuItem
-                  onClick={() => onNewView(conn.id, schemaForActions)}
-                >
+                <DropdownMenuItem onClick={handleNewView}>
                   <LayoutTemplate className="w-4 h-4 mr-2" />
                   New view
                 </DropdownMenuItem>
               )}
               {supportsRoutines && onNewRoutine && (
                 <>
-                  <DropdownMenuItem
-                    onClick={() =>
-                      onNewRoutine(conn.id, schemaForActions, "function")
-                    }
-                  >
+                  <DropdownMenuItem onClick={handleNewFunction}>
                     <FunctionSquare className="w-4 h-4 mr-2" />
                     New function
                   </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onClick={() =>
-                      onNewRoutine(conn.id, schemaForActions, "procedure")
-                    }
-                  >
+                  <DropdownMenuItem onClick={handleNewProcedure}>
                     <FunctionSquare className="w-4 h-4 mr-2" />
                     New procedure
                   </DropdownMenuItem>
                 </>
               )}
               {supportsTriggers && onNewTrigger && (
-                <DropdownMenuItem
-                  onClick={() => onNewTrigger(conn.id, schemaForActions)}
-                >
+                <DropdownMenuItem onClick={handleNewTrigger}>
                   <Zap className="w-4 h-4 mr-2" />
                   New trigger
                 </DropdownMenuItem>
@@ -1985,9 +1816,7 @@ export default function Sidebar({
 
       <DestructiveConfirmDialog
         open={tableConfirm !== null}
-        onOpenChange={(o) => {
-          if (!o) setTableConfirm(null);
-        }}
+        onOpenChange={handleTableConfirmOpenChange}
         action={tableConfirm?.kind === "truncate" ? "Truncate" : "Drop"}
         itemNoun="table"
         itemNames={tableConfirm?.tableNames ?? []}
@@ -1997,16 +1826,12 @@ export default function Sidebar({
             ? "All rows will be removed. This cannot be undone."
             : "The table and all its data will be removed. This cannot be undone."
         }
-        onConfirm={() => {
-          void performTableDestructive();
-        }}
+        onConfirm={handleTableConfirmConfirm}
       />
 
       <DestructiveConfirmDialog
         open={triggerConfirm !== null}
-        onOpenChange={(o) => {
-          if (!o) setTriggerConfirm(null);
-        }}
+        onOpenChange={handleTriggerConfirmOpenChange}
         action="Drop"
         itemNoun="trigger"
         itemNames={triggerConfirm ? [triggerConfirm.name] : []}
@@ -2014,10 +1839,462 @@ export default function Sidebar({
           triggerConfirm ? `on ${triggerConfirm.table}` : undefined
         }
         warning="The trigger will be removed. This cannot be undone."
-        onConfirm={() => {
-          void performTriggerDrop();
-        }}
+        onConfirm={handleTriggerConfirmConfirm}
       />
     </div>
+  );
+}
+
+interface TableRowProps {
+  table: TableInfo;
+  connId: string;
+  schemaForActions: string;
+  active: boolean;
+  isSelected: boolean;
+  isFocused: boolean;
+  inMultiSelection: boolean;
+  selectionCount: number;
+  selectedIds: Set<string>;
+  supportsDiagram: boolean;
+  supportsDdl: boolean;
+  supportsDropTable: boolean;
+  rowCls: (active: boolean) => string;
+  iconCls: (active: boolean) => string;
+  onRowClick: (e: React.MouseEvent, name: string) => void;
+  onRowContextMenu: (name: string) => void;
+  onOpenTable: (connectionId: string, schema: string, tableName: string) => void;
+  onOpenStructure: (
+    connectionId: string,
+    schema: string,
+    tableName: string,
+  ) => void;
+  onNewQuery: (connectionId: string, tableName?: string) => void;
+  onOpenErd: (
+    connectionId: string,
+    schemaName: string,
+    tableName?: string,
+  ) => void;
+  requestTruncateSelected: (triggerName?: string) => void;
+  requestDropSelected: (triggerName?: string) => void;
+}
+
+function TableRow({
+  table: t,
+  connId,
+  schemaForActions,
+  active,
+  isSelected,
+  isFocused,
+  inMultiSelection,
+  selectionCount,
+  selectedIds,
+  supportsDiagram,
+  supportsDdl,
+  supportsDropTable,
+  rowCls,
+  iconCls,
+  onRowClick,
+  onRowContextMenu,
+  onOpenTable,
+  onOpenStructure,
+  onNewQuery,
+  onOpenErd,
+  requestTruncateSelected,
+  requestDropSelected,
+}: TableRowProps) {
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => onRowClick(e, t.name),
+    [onRowClick, t.name],
+  );
+  const handleContextMenu = useCallback(
+    () => onRowContextMenu(t.name),
+    [onRowContextMenu, t.name],
+  );
+  const handleOpenData = useCallback(
+    () => onOpenTable(connId, schemaForActions, t.name),
+    [onOpenTable, connId, schemaForActions, t.name],
+  );
+  const handleOpenStructure = useCallback(
+    () => onOpenStructure(connId, schemaForActions, t.name),
+    [onOpenStructure, connId, schemaForActions, t.name],
+  );
+  const handleNewQuery = useCallback(
+    () => onNewQuery(connId, t.name),
+    [onNewQuery, connId, t.name],
+  );
+  const handleOpenErd = useCallback(
+    () => onOpenErd(connId, schemaForActions, t.name),
+    [onOpenErd, connId, schemaForActions, t.name],
+  );
+  const handleCopyNames = useCallback(() => {
+    const names = inMultiSelection ? [...selectedIds] : [t.name];
+    void copyText(
+      names.join("\n"),
+      names.length === 1
+        ? "Name copied"
+        : `Copied ${names.length} names`,
+    );
+  }, [inMultiSelection, selectedIds, t.name]);
+  const handleTruncate = useCallback(
+    () => requestTruncateSelected(t.name),
+    [requestTruncateSelected, t.name],
+  );
+  const handleDrop = useCallback(
+    () => requestDropSelected(t.name),
+    [requestDropSelected, t.name],
+  );
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger>
+        <div
+          role="option"
+          aria-selected={isSelected}
+          data-focused={isFocused || undefined}
+          tabIndex={-1}
+          title={t.name}
+          className={
+            rowCls(active) +
+            // Only the ACTIVE table (the open data tab) gets a
+            // highlight in normal use. A single
+            // selected/focused row shows nothing extra, so we
+            // never have two "active-looking" rows at once.
+            // Multi-selection (2+ rows, for bulk drop/copy)
+            // still highlights every selected row + the
+            // keyboard cursor so the bulk target is visible.
+            (inMultiSelection && !active
+              ? " bg-primary/10"
+              : "") +
+            (inMultiSelection && isFocused
+              ? " ring-1 ring-inset ring-primary/40"
+              : "")
+          }
+          onClick={handleClick}
+          onContextMenu={handleContextMenu}
+        >
+          <TableIcon className={iconCls(active)} />
+          <span className="flex-1 whitespace-nowrap">{t.name}</span>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-52">
+        <ContextMenuItem onClick={handleOpenData}>
+          Open data
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleOpenStructure}>
+          Open Schema
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleNewQuery}>
+          New query
+        </ContextMenuItem>
+        {supportsDiagram && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={handleOpenErd}>
+              View ER diagram
+            </ContextMenuItem>
+          </>
+        )}
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={handleCopyNames}>
+          {inMultiSelection
+            ? `Copy ${selectionCount} names`
+            : "Copy name"}
+        </ContextMenuItem>
+        {supportsDdl && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem onClick={handleTruncate}>
+              {inMultiSelection
+                ? `Truncate ${selectionCount} tables…`
+                : "Truncate table…"}
+            </ContextMenuItem>
+            {supportsDropTable && (
+              <ContextMenuItem onClick={handleDrop}>
+                {inMultiSelection
+                  ? `Drop ${selectionCount} tables…`
+                  : "Drop table…"}
+              </ContextMenuItem>
+            )}
+          </>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+interface ViewRowProps {
+  view: ViewInfo;
+  connId: string;
+  schemaForActions: string;
+  active: boolean;
+  rowCls: (active: boolean) => string;
+  iconCls: (active: boolean) => string;
+  onOpenTable: (connectionId: string, schema: string, tableName: string) => void;
+  onOpenStructure: (
+    connectionId: string,
+    schema: string,
+    tableName: string,
+  ) => void;
+  openViewDefinition: (
+    connectionId: string,
+    dbName: string,
+    viewName: string,
+  ) => Promise<void>;
+}
+
+function ViewRow({
+  view: v,
+  connId,
+  schemaForActions,
+  active,
+  rowCls,
+  iconCls,
+  onOpenTable,
+  onOpenStructure,
+  openViewDefinition,
+}: ViewRowProps) {
+  const handleEditDefinition = useCallback(
+    () => void openViewDefinition(connId, schemaForActions, v.name),
+    [openViewDefinition, connId, schemaForActions, v.name],
+  );
+  const handleOpenData = useCallback(
+    () => onOpenTable(connId, schemaForActions, v.name),
+    [onOpenTable, connId, schemaForActions, v.name],
+  );
+  const handleOpenStructure = useCallback(
+    () => onOpenStructure(connId, schemaForActions, v.name),
+    [onOpenStructure, connId, schemaForActions, v.name],
+  );
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger>
+        <button
+          className={rowCls(active)}
+          title={v.name}
+          onClick={handleEditDefinition}
+        >
+          <LayoutTemplate className={iconCls(active)} />
+          <span className="flex-1 whitespace-nowrap">{v.name}</span>
+          {v.isUpdatable && (
+            <span className="text-[9px] text-muted-foreground/70">
+              upd
+            </span>
+          )}
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-48">
+        <ContextMenuItem onClick={handleOpenData}>
+          Open data
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleEditDefinition}>
+          Edit definition
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleOpenStructure}>
+          Open Schema
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+interface RoutineRowProps {
+  routine: RoutineInfo;
+  connId: string;
+  schemaForActions: string;
+  dialect: Dialect;
+  active: boolean;
+  routineKind: "function" | "procedure";
+  tooltip: string;
+  rowCls: (active: boolean) => string;
+  iconCls: (active: boolean) => string;
+  onOpenRoutine?: (
+    connectionId: string,
+    schema: string,
+    name: string,
+    kind: "function" | "procedure",
+  ) => void;
+  onNewQuery: (connectionId: string, tableName?: string) => void;
+  openRoutineDefinition: (
+    connectionId: string,
+    dbName: string,
+    routineName: string,
+    kind: string,
+  ) => Promise<void>;
+}
+
+function RoutineRow({
+  routine: r,
+  connId,
+  schemaForActions,
+  dialect,
+  active,
+  routineKind,
+  tooltip,
+  rowCls,
+  iconCls,
+  onOpenRoutine,
+  onNewQuery,
+  openRoutineDefinition,
+}: RoutineRowProps) {
+  const handleOpen = useCallback(() => {
+    if (onOpenRoutine)
+      onOpenRoutine(connId, schemaForActions, r.name, routineKind);
+    else void openRoutineDefinition(connId, schemaForActions, r.name, r.kind);
+  }, [
+    onOpenRoutine,
+    openRoutineDefinition,
+    connId,
+    schemaForActions,
+    r.name,
+    r.kind,
+    routineKind,
+  ]);
+  const handleEditDefinition = useCallback(() => {
+    const k = (
+      r.kind.toLowerCase() === "function"
+        ? "function"
+        : "procedure"
+    ) as "function" | "procedure";
+    if (onOpenRoutine) onOpenRoutine(connId, schemaForActions, r.name, k);
+    else void openRoutineDefinition(connId, schemaForActions, r.name, r.kind);
+  }, [
+    onOpenRoutine,
+    openRoutineDefinition,
+    connId,
+    schemaForActions,
+    r.name,
+    r.kind,
+  ]);
+  const handleEditAsSql = useCallback(
+    () => void openRoutineDefinition(connId, schemaForActions, r.name, r.kind),
+    [openRoutineDefinition, connId, schemaForActions, r.name, r.kind],
+  );
+  const handleNewQueryCopyCall = useCallback(() => {
+    // Quote per dialect (backticks on MySQL, ANSI
+    // double-quotes on Postgres/SQLite) so the copied
+    // call snippet runs as-is on the active engine.
+    const qual = `${quoteIdentForDialect(schemaForActions, dialect)}.${quoteIdentForDialect(r.name, dialect)}`;
+    const params = r.parameters.map(() => "?").join(", ");
+    const call =
+      r.kind === "function"
+        ? `SELECT ${qual}(${params});`
+        : `CALL ${qual}(${params});`;
+    onNewQuery(connId, r.name);
+    void copyText(call, "Call copied to clipboard");
+  }, [
+    dialect,
+    schemaForActions,
+    onNewQuery,
+    connId,
+    r.name,
+    r.kind,
+    r.parameters,
+  ]);
+  const handleCopyName = useCallback(() => {
+    void copyText(r.name, "Name copied");
+  }, [r.name]);
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger>
+        <button className={rowCls(active)} title={tooltip} onClick={handleOpen}>
+          <FunctionSquare className={iconCls(active)} />
+          <span className="flex-1 whitespace-nowrap">{r.name}</span>
+          <span
+            className={`text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
+          >
+            {r.kind}
+          </span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-48">
+        <ContextMenuItem onClick={handleEditDefinition}>
+          Edit definition
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleEditAsSql}>
+          Edit as SQL
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleNewQueryCopyCall}>
+          New query + copy call
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleCopyName}>
+          Copy name
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
+  );
+}
+
+interface TriggerRowProps {
+  trigger: TriggerInfo;
+  connId: string;
+  schemaForActions: string;
+  active: boolean;
+  meta: string;
+  tooltip: string;
+  rowCls: (active: boolean) => string;
+  iconCls: (active: boolean) => string;
+  onOpenTrigger?: (connectionId: string, schema: string, name: string) => void;
+  onDropTrigger: (trigger: TriggerInfo) => void;
+}
+
+function TriggerRow({
+  trigger: t,
+  connId,
+  schemaForActions,
+  active,
+  meta,
+  tooltip,
+  rowCls,
+  iconCls,
+  onOpenTrigger,
+  onDropTrigger,
+}: TriggerRowProps) {
+  const handleOpen = useCallback(
+    () => onOpenTrigger?.(connId, schemaForActions, t.name),
+    [onOpenTrigger, connId, schemaForActions, t.name],
+  );
+  const handleCopyName = useCallback(() => {
+    void copyText(t.name, "Name copied");
+  }, [t.name]);
+  const handleDrop = useCallback(
+    () => onDropTrigger(t),
+    [onDropTrigger, t],
+  );
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger>
+        <button
+          className={`${rowCls(active)} min-w-max`}
+          title={tooltip}
+          onClick={handleOpen}
+        >
+          <Zap className={iconCls(active)} />
+          <span className="flex-1 whitespace-nowrap">{t.name}</span>
+          {/* nowrap + shrink-0 so a long timing/event label
+              ("AFTER INSERT OR DELETE OR UPDATE") stays on one
+              line and scrolls horizontally instead of wrapping
+              and making the row tall. */}
+          <span
+            className={`shrink-0 whitespace-nowrap text-[9px] ${active ? "text-primary/70" : "text-muted-foreground/70"}`}
+          >
+            {meta}
+          </span>
+        </button>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-48">
+        <ContextMenuItem onClick={handleOpen}>
+          Edit definition
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleCopyName}>
+          Copy name
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem
+          className="text-destructive focus:text-destructive"
+          onClick={handleDrop}
+        >
+          Drop trigger
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }

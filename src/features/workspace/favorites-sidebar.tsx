@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -61,10 +61,15 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
     })();
   }, []);
 
-  const handleConnect = (id: string) => {
+  const handleConnect = useCallback((id: string) => {
     if (connState.connectingIds.has(id)) return;
     onConnect(id);
-  };
+  }, [connState.connectingIds, onConnect]);
+
+  const handleStartCreatingGroup = useCallback(() => setIsCreatingGroup(true), []);
+  const handleNewGroupNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setNewGroupName(e.target.value), []);
+  const handleCancelCreatingGroup = useCallback(() => { setIsCreatingGroup(false); setNewGroupName(''); }, []);
+  const handleStopPropagation = useCallback((e: { stopPropagation: () => void }) => e.stopPropagation(), []);
 
   const handleSaveGroup = (e: React.FormEvent) => {
     e.preventDefault();
@@ -186,6 +191,30 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
     toast.success('Group deleted');
   };
 
+  const handleDragStart = useCallback((e: DragStartEvent) => setDraggingId(String(e.active.id)), []);
+  const handleDragCancel = useCallback(() => setDraggingId(null), []);
+  const handleDragEnd = useCallback((e: DragEndEvent) => {
+    setDraggingId(null);
+    const activeId = String(e.active.id);
+    const over = e.over;
+    if (!over) return;
+    const overId = String(over.id);
+    if (overId.startsWith('row:')) {
+      const targetConnId = overId.slice(4);
+      if (targetConnId === activeId) return;
+      handleFavoriteDrop(activeId, bucketOf(targetConnId), targetConnId);
+    } else if (overId.startsWith('bucket:')) {
+      handleFavoriteDrop(activeId, overId.slice(7));
+    }
+  }, [handleFavoriteDrop, bucketOf]);
+
+  const makeHandleToggleCollapse = useCallback((groupId: string) => () => handleToggleCollapse(groupId), [handleToggleCollapse]);
+  const makeHandleRenameGroupStop = useCallback((groupId: string, name: string) => (e: React.MouseEvent) => { e.stopPropagation(); handleRenameGroup(groupId, name); }, [handleRenameGroup]);
+  const makeHandleDeleteGroupStop = useCallback((groupId: string) => (e: React.MouseEvent) => { e.stopPropagation(); handleDeleteGroup(groupId); }, [handleDeleteGroup]);
+  const makeHandleRenameGroup = useCallback((groupId: string, name: string) => () => handleRenameGroup(groupId, name), [handleRenameGroup]);
+  const makeHandleDeleteGroup = useCallback((groupId: string) => () => handleDeleteGroup(groupId), [handleDeleteGroup]);
+  const makeHandleToggleFavorite = useCallback((conn: ConnectionProfile) => () => onEditConnection({ ...conn, isFavorite: false }), [onEditConnection]);
+
   const favoriteConnections = connections.filter(c => c.isFavorite);
 
   const groupedFavorites = useMemo(() => {
@@ -235,7 +264,7 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
             size="icon"
             className="w-5 h-5 text-muted-foreground hover:text-foreground hover:bg-transparent"
             title="New Group"
-            onClick={() => setIsCreatingGroup(true)}
+            onClick={handleStartCreatingGroup}
           >
             <FolderPlus className="w-3.5 h-3.5" />
           </Button>
@@ -248,7 +277,7 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
               placeholder="Group name..."
               className="h-7 text-xs px-2 bg-muted/50 border-none focus-visible:ring-1"
               value={newGroupName}
-              onChange={(e) => setNewGroupName(e.target.value)}
+              onChange={handleNewGroupNameChange}
             />
             <Button
               type="submit"
@@ -263,7 +292,7 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
               size="icon"
               variant="ghost"
               className="h-7 w-7 text-destructive hover:text-destructive hover:bg-transparent shrink-0"
-              onClick={() => { setIsCreatingGroup(false); setNewGroupName(''); }}
+              onClick={handleCancelCreatingGroup}
             >
               <X className="w-3.5 h-3.5" />
             </Button>
@@ -273,22 +302,9 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
         <DndContext
           sensors={dndSensors}
           collisionDetection={closestCenter}
-          onDragStart={(e: DragStartEvent) => setDraggingId(String(e.active.id))}
-          onDragCancel={() => setDraggingId(null)}
-          onDragEnd={(e: DragEndEvent) => {
-            setDraggingId(null);
-            const activeId = String(e.active.id);
-            const over = e.over;
-            if (!over) return;
-            const overId = String(over.id);
-            if (overId.startsWith('row:')) {
-              const targetConnId = overId.slice(4);
-              if (targetConnId === activeId) return;
-              handleFavoriteDrop(activeId, bucketOf(targetConnId), targetConnId);
-            } else if (overId.startsWith('bucket:')) {
-              handleFavoriteDrop(activeId, overId.slice(7));
-            }
-          }}
+          onDragStart={handleDragStart}
+          onDragCancel={handleDragCancel}
+          onDragEnd={handleDragEnd}
         >
           <div className="space-y-2 overflow-y-auto pr-1 flex-1 min-h-0">
             {/* Groups first */}
@@ -298,7 +314,7 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
                   <ContextMenuTrigger>
                     <div
                       className="group/header flex items-center justify-between px-1.5 py-1 text-xs font-semibold text-muted-foreground hover:bg-muted/30 rounded-md cursor-pointer select-none"
-                      onClick={() => handleToggleCollapse(group.id)}
+                      onClick={makeHandleToggleCollapse(group.id)}
                     >
                       <div className="flex items-center gap-1.5 min-w-0">
                         {group.isCollapsed ? (
@@ -314,17 +330,17 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
                       <DropdownMenu>
                         <DropdownMenuTrigger
                           className="w-5 h-5 flex items-center justify-center rounded-md hover:bg-muted text-muted-foreground/50 hover:text-foreground opacity-0 group-hover/header:opacity-100 focus:opacity-100 data-popup-open:opacity-100 transition-opacity"
-                          onClick={(e) => e.stopPropagation()}
+                          onClick={handleStopPropagation}
                         >
                           <MoreVertical className="w-3.5 h-3.5" />
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end" className="w-40">
-                          <DropdownMenuItem onClick={(e) => { e.stopPropagation(); handleRenameGroup(group.id, group.name); }}>
+                          <DropdownMenuItem onClick={makeHandleRenameGroupStop(group.id, group.name)}>
                             <Edit className="w-4 h-4 mr-2" /> Rename
                           </DropdownMenuItem>
                           <DropdownMenuItem
                             variant="destructive"
-                            onClick={(e) => { e.stopPropagation(); handleDeleteGroup(group.id); }}
+                            onClick={makeHandleDeleteGroupStop(group.id)}
                           >
                             <Trash2 className="w-4 h-4 mr-2" /> Delete Group
                           </DropdownMenuItem>
@@ -333,10 +349,10 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
                     </div>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="w-40">
-                    <ContextMenuItem onClick={() => handleRenameGroup(group.id, group.name)}>
+                    <ContextMenuItem onClick={makeHandleRenameGroup(group.id, group.name)}>
                       <Edit className="w-4 h-4 mr-2" /> Rename
                     </ContextMenuItem>
-                    <ContextMenuItem variant="destructive" onClick={() => handleDeleteGroup(group.id)}>
+                    <ContextMenuItem variant="destructive" onClick={makeHandleDeleteGroup(group.id)}>
                       <Trash2 className="w-4 h-4 mr-2" /> Delete Group
                     </ContextMenuItem>
                   </ContextMenuContent>
@@ -357,7 +373,7 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
                           isConnected={connState.activeById.has(conn.id)}
                           dragging={draggingId === conn.id}
                           onConnect={handleConnect}
-                          onToggleFavorite={() => onEditConnection({ ...conn, isFavorite: false })}
+                          onToggleFavorite={makeHandleToggleFavorite(conn)}
                           onMoveToGroup={handleMoveToGroup}
                           groups={groups.filter(g => g.id !== group.id)}
                         />
@@ -384,7 +400,7 @@ export default function FavoritesSidebar({ connections, onConnect, onEditConnect
                     isConnected={connState.activeById.has(conn.id)}
                     dragging={draggingId === conn.id}
                     onConnect={handleConnect}
-                    onToggleFavorite={() => onEditConnection({ ...conn, isFavorite: false })}
+                    onToggleFavorite={makeHandleToggleFavorite(conn)}
                     onMoveToGroup={handleMoveToGroup}
                     groups={groups}
                   />
@@ -432,7 +448,17 @@ function FavoriteRow({
   const { setNodeRef: setDragRef, listeners, attributes } = useDraggable({ id: conn.id, disabled: !canDrag });
   const { setNodeRef: setDropRef, isOver } = useDroppable({ id: `row:${conn.id}`, disabled: !canDrag });
 
-  const stop = (e: { stopPropagation: () => void }) => e.stopPropagation();
+  const stop = useCallback((e: { stopPropagation: () => void }) => e.stopPropagation(), []);
+
+  const handleRowClick = useCallback(() => { if (!isConnecting) onConnect(conn.id); }, [isConnecting, onConnect, conn.id]);
+  const handleConnectMenu = useCallback((e: React.MouseEvent) => { stop(e); onConnect(conn.id); }, [stop, onConnect, conn.id]);
+  const handleToggleFavoriteMenu = useCallback((e: React.MouseEvent) => { stop(e); onToggleFavorite(); }, [stop, onToggleFavorite]);
+  const handleMoveToUngroupedMenu = useCallback((e: React.MouseEvent) => { stop(e); onMoveToGroup(conn.id, ''); }, [stop, onMoveToGroup, conn.id]);
+  const makeHandleMoveToGroupMenu = useCallback((groupId: string) => (e: React.MouseEvent) => { stop(e); onMoveToGroup(conn.id, groupId); }, [stop, onMoveToGroup, conn.id]);
+  const handleConnectContext = useCallback(() => onConnect(conn.id), [onConnect, conn.id]);
+  const handleToggleFavoriteContext = useCallback(() => onToggleFavorite(), [onToggleFavorite]);
+  const handleMoveToUngroupedContext = useCallback(() => onMoveToGroup(conn.id, ''), [onMoveToGroup, conn.id]);
+  const makeHandleMoveToGroupContext = useCallback((groupId: string) => () => onMoveToGroup(conn.id, groupId), [onMoveToGroup, conn.id]);
 
   return (
     <ContextMenu>
@@ -440,7 +466,7 @@ function FavoriteRow({
         <div
           ref={setDropRef}
           className={`group relative flex items-center gap-1.5 pl-0.5 pr-1.5 py-2 hover:bg-muted/50 rounded-md cursor-pointer text-sm transition-colors ${isConnecting ? 'pointer-events-none opacity-75' : ''} ${dragging ? 'opacity-40' : ''} ${isOver ? 'ring-1 ring-primary/40 bg-primary/5' : ''}`}
-          onClick={() => !isConnecting && onConnect(conn.id)}
+          onClick={handleRowClick}
         >
           {canDrag && (
             <span
@@ -473,10 +499,10 @@ function FavoriteRow({
               <MoreVertical className="w-3.5 h-3.5" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="w-52" onClick={stop}>
-              <DropdownMenuItem className="whitespace-nowrap" onClick={(e) => { stop(e); onConnect(conn.id); }}>
+              <DropdownMenuItem className="whitespace-nowrap" onClick={handleConnectMenu}>
                 <Zap className="w-4 h-4 mr-2" /> Connect
               </DropdownMenuItem>
-              <DropdownMenuItem className="whitespace-nowrap" onClick={(e) => { stop(e); onToggleFavorite(); }}>
+              <DropdownMenuItem className="whitespace-nowrap" onClick={handleToggleFavoriteMenu}>
                 <Star className="w-4 h-4 mr-2" /> Remove from Favorites
               </DropdownMenuItem>
               <DropdownMenuSub>
@@ -484,12 +510,12 @@ function FavoriteRow({
                   <Folder className="w-4 h-4 mr-2" /> Move to Group
                 </DropdownMenuSubTrigger>
                 <DropdownMenuSubContent className="w-44">
-                  <DropdownMenuItem className="whitespace-nowrap" onClick={(e) => { stop(e); onMoveToGroup(conn.id, ''); }}>
+                  <DropdownMenuItem className="whitespace-nowrap" onClick={handleMoveToUngroupedMenu}>
                     <X className="w-4 h-4 mr-2" /> None (Ungrouped)
                   </DropdownMenuItem>
                   {groups.length > 0 && <DropdownMenuSeparator />}
                   {groups.map(g => (
-                    <DropdownMenuItem key={g.id} className="whitespace-nowrap" onClick={(e) => { stop(e); onMoveToGroup(conn.id, g.id); }}>
+                    <DropdownMenuItem key={g.id} className="whitespace-nowrap" onClick={makeHandleMoveToGroupMenu(g.id)}>
                       <Folder className="w-4 h-4 mr-2" /> {g.name}
                     </DropdownMenuItem>
                   ))}
@@ -502,10 +528,10 @@ function FavoriteRow({
 
       {/* Right-click context menu — same actions */}
       <ContextMenuContent className="w-52">
-        <ContextMenuItem className="whitespace-nowrap" onClick={() => onConnect(conn.id)}>
+        <ContextMenuItem className="whitespace-nowrap" onClick={handleConnectContext}>
           <Zap className="w-4 h-4 mr-2" /> Connect
         </ContextMenuItem>
-        <ContextMenuItem className="whitespace-nowrap" onClick={() => onToggleFavorite()}>
+        <ContextMenuItem className="whitespace-nowrap" onClick={handleToggleFavoriteContext}>
           <Star className="w-4 h-4 mr-2" /> Remove from Favorites
         </ContextMenuItem>
         <ContextMenuSub>
@@ -513,12 +539,12 @@ function FavoriteRow({
             <Folder className="w-4 h-4 mr-2" /> Move to Group
           </ContextMenuSubTrigger>
           <ContextMenuSubContent className="w-44">
-            <ContextMenuItem className="whitespace-nowrap" onClick={() => onMoveToGroup(conn.id, '')}>
+            <ContextMenuItem className="whitespace-nowrap" onClick={handleMoveToUngroupedContext}>
               <X className="w-4 h-4 mr-2" /> None (Ungrouped)
             </ContextMenuItem>
             {groups.length > 0 && <ContextMenuSeparator />}
             {groups.map(g => (
-              <ContextMenuItem key={g.id} className="whitespace-nowrap" onClick={() => onMoveToGroup(conn.id, g.id)}>
+              <ContextMenuItem key={g.id} className="whitespace-nowrap" onClick={makeHandleMoveToGroupContext(g.id)}>
                 <Folder className="w-4 h-4 mr-2" /> {g.name}
               </ContextMenuItem>
             ))}
