@@ -263,6 +263,26 @@ function UnlockedApp() {
     })();
   }, [connections.length, rail.tiles.length]);
 
+  // ⌘+Shift+R / Ctrl+Shift+R — hard reload, from ANY screen. This lives at the
+  // app root (not WorkspaceView) so it works on the home/welcome and settings
+  // screens too, where no workspace is mounted. The soft reload (⌘+R without
+  // shift) stays in WorkspaceView since it needs the focused-connection state.
+  // `capture: true` so nested editors (Monaco, inputs) can't swallow it first;
+  // `e.code === 'KeyR'` is keyboard-layout-independent.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const isR = e.code === 'KeyR' || e.key.toLowerCase() === 'r';
+      if (!(e.metaKey || e.ctrlKey) || !e.shiftKey || !isR) return;
+      e.preventDefault();
+      e.stopPropagation();
+      // Tear down the webview window entirely. `true` bypasses the cache on
+      // WebKit; on Chromium it's a harmless no-op argument.
+      window.location.reload();
+    };
+    window.addEventListener('keydown', onKey, { capture: true });
+    return () => window.removeEventListener('keydown', onKey, { capture: true });
+  }, []);
+
   // One-time import of any legacy localStorage seed into the SQLite store.
   useEffect(() => {
     void (async () => {

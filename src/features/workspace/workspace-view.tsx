@@ -1157,10 +1157,8 @@ export default function WorkspaceView({
   // doesn't unload the app. Components that hold their own data (Sidebar,
   // DataGrid, DiagramView) listen for the `tablerelay:reload` event and refetch.
   //
-  // ⌘+Shift+R / Ctrl+Shift+R does a full page reload — same as the
-  // browser's hard-refresh shortcut. Useful when the JS bundle itself
-  // got into a bad state (hot-reload glitch, orphaned state) and a soft
-  // refresh isn't enough.
+  // (⌘+Shift+R / Ctrl+Shift+R does a full page reload, handled app-wide in
+  // app.tsx so it works on every screen — not just when a workspace is open.)
   //
   // Registered with `capture: true` so nested editors (Monaco, inputs)
   // can't swallow the event before we see it. `e.code === 'KeyR'` is
@@ -1169,16 +1167,11 @@ export default function WorkspaceView({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const isR = e.code === "KeyR" || e.key.toLowerCase() === "r";
-      if (!(e.metaKey || e.ctrlKey) || !isR) return;
+      // Soft reload only (⌘+R without shift). The hard reload (⌘+Shift+R) is
+      // handled app-wide in app.tsx so it works on every screen, not just here.
+      if (!(e.metaKey || e.ctrlKey) || e.shiftKey || !isR) return;
       e.preventDefault();
       e.stopPropagation();
-      if (e.shiftKey) {
-        // Hard reload — tear down the webview window entirely. Pass
-        // `true` on WebKit to bypass the cache; on Chromium it's a
-        // no-op argument that doesn't hurt.
-        window.location.reload();
-        return;
-      }
       const target = focusedConnection?.id;
       if (target) {
         void refreshSchemas(target);
