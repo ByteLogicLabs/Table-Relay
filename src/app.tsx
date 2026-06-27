@@ -89,6 +89,11 @@ function UnlockedApp() {
   // Track the toast id per connection so we can replace "Reconnecting..." with
   // the success/failure variant instead of stacking three unrelated toasts.
   const reconnectToastIds = useRef<Map<string, string | number>>(new Map());
+  // Connections the user explicitly disconnected. The Rust supervisor may emit
+  // one more `connection:reconnecting` after we issue the disconnect (the event
+  // is already in flight), which would re-spawn a toast that never resolves.
+  // Ignore reconnect events for ids in this set.
+  const userDisconnected = useRef<Set<string>>(new Set());
   const connectingToastIds = useRef<Map<string, string | number>>(new Map());
   const bootReconnectAttempted = useRef(false);
 
@@ -177,6 +182,13 @@ function UnlockedApp() {
     void (async () => {
       const unA = await listen<ReconnectEvent>('connection:reconnecting', (ev) => {
         const { connectionId, attempt, maxAttempts } = ev.payload;
+        // User disconnected this connection — drop any lingering toast and
+        // ignore further reconnect chatter for it.
+        if (userDisconnected.current.has(connectionId)) {
+          const stale = reconnectToastIds.current.get(connectionId);
+          if (stale !== undefined) { toast.dismiss(stale); reconnectToastIds.current.delete(connectionId); }
+          return;
+        }
         const name = nameOf(connectionId);
         const existing = reconnectToastIds.current.get(connectionId);
         const id = toast.loading(`Reconnecting to ${name} (${attempt}/${maxAttempts})…`, {
@@ -286,6 +298,8 @@ function UnlockedApp() {
   }, [reload]);
 
   const handleConnect = async (id: string) => {
+    // Re-arm reconnect toasts: the user is intentionally connecting again.
+    userDisconnected.current.delete(id);
     const name = connectionsRef.current.find(c => c.id === id)?.name ?? 'database';
     const toastId = toast.loading(`Connecting to ${name}…`);
     connectingToastIds.current.set(id, toastId);
@@ -307,6 +321,11 @@ function UnlockedApp() {
   };
 
   const handleDisconnect = async (id: string) => {
+    // Mark before awaiting so an in-flight reconnect event is ignored, and
+    // clear any "Reconnecting…" toast still on screen.
+    userDisconnected.current.add(id);
+    const stale = reconnectToastIds.current.get(id);
+    if (stale !== undefined) { toast.dismiss(stale); reconnectToastIds.current.delete(id); }
     await disconnectDb(id);
     setActiveConnectionIds(prev => prev.filter(cId => cId !== id));
   };

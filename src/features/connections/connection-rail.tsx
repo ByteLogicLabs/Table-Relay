@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, Settings, Unplug, Pencil, FileUp, FileDown, Loader2 } from 'lucide-react';
+import { Database, Settings, Unplug, Pencil, FileUp, FileDown, Loader2, Copy, Power } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -15,6 +15,7 @@ import { useConnections } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { copyText } from '../../lib/clipboard';
 import { SSH_BADGE_CLASS } from '../../lib/driver-colors';
+import { isUriHost } from '../../lib/connection-display';
 import type { RailTile } from '../../lib/rail';
 import DbIcon from '../../components/db-icon';
 
@@ -43,6 +44,60 @@ export const RAIL_EXPANDED_WIDTH = 240;
 
 function driverIcon(driver: ConnectionProfile['driver'], className = 'w-4 h-4') {
   return <DbIcon driver={driver} className={className} />;
+}
+
+const URI_SCHEME: Record<ConnectionProfile['driver'], string | null> = {
+  PostgreSQL: 'postgresql',
+  MySQL: 'mysql',
+  MongoDB: 'mongodb',
+  Redis: 'redis',
+  SQLite: null,
+};
+
+/** Best-effort connection string for the driver, or null when one doesn't
+ *  apply (SQLite is a file path; URI hosts already carry their own string). */
+function buildConnectionString(c: ConnectionProfile): string | null {
+  // Mongo (and any URI-host driver) already stores a full URI in `host`.
+  if (isUriHost(c.host)) return c.host;
+  const scheme = URI_SCHEME[c.driver];
+  if (!scheme) return c.driver === 'SQLite' ? c.host : null;
+  const auth = c.user
+    ? `${encodeURIComponent(c.user)}${c.password ? `:${encodeURIComponent(c.password)}` : ''}@`
+    : '';
+  const port = c.port ? `:${c.port}` : '';
+  const db = c.database ? `/${c.database}` : '';
+  return `${scheme}://${auth}${c.host}${port}${db}`;
+}
+
+/** Full, labeled dump of a connection including credentials. */
+function buildFullInfo(c: ConnectionProfile): string {
+  const lines: string[] = [];
+  const add = (k: string, v: unknown) => {
+    if (v !== undefined && v !== null && v !== '') lines.push(`${k}: ${v}`);
+  };
+  add('Name', c.name);
+  add('Driver', c.driver);
+  add('Host', c.host);
+  add('Port', c.port);
+  add('User', c.user);
+  add('Password', c.password);
+  add('Database', c.database);
+  add('SSL Mode', c.sslMode);
+  if (c.sshEnabled) {
+    add('SSH Host', c.sshHost);
+    add('SSH Port', c.sshPort);
+    add('SSH User', c.sshUser);
+    add('SSH Auth', c.sshAuthKind);
+    add('SSH Key Path', c.sshKeyPath);
+    add('SSH Password', c.sshPassword);
+    add('SSH Key Passphrase', c.sshKeyPassphrase);
+  }
+  const uri = buildConnectionString(c);
+  if (uri) {
+    lines.push('');
+    add('Connection String', uri);
+  }
+  return lines.join('\n');
 }
 
 export default function ConnectionRail({
@@ -252,11 +307,13 @@ export default function ConnectionRail({
                 )}
                 <ContextMenuItem
                   onClick={() => {
-                    const text = [primary, secondary].join('\n');
-                    void copyText(text, 'Copied pin info');
+                    const text = server
+                      ? buildFullInfo(server)
+                      : [primary, secondary].join('\n');
+                    void copyText(text, server ? 'Copied connection info (with credentials)' : 'Copied pin info');
                   }}
                 >
-                  Copy info
+                  <Copy className="w-3.5 h-3.5 mr-2" /> Copy info
                 </ContextMenuItem>
                 <ContextMenuSeparator />
                 {/*
@@ -284,7 +341,7 @@ export default function ConnectionRail({
                         void unpinManyTiles(others.map(t => t.id));
                       }}
                     >
-                      Disconnect others
+                      <Unplug className="w-3.5 h-3.5 mr-2" /> Disconnect others
                     </ContextMenuItem>
                     <ContextMenuItem
                       className="text-destructive focus:text-destructive whitespace-nowrap"
@@ -294,7 +351,7 @@ export default function ConnectionRail({
                         void unpinManyTiles(rail.tiles.map(t => t.id));
                       }}
                     >
-                      Disconnect all
+                      <Power className="w-3.5 h-3.5 mr-2" /> Disconnect all
                     </ContextMenuItem>
                   </>
                 )}
