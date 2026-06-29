@@ -2,6 +2,8 @@
 
 ## The SQL editor
 
+![The SQL editor running a multi-table query, with results below and the AI panel on the right](../screenshots/sql-editor.png)
+
 A Monaco-based editor (the same engine as VS Code) with schema-aware
 autocompletion. The exact label and language depend on the driver - it's a
 **Mongo shell** for MongoDB and a **Redis shell** for Redis.
@@ -27,6 +29,8 @@ Other editor features:
 
 ## The data grid
 
+![The data grid browsing a table, with the query log along the bottom](../screenshots/data-grid.png)
+
 Browse, filter, sort, and inline-edit rows.
 
 - **Filter / sort** push down to the server where the driver supports it; build
@@ -48,6 +52,8 @@ Browse, filter, sort, and inline-edit rows.
 - **MongoDB** documents also have an editable **JSON tree view**.
 
 ## Schema editor
+
+![The schema editor showing columns, types, and constraints for a table](../screenshots/schema-editor.png)
 
 Create and alter tables, columns, indexes, and foreign keys without writing DDL
 by hand. Table Relay emits dialect-correct DDL per driver, with per-column types

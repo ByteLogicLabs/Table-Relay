@@ -1,5 +1,7 @@
 # Realtime
 
+![The realtime tab with a publish panel, a live subscribe feed, and the event log](../screenshots/realtime.png)
+
 Subscribe to server-pushed events and publish test messages. The mechanism
 depends on the driver:
 

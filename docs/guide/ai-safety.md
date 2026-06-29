@@ -10,6 +10,8 @@ The guarantees here are enforced in the Rust backend
 in-app assistant **and** for any external agent driving Table Relay through the
 [MCP bridge](../dev/ai-internals.md#mcp-bridge).
 
+![The AI permissions panel with per-tier auto-approval toggles, beside the chat's gated query cards](../screenshots/ai-approval.png)
+
 ## 1. Nothing runs without approval
 
 - **Reading shape is free.** Listing databases/tables and describing a table

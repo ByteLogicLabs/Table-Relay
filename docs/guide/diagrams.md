@@ -1,5 +1,7 @@
 # Diagrams (ERD)
 
+![An entity-relationship diagram with tables as nodes and foreign keys as edges](../screenshots/diagram.png)
+
 Table Relay generates interactive entity-relationship diagrams from your schema.
 Available on **MySQL**, **PostgreSQL**, and **SQLite**.
 
