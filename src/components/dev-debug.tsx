@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useState } from 'react';
 import { Bug, X, RefreshCw, Copy } from 'lucide-react';
 import { ScrollArea } from './ui/scroll-area';
 import { copyText } from '../lib/clipboard';
@@ -31,7 +31,9 @@ export default function DevDebug() {
   const rail = useRail();
   const page = useDebugPage();
 
-  if (!import.meta.env.DEV) return null;
+  // Dev-only, AND opt-in via DEV_DEBUG=true in .env (default off). Both gates
+  // are build-time constants, so the hook order below stays stable per build.
+  if (!import.meta.env.DEV || process.env.DEV_DEBUG !== 'true') return null;
 
   const envEntries = Object.entries(import.meta.env as Record<string, string>).filter(
     ([k]) => !k.includes('SECRET') && !k.includes('PASSWORD') && !k.includes('KEY'),
@@ -66,11 +68,18 @@ export default function DevDebug() {
       : `Last click: none`,
   ].join('\n');
 
+  const handleToggleOpen = useCallback(() => setOpen(o => !o), []);
+  const handleRefresh = useCallback(() => setTick(t => t + 1), []);
+  const handleCopyAll = useCallback(() => {
+    void copyText(debugText, 'Debug info copied');
+  }, [debugText]);
+  const handleClose = useCallback(() => setOpen(false), []);
+
   return (
     <>
       <button
         data-dev-debug
-        onClick={() => setOpen(o => !o)}
+        onClick={handleToggleOpen}
         title="Dev debug"
         className="fixed bottom-3 right-3 z-9999 w-7 h-7 rounded-full bg-yellow-400/90 hover:bg-yellow-400 text-yellow-900 flex items-center justify-center shadow-lg transition-all"
       >
@@ -84,22 +93,20 @@ export default function DevDebug() {
             <span className="text-xs font-semibold flex-1">Dev Debug</span>
             <button
               title="Refresh"
-              onClick={() => setTick(t => t + 1)}
+              onClick={handleRefresh}
               className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
             >
               <RefreshCw className="w-3 h-3" />
             </button>
             <button
               title="Copy all"
-              onClick={() => {
-                void copyText(debugText, 'Debug info copied');
-              }}
+              onClick={handleCopyAll}
               className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
             >
               <Copy className="w-3 h-3" />
             </button>
             <button
-              onClick={() => setOpen(false)}
+              onClick={handleClose}
               className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
             >
               <X className="w-3 h-3" />

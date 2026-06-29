@@ -1,3 +1,4 @@
+import { useCallback } from "react";
 import { ChevronDown, Loader2, Plus, RefreshCw } from "lucide-react";
 
 export function Section({
@@ -24,6 +25,20 @@ export function Section({
   /** Spin the refresh icon while this section's list is being refetched. */
   refreshing?: boolean;
 }) {
+  const handleRefreshClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      if (!refreshing) onRefresh?.();
+    },
+    [refreshing, onRefresh],
+  );
+  const handleAddClick = useCallback(
+    (e: React.MouseEvent) => {
+      e.stopPropagation();
+      onAdd?.();
+    },
+    [onAdd],
+  );
   return (
     <div className="group/section w-full flex items-center gap-1 px-2 py-1 text-[11px] tracking-wide text-muted-foreground hover:text-foreground transition-colors">
       <button
@@ -40,10 +55,7 @@ export function Section({
       {onRefresh && (
         <button
           type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            if (!refreshing) onRefresh();
-          }}
+          onClick={handleRefreshClick}
           title={`Refresh ${label}`}
           disabled={refreshing}
           className={`p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-opacity ${
@@ -63,10 +75,7 @@ export function Section({
       {onAdd && (
         <button
           type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onAdd();
-          }}
+          onClick={handleAddClick}
           title={addTitle ?? "Add"}
           className="opacity-0 group-hover/section:opacity-100 transition-opacity p-0.5 rounded hover:bg-muted text-muted-foreground hover:text-foreground"
         >

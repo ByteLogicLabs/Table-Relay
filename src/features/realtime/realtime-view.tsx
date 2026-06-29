@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Play, Square, Trash2, Copy, Radio, Send, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { copyText } from '../../lib/clipboard';
@@ -393,6 +393,40 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
     window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'));
   };
 
+  const handlePubChannelChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setPubChannel(e.target.value), []);
+
+  const handlePubPayloadChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => setPubPayload(e.target.value), []);
+
+  const handlePubPayloadKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // ⌘/Ctrl + Enter fires publish — standard for send-like
+    // actions inside multi-line textareas.
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+      e.preventDefault();
+      void handlePublish();
+    }
+  }, [handlePublish]);
+
+  const handleResetSplit = useCallback(() => setLeftPct(50), []);
+
+  const handlePatternChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setPattern(e.target.value), []);
+
+  const handlePatternKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter' && !isRunning) void handleStart();
+  }, [isRunning, handleStart]);
+
+  const handleAutoScrollChange = useCallback((c: boolean | 'indeterminate') => setAutoScroll(c === true), []);
+
+  const handleListScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const el = e.currentTarget;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (atBottom !== autoScroll) setAutoScroll(atBottom);
+  }, [autoScroll]);
+
+  // Factory: each event row needs its own copy handler closing over the
+  // per-item event. The factory is the named function; the returned arrow
+  // is its product, not an inline JSX handler.
+  const makeHandleCopy = useCallback((event: RecordedEvent) => () => handleCopy(event), []);
+
   return (
     <div ref={splitRef} className="flex-1 flex min-h-0 relative">
       {/* ───── Left: Publish ───── */}
@@ -424,7 +458,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
             </label>
             <Input
               value={pubChannel}
-              onChange={e => setPubChannel(e.target.value)}
+              onChange={handlePubChannelChange}
               placeholder={realtimeKind === 'changeStream' ? 'e.g. users or clipbridge.users' : 'e.g. news.updates'}
               className="h-8"
             />
@@ -435,18 +469,11 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
             </label>
             <textarea
               value={pubPayload}
-              onChange={e => setPubPayload(e.target.value)}
+              onChange={handlePubPayloadChange}
               placeholder={realtimeKind === 'changeStream' ? '{"event":"updated"}' : 'Message body (plain text or JSON)'}
               rows={4}
               className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs font-mono resize-y focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              onKeyDown={e => {
-                // ⌘/Ctrl + Enter fires publish — standard for send-like
-                // actions inside multi-line textareas.
-                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                  e.preventDefault();
-                  void handlePublish();
-                }
-              }}
+              onKeyDown={handlePubPayloadKeyDown}
             />
           </div>
           <div className="flex items-center gap-2">
@@ -517,7 +544,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
       {canPublish && (
       <div
         onMouseDown={handleDividerDown}
-        onDoubleClick={() => setLeftPct(50)}
+        onDoubleClick={handleResetSplit}
         title="Drag to resize — double-click to reset"
         className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-primary/40 active:bg-primary/60 transition-colors"
       />
@@ -549,10 +576,8 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
             </label>
             <Input
               value={pattern}
-              onChange={e => setPattern(e.target.value)}
-              onKeyDown={e => {
-                if (e.key === 'Enter' && !isRunning) void handleStart();
-              }}
+              onChange={handlePatternChange}
+              onKeyDown={handlePatternKeyDown}
               placeholder={
                 realtimeKind === 'listenNotify'
                   ? 'e.g. events_user_created'
@@ -597,7 +622,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
             <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground cursor-pointer select-none">
               <Checkbox
                 checked={autoScroll}
-                onCheckedChange={(c) => setAutoScroll(c === true)}
+                onCheckedChange={handleAutoScrollChange}
               />
               Auto-scroll
             </label>
@@ -607,11 +632,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
         <div
           ref={listRef}
           className="flex-1 overflow-auto font-mono text-[11.5px] leading-relaxed"
-          onScroll={e => {
-            const el = e.currentTarget;
-            const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-            if (atBottom !== autoScroll) setAutoScroll(atBottom);
-          }}
+          onScroll={handleListScroll}
         >
           {events.length === 0 ? (
             <div className="h-full flex items-center justify-center text-muted-foreground text-xs">
@@ -643,7 +664,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
                     </td>
                     <td className="px-2 py-1 align-top">
                       <button
-                        onClick={() => handleCopy(ev)}
+                        onClick={makeHandleCopy(ev)}
                         className="opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-foreground transition-opacity"
                         title="Copy payload"
                       >

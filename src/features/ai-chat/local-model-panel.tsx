@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Loader2, AlertCircle, RefreshCw } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
@@ -169,6 +169,44 @@ export function LocalModelPanel({
     }
   };
 
+  const makeHandleCardClick = useCallback(
+    (id: string, canSelect: boolean) => () => { if (canSelect) onPick(id); },
+    [onPick],
+  );
+
+  const makeHandleCancelClick = useCallback(
+    (id: string) => (e: React.MouseEvent) => { e.stopPropagation(); void handleCancel(id); },
+    [],
+  );
+
+  const makeHandleDeleteClick = useCallback(
+    (id: string) => (e: React.MouseEvent) => { e.stopPropagation(); void handleDelete(id); },
+    [handleDelete],
+  );
+
+  const makeHandleDownloadClick = useCallback(
+    (id: string) => (e: React.MouseEvent) => { e.stopPropagation(); void handleDownload(id); },
+    [],
+  );
+
+  const handleAddByUrlOpen = useCallback(() => setCustomOpen(true), []);
+
+  const handleCustomNameChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => setCustomName(e.target.value),
+    [],
+  );
+
+  const handleCustomUrlChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => setCustomUrl(e.target.value),
+    [],
+  );
+
+  const handleCustomDownloadClick = useCallback(() => { void handleDownloadCustom(); }, [handleDownloadCustom]);
+
+  const handleCustomCancel = useCallback(() => {
+    setCustomOpen(false); setCustomName(''); setCustomUrl('');
+  }, []);
+
   if (loading) {
     return (
       <div className="flex items-center gap-2 text-xs text-muted-foreground py-3">
@@ -214,7 +252,7 @@ export function LocalModelPanel({
             className={`rounded-md border px-2.5 py-2 transition-colors ${
               isSelected ? 'border-primary bg-primary/5' : 'border-border'
             } ${canSelect ? 'cursor-pointer hover:bg-muted/20' : ''}`}
-            onClick={() => { if (canSelect) onPick(m.id); }}
+            onClick={makeHandleCardClick(m.id, canSelect)}
           >
             <div className="flex items-center justify-between gap-2">
               <div className="min-w-0">
@@ -242,7 +280,7 @@ export function LocalModelPanel({
                 {downloading ? (
                   <button
                     type="button"
-                    onClick={(e) => { e.stopPropagation(); void handleCancel(m.id); }}
+                    onClick={makeHandleCancelClick(m.id)}
                     className="p-1 text-muted-foreground hover:text-destructive"
                     title="Cancel download"
                   >
@@ -251,7 +289,7 @@ export function LocalModelPanel({
                 ) : m.downloaded ? (
                   <button
                     type="button"
-                    onClick={(e) => { e.stopPropagation(); void handleDelete(m.id); }}
+                    onClick={makeHandleDeleteClick(m.id)}
                     className="p-1 text-muted-foreground hover:text-destructive"
                     title="Delete model"
                   >
@@ -260,7 +298,7 @@ export function LocalModelPanel({
                 ) : (
                   <button
                     type="button"
-                    onClick={(e) => { e.stopPropagation(); void handleDownload(m.id); }}
+                    onClick={makeHandleDownloadClick(m.id)}
                     className="flex items-center gap-1 text-[11px] text-foreground bg-muted/50 hover:bg-muted px-2 py-1 rounded"
                     title="Download model"
                   >
@@ -304,7 +342,7 @@ export function LocalModelPanel({
       {!customOpen ? (
         <button
           type="button"
-          onClick={() => setCustomOpen(true)}
+          onClick={handleAddByUrlOpen}
           className="mt-1 text-[11px] text-primary hover:underline flex items-center gap-1.5 py-1"
         >
           <DownloadIcon className="w-3 h-3" /> Add a model by URL
@@ -314,13 +352,13 @@ export function LocalModelPanel({
           <div className="text-[11px] font-medium">Add a model by URL</div>
           <Input
             value={customName}
-            onChange={(e) => setCustomName(e.target.value)}
+            onChange={handleCustomNameChange}
             placeholder="Name (optional, e.g. my-llama-8b)"
             className="h-7 text-xs"
           />
           <Input
             value={customUrl}
-            onChange={(e) => setCustomUrl(e.target.value)}
+            onChange={handleCustomUrlChange}
             placeholder="https://…/model.gguf"
             className="h-7 text-xs font-mono"
           />
@@ -328,14 +366,14 @@ export function LocalModelPanel({
             Direct link to a <span className="font-mono">.gguf</span> file. Not hash-verified — only use sources you trust.
           </p>
           <div className="flex items-center gap-2">
-            <Button size="sm" className="h-7 text-xs gap-1.5" onClick={() => void handleDownloadCustom()}>
+            <Button size="sm" className="h-7 text-xs gap-1.5" onClick={handleCustomDownloadClick}>
               <DownloadIcon className="w-3 h-3" /> Download
             </Button>
             <Button
               size="sm"
               variant="ghost"
               className="h-7 text-xs"
-              onClick={() => { setCustomOpen(false); setCustomName(''); setCustomUrl(''); }}
+              onClick={handleCustomCancel}
             >
               Cancel
             </Button>

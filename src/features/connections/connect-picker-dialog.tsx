@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Search, Edit, Trash2, Plus } from 'lucide-react';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '../../components/ui/dialog';
 import { Input } from '../../components/ui/input';
@@ -65,42 +65,77 @@ export default function ConnectPickerDialog({
     rowRefs.current[highlight]?.scrollIntoView({ block: 'nearest' });
   }, [highlight]);
 
-  const connect = (id: string) => {
+  const connect = useCallback((id: string) => {
     onOpenChange(false);
     setQuery('');
     onConnect(id);
-  };
+  }, [onOpenChange, onConnect]);
 
-  const edit = (conn: ConnectionProfile) => {
+  const edit = useCallback((conn: ConnectionProfile) => {
     onOpenChange(false);
     setQuery('');
     onEditConnection(conn);
-  };
+  }, [onOpenChange, onEditConnection]);
 
-  const remove = (conn: ConnectionProfile) => {
+  const remove = useCallback((conn: ConnectionProfile) => {
     if (!window.confirm(`Delete '${conn.name}'?`)) return;
     onOpenChange(false);
     setQuery('');
     onDeleteConnection(conn.id);
-  };
+  }, [onOpenChange, onDeleteConnection]);
 
-  const createNew = () => {
+  const createNew = useCallback(() => {
     onOpenChange(false);
     setQuery('');
     onCreateNew();
-  };
+  }, [onOpenChange, onCreateNew]);
+
+  const handleQueryChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setQuery(e.target.value);
+  }, []);
+
+  const handleSearchKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setHighlight((h) => (filtered.length === 0 ? 0 : (h + 1) % filtered.length));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHighlight((h) => (filtered.length === 0 ? 0 : (h - 1 + filtered.length) % filtered.length));
+    } else if (e.key === 'Enter') {
+      const target = filtered[highlight] ?? (filtered.length === 1 ? filtered[0] : undefined);
+      if (target) { e.preventDefault(); connect(target.id); }
+    }
+  }, [filtered, highlight, connect]);
+
+  const handleDialogOpenChange = useCallback((v: boolean, details: { reason: string }) => {
+    // Don't close the dialog when the user dismisses a context menu by
+    // clicking outside — the outside click lands on the backdrop but the
+    // intent was to close the context menu, not this dialog.
+    if (!v && details.reason === 'outside-press' && contextMenuOpenRef.current) return;
+    if (!v) setQuery('');
+    onOpenChange(v);
+  }, [onOpenChange]);
+
+  const makeRowRef = useCallback((i: number) => (el: HTMLButtonElement | null) => {
+    rowRefs.current[i] = el;
+  }, []);
+
+  const makeHandleConnect = useCallback((id: string) => () => connect(id), [connect]);
+
+  const makeHandleMouseMove = useCallback((i: number) => () => setHighlight(i), []);
+
+  const handleContextMenuOpenChange = useCallback((v: boolean) => {
+    contextMenuOpenRef.current = v;
+  }, []);
+
+  const makeHandleEdit = useCallback((conn: ConnectionProfile) => () => edit(conn), [edit]);
+
+  const makeHandleRemove = useCallback((conn: ConnectionProfile) => () => remove(conn), [remove]);
 
   return (
     <Dialog
       open={open}
-      onOpenChange={(v, details) => {
-        // Don't close the dialog when the user dismisses a context menu by
-        // clicking outside — the outside click lands on the backdrop but the
-        // intent was to close the context menu, not this dialog.
-        if (!v && details.reason === 'outside-press' && contextMenuOpenRef.current) return;
-        if (!v) setQuery('');
-        onOpenChange(v);
-      }}
+      onOpenChange={handleDialogOpenChange}
     >
       <DialogContent className="sm:max-w-sm w-[90vw] p-0 gap-0">
         <DialogHeader className="px-4 pt-4 pb-0">
@@ -115,19 +150,8 @@ export default function ConnectPickerDialog({
               placeholder="Filter connections…"
               className="pl-8 h-8 text-sm"
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'ArrowDown') {
-                  e.preventDefault();
-                  setHighlight((h) => (filtered.length === 0 ? 0 : (h + 1) % filtered.length));
-                } else if (e.key === 'ArrowUp') {
-                  e.preventDefault();
-                  setHighlight((h) => (filtered.length === 0 ? 0 : (h - 1 + filtered.length) % filtered.length));
-                } else if (e.key === 'Enter') {
-                  const target = filtered[highlight] ?? (filtered.length === 1 ? filtered[0] : undefined);
-                  if (target) { e.preventDefault(); connect(target.id); }
-                }
-              }}
+              onChange={handleQueryChange}
+              onKeyDown={handleSearchKeyDown}
             />
           </div>
         </div>
@@ -142,14 +166,14 @@ export default function ConnectPickerDialog({
               {filtered.map((conn, i) => (
                 <ContextMenu
                   key={conn.id}
-                  onOpenChange={(v) => { contextMenuOpenRef.current = v; }}
+                  onOpenChange={handleContextMenuOpenChange}
                 >
                   <ContextMenuTrigger>
                     <button
-                      ref={(el) => { rowRefs.current[i] = el; }}
+                      ref={makeRowRef(i)}
                       type="button"
-                      onClick={() => connect(conn.id)}
-                      onMouseMove={() => setHighlight(i)}
+                      onClick={makeHandleConnect(conn.id)}
+                      onMouseMove={makeHandleMouseMove(i)}
                       className={`w-full flex items-center gap-3 px-3 py-2 rounded-md text-left transition-colors ${
                         i === highlight ? 'bg-muted' : 'hover:bg-muted/60'
                       }`}
@@ -194,13 +218,13 @@ export default function ConnectPickerDialog({
                     </button>
                   </ContextMenuTrigger>
                   <ContextMenuContent className="min-w-40">
-                    <ContextMenuItem onClick={() => edit(conn)}>
+                    <ContextMenuItem onClick={makeHandleEdit(conn)}>
                       <Edit className="w-3.5 h-3.5 mr-2" /> Edit connection
                     </ContextMenuItem>
                     <ContextMenuSeparator />
                     <ContextMenuItem
                       className="text-destructive focus:text-destructive"
-                      onClick={() => remove(conn)}
+                      onClick={makeHandleRemove(conn)}
                     >
                       <Trash2 className="w-3.5 h-3.5 mr-2" /> Delete
                     </ContextMenuItem>

@@ -31,5 +31,4 @@ AUDIT.md
 *.dmg
 # Anchor these to the repo root so they don't also ignore nested dirs like
 # src/features/workspace (a bare `workspace` matches any path component).
-/docs
 /workspace

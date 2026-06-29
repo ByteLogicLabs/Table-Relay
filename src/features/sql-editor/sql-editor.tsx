@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, Square } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
@@ -1063,6 +1063,111 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
   };
 
 
+  const handleEditorChange = useCallback((v?: string) => setQuery(v ?? ''), []);
+
+  const handleAskAi = useCallback(() => {
+    const trimmed = query.trim();
+    // If the editor has content, ask AI to explain it; otherwise
+    // open Generate mode and focus the chat input.
+    if (trimmed.length > 0) {
+      prefillChat({ kind: 'explain', sql: trimmed });
+    } else {
+      prefillChat({ kind: 'generate', focusOnly: true });
+    }
+  }, [query]);
+
+  const handleRunAll = useCallback(() => { void handleRun(); }, [handleRun]);
+
+  const handleSetTableView = useCallback(() => setResultViewMode('table'), []);
+  const handleSetJsonView = useCallback(() => setResultViewMode('json'), []);
+
+  const handleExportCsv = useCallback(() => { void handleExportResult('csv'); }, [handleExportResult]);
+  const handleExportJson = useCallback(() => { void handleExportResult('json'); }, [handleExportResult]);
+  const handleExportSql = useCallback(() => { void handleExportResult('sql'); }, [handleExportResult]);
+
+  const handleResultsResize = useCallback((dy: number) => setResultsHeight(h => Math.max(120, Math.min(900, h - dy))), []);
+
+  const handleSaveJsonResultEditsClick = useCallback(() => { void handleSaveJsonResultEdits(); }, [handleSaveJsonResultEdits]);
+  const handleDiscardJsonResultEdits = useCallback(() => {
+    const editor = jsonResultEditorRef.current;
+    if (editor) editor.setValue(activeRowsAsJsonText);
+    setJsonResultDirty(false);
+    setJsonResultError(null);
+  }, [activeRowsAsJsonText]);
+
+  const handleJsonResultMount: OnMount = useCallback((editor, monaco) => {
+    jsonResultEditorRef.current = editor;
+    collapseJsonSubtrees(editor);
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+      jsonResultSaveRef.current();
+    });
+  }, [collapseJsonSubtrees]);
+
+  const handleJsonResultChange = useCallback((next?: string) => {
+    if (!resultIsEditable) return;
+    const dirty = (next ?? '') !== activeRowsAsJsonText;
+    setJsonResultDirty(dirty);
+    if (!dirty) {
+      setJsonResultError(null);
+      return;
+    }
+    try {
+      JSON.parse(next ?? '');
+      setJsonResultError(null);
+    } catch (e) {
+      setJsonResultError(e instanceof Error ? e.message : String(e));
+    }
+  }, [resultIsEditable, activeRowsAsJsonText]);
+
+  const handleDismissJsonResultError = useCallback(() => setJsonResultError(null), []);
+
+  const handleCopyJsonResult = useCallback(() => {
+    void copyText(jsonResultEditorRef.current?.getValue() ?? activeRowsAsJsonText, 'JSON copied');
+  }, [activeRowsAsJsonText]);
+
+  const handleDiscardResultEdits = useCallback(() => {
+    setPendingResultEdits({});
+    setActiveResultEdit(null);
+  }, []);
+
+  const handleSaveResultEditsClick = useCallback(() => { void handleSaveResultEdits(); }, [handleSaveResultEdits]);
+
+  const handlePageSizeChange = useCallback((v: string) => {
+    const next = Number(v);
+    setPageSize(next);
+    // Apply immediately only when a paged result is already
+    // showing; otherwise it just seeds the next run.
+    const showPager = !!pagedStmt && !runError && !!activeResult && !activeResult.error;
+    if (showPager && pagedStmt && !isExecuting) void runPage(pagedStmt, 0, next);
+  }, [pagedStmt, runError, activeResult, isExecuting, runPage]);
+
+  const handlePrevPage = useCallback(() => {
+    if (pagedStmt) void runPage(pagedStmt, Math.max(0, page - 1), pageSize);
+  }, [pagedStmt, page, pageSize, runPage]);
+  const handleNextPage = useCallback(() => {
+    if (pagedStmt) void runPage(pagedStmt, page + 1, pageSize);
+  }, [pagedStmt, page, pageSize, runPage]);
+
+  const makeHandlePickResult = useCallback((idx: number) => () => {
+    // User explicitly picked a result — stop auto-following
+    // the newest one for the rest of this run.
+    userPickedResultRef.current = true;
+    setActiveResultIndex(idx);
+  }, []);
+
+  const handleDestructiveOpenChange = useCallback((open: boolean) => {
+    if (!open) { setDestructiveWarning(null); pendingRunRef.current = null; }
+  }, []);
+
+  const handleDestructiveConfirm = useCallback(() => {
+    const payload = pendingRunRef.current;
+    setDestructiveWarning(null);
+    pendingRunRef.current = null;
+    if (payload) {
+      void executePayload(payload);
+    }
+  }, [executePayload]);
+
   const handleFormat = () => {
     if (isDocumentStore) {
       // Mongo path still relies on Monaco's built-in JS formatter.
@@ -1112,7 +1217,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             <kbd className="inline-flex h-4 items-center rounded border border-white/30 bg-white/15 px-1 text-[10px] font-medium font-sans">{RUN_SHORTCUT}</kbd>
           </Button>
         )}
-        <Button variant="outline" size="sm" onClick={() => { void handleRun(); }} disabled={isExecuting} className="border-emerald-600/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-700 dark:hover:text-emerald-300" title="Run all statements in the editor">
+        <Button variant="outline" size="sm" onClick={handleRunAll} disabled={isExecuting} className="border-emerald-600/40 text-emerald-700 dark:text-emerald-400 hover:bg-emerald-500/10 hover:text-emerald-700 dark:hover:text-emerald-300" title="Run all statements in the editor">
           <FastForward className="w-3.5 h-3.5" />
           Run All
           <kbd className="inline-flex h-4 items-center rounded border border-current/30 bg-current/10 px-1 text-[10px] font-medium font-sans">{RUN_ALL_SHORTCUT}</kbd>
@@ -1130,16 +1235,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
           variant="ghost"
           size="sm"
           title="Ask AI"
-          onClick={() => {
-            const trimmed = query.trim();
-            // If the editor has content, ask AI to explain it; otherwise
-            // open Generate mode and focus the chat input.
-            if (trimmed.length > 0) {
-              prefillChat({ kind: 'explain', sql: trimmed });
-            } else {
-              prefillChat({ kind: 'generate', focusOnly: true });
-            }
-          }}
+          onClick={handleAskAi}
         >
           <Sparkles className="w-4 h-4 mr-2 text-primary" />
           Ask AI
@@ -1160,7 +1256,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
           value={query}
           language={language}
           theme={theme}
-          onChange={(v) => setQuery(v ?? '')}
+          onChange={handleEditorChange}
           onMount={handleEditorMount}
           options={{
             minimap: { enabled: settings.editorMinimap },
@@ -1203,7 +1299,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
           style={{ height: resultsHeight }}
         >
           <VerticalResizeHandle
-            onResize={(dy) => setResultsHeight(h => Math.max(120, Math.min(900, h - dy)))}
+            onResize={handleResultsResize}
             orientation="top"
           />
           <div className="h-8 border-b border-border bg-muted/30 flex items-center justify-between px-3 text-xs font-medium text-muted-foreground shrink-0 gap-2">
@@ -1269,7 +1365,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       variant={resultViewMode === 'table' ? 'secondary' : 'ghost'}
                       size="sm"
                       className="h-6 px-2 text-[11px]"
-                      onClick={() => setResultViewMode('table')}
+                      onClick={handleSetTableView}
                       title="Table view"
                     >
                       <Table2 className="w-3.5 h-3.5 mr-1" />
@@ -1279,7 +1375,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       variant={resultViewMode === 'json' ? 'secondary' : 'ghost'}
                       size="sm"
                       className="h-6 px-2 text-[11px]"
-                      onClick={() => setResultViewMode('json')}
+                      onClick={handleSetJsonView}
                       title="JSON view"
                     >
                       <Braces className="w-3.5 h-3.5 mr-1" />
@@ -1306,14 +1402,14 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                     )}
                   />
                   <DropdownMenuContent align="end" className="min-w-40">
-                    <DropdownMenuItem onClick={() => void handleExportResult('csv')}>
+                    <DropdownMenuItem onClick={handleExportCsv}>
                       Export as CSV
                     </DropdownMenuItem>
-                    <DropdownMenuItem onClick={() => void handleExportResult('json')}>
+                    <DropdownMenuItem onClick={handleExportJson}>
                       Export as JSON
                     </DropdownMenuItem>
                     {!isDocumentStore && (
-                      <DropdownMenuItem onClick={() => void handleExportResult('sql')}>
+                      <DropdownMenuItem onClick={handleExportSql}>
                         Export as SQL (INSERT)
                       </DropdownMenuItem>
                     )}
@@ -1355,12 +1451,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       <button
                         key={idx}
                         type="button"
-                        onClick={() => {
-                          // User explicitly picked a result — stop auto-following
-                          // the newest one for the rest of this run.
-                          userPickedResultRef.current = true;
-                          setActiveResultIndex(idx);
-                        }}
+                        onClick={makeHandlePickResult(idx)}
                         className={`h-6 px-2.5 rounded-md border text-[11px] whitespace-nowrap transition-colors ${
                           activeResultIndex === idx
                             ? 'bg-background border-border/70 text-foreground shadow-sm'
@@ -1447,12 +1538,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                             size="sm"
                             className="h-7"
                             disabled={jsonResultSaving}
-                            onClick={() => {
-                              const editor = jsonResultEditorRef.current;
-                              if (editor) editor.setValue(activeRowsAsJsonText);
-                              setJsonResultDirty(false);
-                              setJsonResultError(null);
-                            }}
+                            onClick={handleDiscardJsonResultEdits}
                             title="Discard edits and revert to server state"
                           >
                             <Undo2 className="w-3.5 h-3.5 mr-1.5" /> Discard
@@ -1461,7 +1547,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                             variant="default"
                             size="sm"
                             className="h-7"
-                            onClick={() => { void handleSaveJsonResultEdits(); }}
+                            onClick={handleSaveJsonResultEditsClick}
                             disabled={jsonResultSaving || !!jsonResultError}
                             title={jsonResultError ? 'Fix JSON errors before saving' : 'Save edited fields to the database'}
                           >
@@ -1479,7 +1565,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       <button
                         type="button"
                         className="shrink-0 text-red-600/70 dark:text-red-400/70 hover:text-red-600 dark:hover:text-red-400 -mr-1 p-0.5"
-                        onClick={() => setJsonResultError(null)}
+                        onClick={handleDismissJsonResultError}
                         title="Dismiss"
                         aria-label="Dismiss error"
                       >
@@ -1492,28 +1578,8 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       value={activeRowsAsJsonText}
                       language="json"
                       theme={theme}
-                      onMount={(editor, monaco) => {
-                        jsonResultEditorRef.current = editor;
-                        collapseJsonSubtrees(editor);
-                        editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-                          jsonResultSaveRef.current();
-                        });
-                      }}
-                      onChange={(next) => {
-                        if (!resultIsEditable) return;
-                        const dirty = (next ?? '') !== activeRowsAsJsonText;
-                        setJsonResultDirty(dirty);
-                        if (!dirty) {
-                          setJsonResultError(null);
-                          return;
-                        }
-                        try {
-                          JSON.parse(next ?? '');
-                          setJsonResultError(null);
-                        } catch (e) {
-                          setJsonResultError(e instanceof Error ? e.message : String(e));
-                        }
-                      }}
+                      onMount={handleJsonResultMount}
+                      onChange={handleJsonResultChange}
                       options={{
                         // Editing is gated on the same logic as the table
                         // view. Non-editable results stay read-only with a
@@ -1540,9 +1606,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                     variant="secondary"
                     size="icon"
                     className="absolute bottom-3 right-3 z-10 h-8 w-8 rounded-full shadow-sm"
-                    onClick={() => {
-                      void copyText(jsonResultEditorRef.current?.getValue() ?? activeRowsAsJsonText, 'JSON copied');
-                    }}
+                    onClick={handleCopyJsonResult}
                     title="Copy JSON"
                     aria-label="Copy JSON"
                   >
@@ -1584,10 +1648,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       size="sm"
                       className="h-7"
                       disabled={isSavingResult}
-                      onClick={() => {
-                        setPendingResultEdits({});
-                        setActiveResultEdit(null);
-                      }}
+                      onClick={handleDiscardResultEdits}
                       title="Discard all unsaved cell edits"
                     >
                       <Undo2 className="w-3.5 h-3.5 mr-1.5" /> Discard
@@ -1596,7 +1657,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       variant="default"
                       size="sm"
                       className="h-7"
-                      onClick={() => { void handleSaveResultEdits(); }}
+                      onClick={handleSaveResultEditsClick}
                       disabled={isSavingResult}
                       title="Save edited cells to the database and re-run the query"
                     >
@@ -1665,110 +1726,28 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                               ? 'bg-yellow-500/10 text-yellow-700 dark:text-yellow-400'
                               : '';
                             return (
-                              <td
+                              <ResultCell
                                 key={ci}
-                                className={`relative p-0 border-r border-border font-mono text-[11px] align-top min-w-24 max-w-80 ${cellClass} cursor-text`}
-                                onDoubleClick={() => {
-                                  // Always open an input on double-click so the
-                                  // user can select + copy the value manually.
-                                  // Editable cells commit on Enter/blur;
-                                  // read-only cells open a read-only input (no
-                                  // commit, not marked edited) — see below.
-                                  setActiveResultEdit({ rowIdx: ri, col: col.name, value: isEdited ? pendingValue : (v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)) });
-                                }}
-                                title={
-                                  isPk ? 'Primary key — read-only'
-                                  : !resultIsEditable ? undefined
-                                  : !cellEditable ? 'Not a base-table column — read-only'
-                                  : isEdited ? `Was: ${baseText}` : displayText
-                                }
-                              >
-                                {/* Always render the text div so the cell keeps
-                                    its natural width; the edit input overlays it
-                                    absolutely so opening it never re-lays-out the
-                                    column (the cause of the "cell moves" jump). */}
-                                <div className="block box-border px-2 py-1.5 leading-normal truncate selectable cursor-text">
-                                  {previewText}
-                                  {previewTruncated && (
-                                    <span className="ml-2 text-[10px] text-muted-foreground/70">
-                                      +{(displayText.length - CELL_MAX_RENDER_CHARS).toLocaleString()} more
-                                    </span>
-                                  )}
-                                </div>
-                                {isCurrentlyEditing && (
-                                  <input
-                                    autoFocus
-                                    readOnly={!cellEditable}
-                                    // Overlay the cell exactly. Absolute inset-0 so
-                                    // it covers the text without affecting layout.
-                                    // Read-only → neutral ring; editable →
-                                    // primary/destructive ring.
-                                    className={`absolute inset-0 block box-border w-full h-full m-0 px-2 py-1.5 bg-background outline-none ring-1 ring-inset font-mono text-[11px] leading-normal ${
-                                      !cellEditable ? 'ring-border' : validationError ? 'ring-destructive' : 'ring-primary'
-                                    }`}
-                                    value={activeResultEdit.value}
-                                    // Select the whole value on open so Cmd/Ctrl+C
-                                    // copies it immediately.
-                                    onFocus={(e) => e.currentTarget.select()}
-                                    onChange={(e) => {
-                                      // Ignore edits on read-only cells.
-                                      if (!cellEditable) return;
-                                      setActiveResultEdit({ ...activeResultEdit, value: e.target.value });
-                                    }}
-                                    onKeyDown={(e) => {
-                                      // Read-only: Enter/Escape just close; let
-                                      // Cmd/Ctrl+C and selection keys work normally.
-                                      if (!cellEditable) {
-                                        if (e.key === 'Enter' || e.key === 'Escape') {
-                                          e.preventDefault();
-                                          setActiveResultEdit(null);
-                                        }
-                                        return;
-                                      }
-                                      if (e.key === 'Enter') {
-                                        e.preventDefault();
-                                        if (validationError) return;
-                                        const original = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-                                        setPendingResultEdits(prev => {
-                                          const next = { ...prev };
-                                          if (activeResultEdit.value === original) {
-                                            delete next[editKey];
-                                          } else {
-                                            next[editKey] = activeResultEdit.value;
-                                          }
-                                          return next;
-                                        });
-                                        setActiveResultEdit(null);
-                                      } else if (e.key === 'Escape') {
-                                        e.preventDefault();
-                                        setActiveResultEdit(null);
-                                      }
-                                    }}
-                                    onBlur={() => {
-                                      // Read-only: nothing to commit, just close.
-                                      if (!cellEditable) {
-                                        setActiveResultEdit(null);
-                                        return;
-                                      }
-                                      if (validationError) {
-                                        setActiveResultEdit(null);
-                                        return;
-                                      }
-                                      const original = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
-                                      setPendingResultEdits(prev => {
-                                        const next = { ...prev };
-                                        if (activeResultEdit.value === original) {
-                                          delete next[editKey];
-                                        } else {
-                                          next[editKey] = activeResultEdit.value;
-                                        }
-                                        return next;
-                                      });
-                                      setActiveResultEdit(null);
-                                    }}
-                                  />
-                                )}
-                              </td>
+                                rowIdx={ri}
+                                colName={col.name}
+                                value={v}
+                                baseText={baseText}
+                                displayText={displayText}
+                                previewText={previewText}
+                                previewTruncated={previewTruncated}
+                                pendingValue={pendingValue}
+                                isEdited={isEdited}
+                                isPk={isPk}
+                                cellEditable={cellEditable}
+                                resultIsEditable={resultIsEditable}
+                                isCurrentlyEditing={isCurrentlyEditing}
+                                editValue={isCurrentlyEditing ? activeResultEdit.value : ''}
+                                validationError={validationError}
+                                cellClass={cellClass}
+                                editKey={editKey}
+                                setActiveResultEdit={setActiveResultEdit}
+                                setPendingResultEdits={setPendingResultEdits}
+                              />
                             );
                           })}
                         </tr>
@@ -1820,13 +1799,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                 <span>Limit:</span>
                 <Select
                   value={String(pageSize)}
-                  onValueChange={(v) => {
-                    const next = Number(v);
-                    setPageSize(next);
-                    // Apply immediately only when a paged result is already
-                    // showing; otherwise it just seeds the next run.
-                    if (showPager && pagedStmt && !isExecuting) void runPage(pagedStmt, 0, next);
-                  }}
+                  onValueChange={handlePageSizeChange}
                 >
                   <SelectTrigger size="sm" className="h-7! w-24 py-0 text-xs">
                     <SelectValue />
@@ -1847,7 +1820,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                     size="icon"
                     className="h-6 w-6"
                     disabled={isExecuting || page === 0}
-                    onClick={() => void runPage(pagedStmt, Math.max(0, page - 1), pageSize)}
+                    onClick={handlePrevPage}
                     title="Previous page"
                   >
                     <ChevronLeft className="w-3 h-3" />
@@ -1858,7 +1831,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                     size="icon"
                     className="h-6 w-6"
                     disabled={isExecuting || !hasNextPage}
-                    onClick={() => void runPage(pagedStmt, page + 1, pageSize)}
+                    onClick={handleNextPage}
                     title="Next page"
                   >
                     <ChevronRight className="w-3 h-3" />
@@ -1872,17 +1845,170 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
 
       <DestructiveWarningDialog
         open={destructiveWarning !== null}
-        onOpenChange={(open) => { if (!open) { setDestructiveWarning(null); pendingRunRef.current = null; } }}
+        onOpenChange={handleDestructiveOpenChange}
         statements={destructiveWarning ?? []}
-        onConfirm={() => {
-          const payload = pendingRunRef.current;
-          setDestructiveWarning(null);
-          pendingRunRef.current = null;
-          if (payload) {
-            void executePayload(payload);
-          }
-        }}
+        onConfirm={handleDestructiveConfirm}
       />
     </div>
+  );
+}
+
+type ActiveResultEdit = { rowIdx: number; col: string; value: string };
+
+interface ResultCellProps {
+  rowIdx: number;
+  colName: string;
+  value: unknown;
+  baseText: string;
+  displayText: string;
+  previewText: string;
+  previewTruncated: boolean;
+  pendingValue: string | undefined;
+  isEdited: boolean;
+  isPk: boolean;
+  cellEditable: boolean;
+  resultIsEditable: boolean;
+  isCurrentlyEditing: boolean;
+  editValue: string;
+  validationError: string | null;
+  cellClass: string;
+  editKey: string;
+  setActiveResultEdit: Dispatch<SetStateAction<ActiveResultEdit | null>>;
+  setPendingResultEdits: Dispatch<SetStateAction<Record<string, string>>>;
+}
+
+// Per-cell render extracted out of the result-table `.map()` so its event
+// handlers can be named `useCallback`s instead of inline arrows. Behaviour is
+// identical to the previous inline implementation; only the closure boundary
+// moved.
+function ResultCell({
+  rowIdx,
+  colName,
+  value: v,
+  baseText,
+  displayText,
+  previewText,
+  previewTruncated,
+  pendingValue,
+  isEdited,
+  isPk,
+  cellEditable,
+  resultIsEditable,
+  isCurrentlyEditing,
+  editValue,
+  validationError,
+  cellClass,
+  editKey,
+  setActiveResultEdit,
+  setPendingResultEdits,
+}: ResultCellProps) {
+  const handleDoubleClick = useCallback(() => {
+    // Always open an input on double-click so the
+    // user can select + copy the value manually.
+    // Editable cells commit on Enter/blur;
+    // read-only cells open a read-only input (no
+    // commit, not marked edited) — see below.
+    setActiveResultEdit({ rowIdx, col: colName, value: isEdited ? (pendingValue as string) : (v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v)) });
+  }, [setActiveResultEdit, rowIdx, colName, isEdited, pendingValue, v]);
+
+  const handleInputFocus = useCallback((e: React.FocusEvent<HTMLInputElement>) => e.currentTarget.select(), []);
+
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    // Ignore edits on read-only cells.
+    if (!cellEditable) return;
+    setActiveResultEdit({ rowIdx, col: colName, value: e.target.value });
+  }, [cellEditable, setActiveResultEdit, rowIdx, colName]);
+
+  const commitEdit = useCallback(() => {
+    const original = v === null || v === undefined ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v);
+    setPendingResultEdits(prev => {
+      const next = { ...prev };
+      if (editValue === original) {
+        delete next[editKey];
+      } else {
+        next[editKey] = editValue;
+      }
+      return next;
+    });
+    setActiveResultEdit(null);
+  }, [v, setPendingResultEdits, editValue, editKey, setActiveResultEdit]);
+
+  const handleInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    // Read-only: Enter/Escape just close; let
+    // Cmd/Ctrl+C and selection keys work normally.
+    if (!cellEditable) {
+      if (e.key === 'Enter' || e.key === 'Escape') {
+        e.preventDefault();
+        setActiveResultEdit(null);
+      }
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (validationError) return;
+      commitEdit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setActiveResultEdit(null);
+    }
+  }, [cellEditable, setActiveResultEdit, validationError, commitEdit]);
+
+  const handleInputBlur = useCallback(() => {
+    // Read-only: nothing to commit, just close.
+    if (!cellEditable) {
+      setActiveResultEdit(null);
+      return;
+    }
+    if (validationError) {
+      setActiveResultEdit(null);
+      return;
+    }
+    commitEdit();
+  }, [cellEditable, setActiveResultEdit, validationError, commitEdit]);
+
+  return (
+    <td
+      className={`relative p-0 border-r border-border font-mono text-[11px] align-top min-w-24 max-w-80 ${cellClass} cursor-text`}
+      onDoubleClick={handleDoubleClick}
+      title={
+        isPk ? 'Primary key — read-only'
+        : !resultIsEditable ? undefined
+        : !cellEditable ? 'Not a base-table column — read-only'
+        : isEdited ? `Was: ${baseText}` : displayText
+      }
+    >
+      {/* Always render the text div so the cell keeps
+          its natural width; the edit input overlays it
+          absolutely so opening it never re-lays-out the
+          column (the cause of the "cell moves" jump). */}
+      <div className="block box-border px-2 py-1.5 leading-normal truncate selectable cursor-text">
+        {previewText}
+        {previewTruncated && (
+          <span className="ml-2 text-[10px] text-muted-foreground/70">
+            +{(displayText.length - CELL_MAX_RENDER_CHARS).toLocaleString()} more
+          </span>
+        )}
+      </div>
+      {isCurrentlyEditing && (
+        <input
+          autoFocus
+          readOnly={!cellEditable}
+          // Overlay the cell exactly. Absolute inset-0 so
+          // it covers the text without affecting layout.
+          // Read-only → neutral ring; editable →
+          // primary/destructive ring.
+          className={`absolute inset-0 block box-border w-full h-full m-0 px-2 py-1.5 bg-background outline-none ring-1 ring-inset font-mono text-[11px] leading-normal ${
+            !cellEditable ? 'ring-border' : validationError ? 'ring-destructive' : 'ring-primary'
+          }`}
+          value={editValue}
+          // Select the whole value on open so Cmd/Ctrl+C
+          // copies it immediately.
+          onFocus={handleInputFocus}
+          onChange={handleInputChange}
+          onKeyDown={handleInputKeyDown}
+          onBlur={handleInputBlur}
+        />
+      )}
+    </td>
   );
 }

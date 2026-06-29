@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Shield } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
@@ -42,7 +42,7 @@ export function PermissionsButton() {
     void ai.getAutoApprovals().then(setFlags).catch(() => {});
   }, [open]);
 
-  const toggle = async (key: keyof AutoApprovalFlags) => {
+  const toggle = useCallback(async (key: keyof AutoApprovalFlags) => {
     if (!flags) return;
     const next = { ...flags, [key]: !flags[key] };
     setFlags(next);
@@ -54,7 +54,12 @@ export function PermissionsButton() {
       toast.error(isAiError(err) ? err.message : String(err));
       setFlags(flags);
     }
-  };
+  }, [flags]);
+
+  const makeHandleToggle = useCallback(
+    (key: keyof AutoApprovalFlags) => () => void toggle(key),
+    [toggle],
+  );
 
   const grantedCount = flags
     ? PERMISSIONS.reduce((n, p) => n + (flags[p.key] ? 1 : 0), 0)
@@ -103,7 +108,7 @@ export function PermissionsButton() {
                 >
                   <Checkbox
                     checked={flags?.[p.key] ?? false}
-                    onCheckedChange={() => void toggle(p.key)}
+                    onCheckedChange={makeHandleToggle(p.key)}
                     className="mt-0.5"
                   />
                   <div className="flex-1 min-w-0">

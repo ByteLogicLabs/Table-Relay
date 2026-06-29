@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   Dialog,
   DialogContent,
@@ -212,26 +212,51 @@ export default function ExportModal({
     });
   }, [initialTable, selectableTables, selectedSchema, supportsUpdateIfExists]);
 
-  const toggleOption = (table: string, option: TableOption, checked: boolean) => {
-    setTableOptions((prev) => ({
-      ...prev,
-      [table]: applyOption(prev[table] ?? defaultTableOptions(false), option, checked),
-    }));
-  };
+  const toggleOption = useCallback(
+    (table: string, option: TableOption, checked: boolean) => {
+      setTableOptions((prev) => ({
+        ...prev,
+        [table]: applyOption(prev[table] ?? defaultTableOptions(false), option, checked),
+      }));
+    },
+    [],
+  );
 
-  const toggleColumn = (option: TableOption, checked: boolean) => {
-    setTableOptions((prev) => {
-      const next: Record<string, TableOptions> = { ...prev };
-      selectableTables.forEach((table) => {
-        const current = next[table.name] ?? defaultTableOptions(false);
-        next[table.name] =
-          option === "update" && !current.data
-            ? current
-            : applyOption(current, option, checked);
+  const toggleColumn = useCallback(
+    (option: TableOption, checked: boolean) => {
+      setTableOptions((prev) => {
+        const next: Record<string, TableOptions> = { ...prev };
+        selectableTables.forEach((table) => {
+          const current = next[table.name] ?? defaultTableOptions(false);
+          next[table.name] =
+            option === "update" && !current.data
+              ? current
+              : applyOption(current, option, checked);
+        });
+        return next;
       });
-      return next;
-    });
-  };
+    },
+    [selectableTables],
+  );
+
+  // Factory for per-table cell-checkbox handlers — each row needs the table
+  // name and column bound in, so a stable useCallback can't be used directly.
+  const makeToggleOption = useCallback(
+    (table: string, option: TableOption) => (checked: boolean) =>
+      toggleOption(table, option, checked),
+    [toggleOption],
+  );
+
+  // Factory for per-column header-checkbox handlers.
+  const makeToggleColumn = useCallback(
+    (option: TableOption) => (checked: boolean) => toggleColumn(option, checked),
+    [toggleColumn],
+  );
+
+  const makeSetFormat = useCallback(
+    (value: ExportFormat) => () => setFormat(value),
+    [],
+  );
 
   const columnChecked = (option: TableOption) => {
     return (
@@ -266,7 +291,7 @@ export default function ExportModal({
     update: "Update",
   };
 
-  const submit = async () => {
+  const submit = useCallback(async () => {
     if (!canExport || !selectedSchema) return;
     setExporting(true);
     try {
@@ -281,10 +306,37 @@ export default function ExportModal({
     } finally {
       setExporting(false);
     }
-  };
+  }, [
+    canExport,
+    selectedSchema,
+    onExport,
+    selectedTargets,
+    format,
+    includeHeader,
+    gzip,
+    splitMb,
+    onClose,
+  ]);
+
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      if (!open) onClose();
+    },
+    [onClose],
+  );
+
+  const handleSplitChange = useCallback(
+    (v: string) => setSplitMb(Number(v)),
+    [],
+  );
+
+  const handleTableQueryChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => setTableQuery(e.target.value),
+    [],
+  );
 
   return (
-    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+    <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogContent className="sm:max-w-205 max-h-[85vh] p-0 overflow-hidden gap-0 flex flex-col">
         <DialogHeader className="px-5 pt-5 pb-4 border-b border-border/60 shrink-0">
           <DialogTitle className="flex items-center gap-2">
@@ -333,7 +385,7 @@ export default function ExportModal({
                     <button
                       key={f.value}
                       type="button"
-                      onClick={() => setFormat(f.value)}
+                      onClick={makeSetFormat(f.value)}
                       className={`flex flex-col items-center gap-1 rounded-lg border px-2 py-2.5 text-xs font-medium transition-colors ${
                         active
                           ? "border-primary bg-primary/10 text-primary"
@@ -371,7 +423,7 @@ export default function ExportModal({
             <Field label="Split into parts">
               <Select
                 value={String(splitMb)}
-                onValueChange={(v) => setSplitMb(Number(v))}
+                onValueChange={handleSplitChange}
               >
                 <SelectTrigger className="w-full">
                   <SelectValue />
@@ -407,7 +459,7 @@ export default function ExportModal({
                 <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={tableQuery}
-                  onChange={(e) => setTableQuery(e.target.value)}
+                  onChange={handleTableQueryChange}
                   placeholder="Filter tables…"
                   className="pl-8 h-8 text-sm"
                 />
@@ -430,7 +482,7 @@ export default function ExportModal({
                     key={col}
                     label={columnMeta[col]}
                     checked={columnChecked(col)}
-                    onChange={(checked) => toggleColumn(col, checked)}
+                    onChange={makeToggleColumn(col)}
                     disabled={col === "update" && !supportsUpdateIfExists}
                     title={
                       col === "update" && !supportsUpdateIfExists
@@ -473,9 +525,7 @@ export default function ExportModal({
                         <CellCheck
                           key={col}
                           checked={opts[col]}
-                          onChange={(checked) =>
-                            toggleOption(table.name, col, checked)
-                          }
+                          onChange={makeToggleOption(table.name, col)}
                           disabled={
                             col === "update" &&
                             (!supportsUpdateIfExists || !opts.data)
@@ -555,6 +605,10 @@ function HeaderCheck({
   disabled?: boolean;
   title: string;
 }) {
+  const handleCheckedChange = useCallback(
+    (value: boolean | "indeterminate") => onChange(value === true),
+    [onChange],
+  );
   return (
     <label
       className={`flex flex-col items-center gap-2 ${
@@ -567,7 +621,7 @@ function HeaderCheck({
         aria-label={`${label}: ${title}`}
         checked={checked}
         disabled={disabled}
-        onCheckedChange={(value) => onChange(value === true)}
+        onCheckedChange={handleCheckedChange}
       />
     </label>
   );
@@ -584,13 +638,17 @@ function CellCheck({
   disabled?: boolean;
   title: string;
 }) {
+  const handleCheckedChange = useCallback(
+    (value: boolean | "indeterminate") => onChange(value === true),
+    [onChange],
+  );
   return (
     <span className="flex justify-center" title={title}>
       <Checkbox
         aria-label={title}
         checked={checked}
         disabled={disabled}
-        onCheckedChange={(value) => onChange(value === true)}
+        onCheckedChange={handleCheckedChange}
       />
     </span>
   );
@@ -618,6 +676,10 @@ function Option({
   disabled?: boolean;
   hint?: string;
 }) {
+  const handleCheckedChange = useCallback(
+    (value: boolean | "indeterminate") => onChange(value === true),
+    [onChange],
+  );
   return (
     <label
       className={`flex items-center justify-between gap-3 rounded-md px-2 py-1.5 text-sm ${
@@ -632,7 +694,7 @@ function Option({
       <Checkbox
         checked={checked}
         disabled={disabled}
-        onCheckedChange={(value) => onChange(value === true)}
+        onCheckedChange={handleCheckedChange}
       />
     </label>
   );

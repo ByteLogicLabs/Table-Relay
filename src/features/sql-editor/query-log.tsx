@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Trash2, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Checkbox } from '../../components/ui/checkbox';
@@ -34,7 +34,7 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
   const scrollRef = useRef<HTMLDivElement>(null);
   const startYRef = useRef(0);
 
-  const onResizeDown = (e: React.MouseEvent) => {
+  const onResizeDown = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     startYRef.current = e.clientY;
     const onMove = (ev: MouseEvent) => {
@@ -53,7 +53,7 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
     window.addEventListener('mouseup', onUp);
     document.body.style.cursor = 'ns-resize';
     document.body.style.userSelect = 'none';
-  };
+  }, []);
 
   const ordered = useMemo(() => [...entries].sort((a, b) => a.timestamp - b.timestamp), [entries]);
 
@@ -63,6 +63,20 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [ordered.length, open]);
+
+  const handleToggleOpen = useCallback(() => setOpen(o => !o), []);
+
+  const handleHighlightChange = useCallback((v: boolean | 'indeterminate') => setHighlightOn(v === true), []);
+
+  const makeHandleAssist = useCallback(
+    (statement: string, kind: 'fix' | 'explain', message?: string) => () =>
+      prefillChat({
+        kind,
+        sql: statement,
+        errorMessage: kind === 'fix' ? message : undefined,
+      }),
+    [],
+  );
 
   const lastEntry = ordered[ordered.length - 1];
 
@@ -82,7 +96,7 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
       <div className="h-8 px-3 flex items-center justify-between border-b border-border/60">
         <button
           type="button"
-          onClick={() => setOpen(o => !o)}
+          onClick={handleToggleOpen}
           className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground"
         >
           {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
@@ -100,7 +114,7 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
             <Checkbox
               id="syntax-highlight"
               checked={highlightOn}
-              onCheckedChange={(v) => setHighlightOn(v === true)}
+              onCheckedChange={handleHighlightChange}
               className="h-3.5 w-3.5"
             />
             Syntax highlighting
@@ -155,11 +169,7 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
                         type="button"
                         title={assistLabel}
                         aria-label={assistLabel}
-                        onClick={() => prefillChat({
-                          kind: assistKind,
-                          sql: e.statement,
-                          errorMessage: assistKind === 'fix' ? e.message : undefined,
-                        })}
+                        onClick={makeHandleAssist(e.statement, assistKind, e.message)}
                         className="shrink-0 not-italic opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 border border-primary/30 hover:border-primary/60 rounded px-1.5 py-0.5 bg-background/40"
                       >
                         <Sparkles className="w-3 h-3" />

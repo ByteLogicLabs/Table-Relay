@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { X, Sparkles, Square, Loader2, AlertCircle, Plus, ArrowUp, Terminal, RefreshCw, SlidersHorizontal } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { Tooltip } from '../../components/ui/tooltip';
@@ -51,6 +51,9 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
   // whole panel to the StartScreen and back.
   const showActive = s.status === 'active' || !!s.swapping;
 
+  const handleNewChat = useCallback(() => newChat(), []);
+  const handleEnd = useCallback(() => void end(), []);
+
   // Reconcile with backend state on mount, and keep the store in sync with
   // whatever connection the workspace is looking at. The store uses this
   // to route new messages / tool events into the right bucket.
@@ -95,7 +98,7 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
                 className="h-7 w-7"
                 title="New chat — previous conversation is saved in history"
                 aria-label="New chat"
-                onClick={() => newChat()}
+                onClick={handleNewChat}
               >
                 <Plus className="w-3.5 h-3.5" />
               </Button>
@@ -104,7 +107,7 @@ export default function ChatPanel({ onClose, focusedConnectionId, focusedSchema,
                 size="sm"
                 className="h-7 text-[10px] uppercase tracking-wide text-destructive hover:text-destructive hover:bg-destructive/10"
                 title="End the session — closes the current chat and returns to credential picker. Conversations remain saved."
-                onClick={() => void end()}
+                onClick={handleEnd}
               >
                 End
               </Button>
@@ -148,18 +151,23 @@ function ChatTitle({ title, hasConversation }: { title?: string; hasConversation
   const display = title?.trim() || 'New chat';
   const isPlaceholder = !title?.trim();
 
-  const begin = () => {
+  const begin = useCallback(() => {
     setDraft(title ?? '');
     setEditing(true);
-  };
-  const commit = () => {
+  }, [title]);
+  const commit = useCallback(() => {
     setEditing(false);
     const next = draft.trim();
     // Renaming before the first message is allowed: the title is stashed on the
     // bucket and applied when the conversation is created.
     if (next !== (title ?? '').trim()) renameConversation(next);
-  };
-  const cancel = () => setEditing(false);
+  }, [draft, title]);
+  const cancel = useCallback(() => setEditing(false), []);
+  const handleDraftChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setDraft(e.target.value), []);
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(); }
+    else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  }, [commit, cancel]);
 
   useEffect(() => {
     if (editing) {
@@ -173,12 +181,9 @@ function ChatTitle({ title, hasConversation }: { title?: string; hasConversation
       <input
         ref={inputRef}
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={handleDraftChange}
         onBlur={commit}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter') { e.preventDefault(); commit(); }
-          else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
-        }}
+        onKeyDown={handleKeyDown}
         placeholder="Conversation title"
         maxLength={120}
         className="min-w-0 flex-1 bg-transparent text-sm font-medium outline-none border-b border-primary/50 focus:border-primary px-0 py-0"
@@ -255,6 +260,7 @@ function SessionMenu({ providerKind, model }: { providerKind?: AiProviderKind; m
 function StreamToggle() {
   const settings = useSettings();
   const on = settings.aiStreamMode;
+  const handleToggle = useCallback(() => saveSettings({ aiStreamMode: !on }), [on]);
   return (
     <div className="flex items-center justify-between">
       <div className="flex flex-col">
@@ -269,7 +275,7 @@ function StreamToggle() {
         type="button"
         role="switch"
         aria-checked={on}
-        onClick={() => saveSettings({ aiStreamMode: !on })}
+        onClick={handleToggle}
         title={on ? 'Streaming on' : 'Streaming off'}
         className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${on ? 'bg-primary' : 'bg-muted-foreground/30'}`}
       >
@@ -292,6 +298,11 @@ function EffortSlider() {
   const idx = Math.max(0, EFFORT_LEVELS.indexOf(settings.aiEffort));
   const level = EFFORT_LEVELS[idx] ?? 'medium';
 
+  const handleEffortChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = EFFORT_LEVELS[Number(e.target.value)] as EffortLevel | undefined;
+    if (next) saveSettings({ aiEffort: next });
+  }, []);
+
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center justify-between">
@@ -306,10 +317,7 @@ function EffortSlider() {
         max={EFFORT_LEVELS.length - 1}
         step={1}
         value={idx}
-        onChange={(e) => {
-          const next = EFFORT_LEVELS[Number(e.target.value)] as EffortLevel | undefined;
-          if (next) saveSettings({ aiEffort: next });
-        }}
+        onChange={handleEffortChange}
         className="w-full accent-primary cursor-pointer"
         title={`Effort: ${EFFORT_LABELS[level]}`}
       />
@@ -364,6 +372,11 @@ function QueuePopover({
   onEdit: (id: string, text: string) => void;
   onRemove: (id: string) => void;
 }) {
+  const makeHandleEdit = useCallback(
+    (id: string) => (e: React.ChangeEvent<HTMLTextAreaElement>) => onEdit(id, e.target.value),
+    [onEdit],
+  );
+  const makeHandleRemove = useCallback((id: string) => () => onRemove(id), [onRemove]);
   return (
     <Popover>
       <PopoverTrigger
@@ -390,13 +403,13 @@ function QueuePopover({
               </span>
               <textarea
                 value={item.text}
-                onChange={(e) => onEdit(item.id, e.target.value)}
+                onChange={makeHandleEdit(item.id)}
                 rows={1}
                 className="flex-1 min-w-0 resize-none rounded-md border border-border bg-background px-2 py-1 text-xs outline-none focus:border-primary/50 max-h-24 overflow-y-auto"
               />
               <button
                 type="button"
-                onClick={() => onRemove(item.id)}
+                onClick={makeHandleRemove(item.id)}
                 className="mt-0.5 p-1 rounded text-muted-foreground hover:text-destructive hover:bg-destructive/10 shrink-0"
                 title="Remove from queue"
                 aria-label="Remove from queue"
@@ -556,6 +569,14 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
     ? (activeId ?? '')
     : (sessionIsCli ? `${CLI_OPTION_PREFIX}${sessionKind}` : '');
 
+  const handleOpenAiSettings = useCallback(() => openSettings('ai'), []);
+  const handlePreventPointerDown = useCallback((e: React.PointerEvent) => e.preventDefault(), []);
+  const handleReloadClick = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    void refresh();
+  }, []);
+
   return (
     <div className="flex items-center gap-0.5 min-w-0">
     <Select
@@ -584,7 +605,7 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
           <div className="border-t border-border/60 mt-1 pt-1 flex items-center gap-1">
             <button
               type="button"
-              onClick={() => openSettings('ai')}
+              onClick={handleOpenAiSettings}
               className="flex-1 text-left px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted/60 hover:text-foreground rounded flex items-center gap-2"
             >
               <SettingsIcon className="w-3 h-3" /> Manage API providers in Settings…
@@ -592,8 +613,8 @@ function ActiveCredentialPicker({ sessionKind }: { sessionKind?: AiProviderKind 
             <button
               type="button"
               // Stop the Select from closing/selecting; just re-probe in place.
-              onPointerDown={(e) => e.preventDefault()}
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); void refresh(); }}
+              onPointerDown={handlePreventPointerDown}
+              onClick={handleReloadClick}
               disabled={reloading}
               title="Reload credentials and installed CLI tools"
               aria-label="Reload providers"
@@ -955,6 +976,18 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
       : null
     : null;
 
+  const handleOpenAiSettings = useCallback(() => openSettings('ai'), []);
+  const handleLlamaClick = useCallback(() => void handleStartLlama(), [handleStartLlama]);
+  const handleReloadAllClick = useCallback(() => void reloadAll(), [reloadAll]);
+  const makeHandleCliClick = useCallback(
+    (kind: AiProviderKind, model?: string) => () => void handleStartCli(kind, model),
+    [handleStartCli],
+  );
+  const makeHandlePickClick = useCallback(
+    (cred: CredentialProfile) => () => void handlePick(cred),
+    [handlePick],
+  );
+
   return (
     <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
       <div className="text-center text-muted-foreground text-xs">
@@ -980,7 +1013,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
           {detectedClis.map(p => (
             <button
               key={p.kind}
-              onClick={() => void handleStartCli(p.kind, p.defaultModel)}
+              onClick={makeHandleCliClick(p.kind, p.defaultModel)}
               disabled={starting}
               title={cliPaths?.[p.kind] ?? undefined}
               className="w-full text-left rounded-lg border border-border hover:border-primary/50 hover:bg-muted/40 transition-colors px-3 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -999,7 +1032,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
           ))}
           {llamaReady && (
             <button
-              onClick={() => void handleStartLlama()}
+              onClick={handleLlamaClick}
               disabled={starting}
               title="llama-server detected"
               className="w-full text-left rounded-lg border border-border hover:border-primary/50 hover:bg-muted/40 transition-colors px-3 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1033,13 +1066,13 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
       )}
 
       {credentials.length === 0 && detectedClis.length === 0 && !llamaReady ? (
-        <Button onClick={() => openSettings('ai')} className="w-full">
+        <Button onClick={handleOpenAiSettings} className="w-full">
           <SettingsIcon className="w-4 h-4 mr-2" /> Open Settings
         </Button>
       ) : credentials.length === 0 ? (
         // Only local runtimes detected — offer Settings as a secondary action.
         <button
-          onClick={() => openSettings('ai')}
+          onClick={handleOpenAiSettings}
           className="w-full text-center text-[11px] text-muted-foreground hover:text-foreground py-2 flex items-center justify-center gap-1.5"
         >
           <SettingsIcon className="w-3 h-3" /> Add an API provider in Settings
@@ -1054,7 +1087,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
           {credentials.map(cred => (
             <button
               key={cred.id}
-              onClick={() => void handlePick(cred)}
+              onClick={makeHandlePickClick(cred)}
               disabled={starting}
               className="w-full text-left rounded-lg border border-border hover:border-primary/50 hover:bg-muted/40 transition-colors px-3 py-2.5 disabled:opacity-50 disabled:cursor-not-allowed"
             >
@@ -1073,7 +1106,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
           <div className="pt-2 flex items-center justify-center gap-1 text-[11px] text-muted-foreground whitespace-nowrap">
             <span>Don't see your provider?</span>
             <button
-              onClick={() => void reloadAll()}
+              onClick={handleReloadAllClick}
               disabled={reloading}
               className="text-primary hover:underline disabled:opacity-50 inline-flex items-center gap-1"
             >
@@ -1082,7 +1115,7 @@ function StartScreen({ pendingPrefill, prefillTick }: { pendingPrefill: ChatPref
             </button>
             <span>or</span>
             <button
-              onClick={() => openSettings('ai')}
+              onClick={handleOpenAiSettings}
               className="text-primary hover:underline"
             >
               manage in Settings
@@ -1193,7 +1226,7 @@ function ActiveSession({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [prefillTick, streaming]);
 
-  const handleSend = async () => {
+  const handleSend = useCallback(async () => {
     const outgoing = draft;
     if (!outgoing.trim()) return;
     const kind = stickyKind ?? null;
@@ -1224,12 +1257,22 @@ function ActiveSession({
       setStickyKind(kind);
       toast.error('No active AI session — pick a credential to start a chat.');
     }
-  };
+  }, [draft, stickyKind, streaming, focusedConnectionId, focusedSchema, focus]);
+
+  const handleDraftChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => setDraft(e.target.value), []);
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      void handleSend();
+    }
+  }, [handleSend]);
+  const handleStop = useCallback(() => void stopStreaming(), []);
+  const handleSendClick = useCallback(() => void handleSend(), [handleSend]);
 
   // Queue management (from the queued-count popover).
-  const removeQueued = (id: string) => setQueue(q => q.filter(item => item.id !== id));
-  const editQueued = (id: string, text: string) =>
-    setQueue(q => q.map(item => (item.id === id ? { ...item, text } : item)));
+  const removeQueued = useCallback((id: string) => setQueue(q => q.filter(item => item.id !== id)), []);
+  const editQueued = useCallback((id: string, text: string) =>
+    setQueue(q => q.map(item => (item.id === id ? { ...item, text } : item))), []);
 
   // Drain the queue: when a turn finishes (streaming → false) and there's a
   // queued message, send the next one. One at a time, FIFO.
@@ -1289,13 +1332,8 @@ function ActiveSession({
           <textarea
             ref={textareaRef}
             value={draft}
-            onChange={e => setDraft(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                void handleSend();
-              }
-            }}
+            onChange={handleDraftChange}
+            onKeyDown={handleKeyDown}
             placeholder={
               streaming
                 ? 'Type to queue your next message…'
@@ -1360,7 +1398,7 @@ function ActiveSession({
                 variant="ghost"
                 size="icon"
                 className="h-6 w-6 rounded-full shrink-0 bg-destructive/10 text-destructive hover:bg-destructive/20"
-                onClick={() => void stopStreaming()}
+                onClick={handleStop}
                 title="Stop current turn"
                 aria-label="Stop"
               >
@@ -1371,7 +1409,7 @@ function ActiveSession({
                 variant="default"
                 size="icon"
                 className="h-6 w-6 rounded-full shrink-0"
-                onClick={() => void handleSend()}
+                onClick={handleSendClick}
                 disabled={!draft.trim()}
                 title="Send (Enter)"
                 aria-label="Send"

@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, Settings, Unplug, Pencil, FileUp, FileDown, Loader2 } from 'lucide-react';
+import { Database, Unplug, Pencil, FileUp, FileDown, Loader2, Copy, Power } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -15,6 +15,7 @@ import { useConnections } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { copyText } from '../../lib/clipboard';
 import { SSH_BADGE_CLASS } from '../../lib/driver-colors';
+import { isUriHost } from '../../lib/connection-display';
 import type { RailTile } from '../../lib/rail';
 import DbIcon from '../../components/db-icon';
 
@@ -43,6 +44,250 @@ export const RAIL_EXPANDED_WIDTH = 240;
 
 function driverIcon(driver: ConnectionProfile['driver'], className = 'w-4 h-4') {
   return <DbIcon driver={driver} className={className} />;
+}
+
+const URI_SCHEME: Record<ConnectionProfile['driver'], string | null> = {
+  PostgreSQL: 'postgresql',
+  MySQL: 'mysql',
+  MongoDB: 'mongodb',
+  Redis: 'redis',
+  SQLite: null,
+};
+
+/** Best-effort connection string for the driver, or null when one doesn't
+ *  apply (SQLite is a file path; URI hosts already carry their own string). */
+function buildConnectionString(c: ConnectionProfile): string | null {
+  // Mongo (and any URI-host driver) already stores a full URI in `host`.
+  if (isUriHost(c.host)) return c.host;
+  const scheme = URI_SCHEME[c.driver];
+  if (!scheme) return c.driver === 'SQLite' ? c.host : null;
+  const auth = c.user
+    ? `${encodeURIComponent(c.user)}${c.password ? `:${encodeURIComponent(c.password)}` : ''}@`
+    : '';
+  const port = c.port ? `:${c.port}` : '';
+  const db = c.database ? `/${c.database}` : '';
+  return `${scheme}://${auth}${c.host}${port}${db}`;
+}
+
+/** Full, labeled dump of a connection including credentials. */
+function buildFullInfo(c: ConnectionProfile): string {
+  const lines: string[] = [];
+  const add = (k: string, v: unknown) => {
+    if (v !== undefined && v !== null && v !== '') lines.push(`${k}: ${v}`);
+  };
+  add('Name', c.name);
+  add('Driver', c.driver);
+  add('Host', c.host);
+  add('Port', c.port);
+  add('User', c.user);
+  add('Password', c.password);
+  add('Database', c.database);
+  add('SSL Mode', c.sslMode);
+  if (c.sshEnabled) {
+    add('SSH Host', c.sshHost);
+    add('SSH Port', c.sshPort);
+    add('SSH User', c.sshUser);
+    add('SSH Auth', c.sshAuthKind);
+    add('SSH Key Path', c.sshKeyPath);
+    add('SSH Password', c.sshPassword);
+    add('SSH Key Passphrase', c.sshKeyPassphrase);
+  }
+  const uri = buildConnectionString(c);
+  if (uri) {
+    lines.push('');
+    add('Connection String', uri);
+  }
+  return lines.join('\n');
+}
+
+interface RailTileRowProps {
+  tile: RailTile;
+  server: ConnectionProfile | undefined;
+  isFocused: boolean;
+  primary: string;
+  secondary: string;
+  connected: boolean;
+  isConnecting: boolean;
+  expanded: boolean;
+  tiles: RailTile[];
+  onOpenChange: (open: boolean) => void;
+  onFocusTile: (tile: RailTile) => void;
+  onEditServer: (serverId: string) => void;
+  onImportSql: (serverId: string) => void;
+  onExport: (serverId: string) => void;
+  onDisconnectServer: (serverId: string) => void;
+  supportsImport: (serverId: string) => boolean;
+  supportsExport: (serverId: string) => boolean;
+}
+
+function RailTileRow({
+  tile,
+  server,
+  isFocused,
+  primary,
+  secondary,
+  connected,
+  isConnecting,
+  expanded,
+  tiles,
+  onOpenChange,
+  onFocusTile,
+  onEditServer,
+  onImportSql,
+  onExport,
+  onDisconnectServer,
+  supportsImport,
+  supportsExport,
+}: RailTileRowProps) {
+  const handleFocus = useCallback(() => onFocusTile(tile), [onFocusTile, tile]);
+  const handleEdit = useCallback(() => {
+    if (server) onEditServer(server.id);
+  }, [onEditServer, server]);
+  const handleImport = useCallback(() => {
+    if (server) onImportSql(server.id);
+  }, [onImportSql, server]);
+  const handleExport = useCallback(() => {
+    if (server) onExport(server.id);
+  }, [onExport, server]);
+  const handleCopyInfo = useCallback(() => {
+    const text = server
+      ? buildFullInfo(server)
+      : [primary, secondary].join('\n');
+    void copyText(text, server ? 'Copied connection info (with credentials)' : 'Copied pin info');
+  }, [server, primary, secondary]);
+  const handleDisconnect = useCallback(() => {
+    if (server && connected) onDisconnectServer(server.id);
+    void unpinTile(tile.id);
+  }, [server, connected, onDisconnectServer, tile.id]);
+  const handleDisconnectOthers = useCallback(() => {
+    const others = tiles.filter(t => t.id !== tile.id);
+    const otherServerIds = new Set(others.map(t => t.serverId));
+    otherServerIds.forEach(id => onDisconnectServer(id));
+    void unpinManyTiles(others.map(t => t.id));
+  }, [tiles, tile.id, onDisconnectServer]);
+  const handleDisconnectAll = useCallback(() => {
+    const serverIds = new Set(tiles.map(t => t.serverId));
+    serverIds.forEach(id => onDisconnectServer(id));
+    void unpinManyTiles(tiles.map(t => t.id));
+  }, [tiles, onDisconnectServer]);
+
+  return (
+    <ContextMenu onOpenChange={onOpenChange}>
+      <ContextMenuTrigger>
+        <div className="relative group/tile">
+        <button
+          type="button"
+          // Focusing a tile must always work — even while it (or
+          // another tile) is mid-connect. A slow connect, especially
+          // over SSH, shouldn't trap the user on the connecting tile;
+          // they need to be able to switch to a different connection.
+          // The spinner badge still signals the in-flight state.
+          onClick={handleFocus}
+          title={expanded ? undefined : `${primary} · ${secondary}`}
+          className={`relative w-full rounded-md text-left transition-colors cursor-pointer
+            ${expanded
+              ? 'h-11 flex items-center gap-2.5 px-2'
+              : 'h-14 flex flex-col items-center justify-center gap-0.5 px-1 py-1.5'}
+            ${isFocused
+              ? 'bg-primary/15 text-foreground'
+              : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'}`}
+        >
+          <span
+            className="relative flex items-center justify-center shrink-0"
+            style={server?.color ? { color: server.color } : undefined}
+          >
+            {server ? driverIcon(server.driver, 'w-5 h-5') : <Database className="w-5 h-5" />}
+            {isConnecting ? (
+              <Loader2 className="absolute -top-0.5 -right-1 w-2.5 h-2.5 animate-spin text-primary" />
+            ) : connected ? (
+              <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-background" />
+            ) : null}
+          </span>
+          {expanded ? (
+            <span className="min-w-0 flex-1 transition-opacity duration-150 opacity-100">
+              <span className="block text-[13px] font-medium truncate leading-tight">{primary}</span>
+              {/* SSH-tunnel marker — a tiny "SSH" text badge in the meta
+                  line so the user can tell which connections route
+                  through a jump host. Kept off the driver logo (overlap
+                  looked cluttered) and inline so it never collides. */}
+              <span className="flex items-center gap-1 text-[10.5px] text-muted-foreground leading-tight min-w-0">
+                {server?.sshEnabled && (
+                  <span
+                    className={`shrink-0 rounded px-1 py-px text-[8px] font-semibold tracking-wide leading-none ${SSH_BADGE_CLASS}`}
+                    title={server.sshHost ? `SSH tunnel via ${server.sshHost}` : 'SSH tunnel'}
+                  >
+                    SSH
+                  </span>
+                )}
+                <span className="truncate">{secondary}</span>
+              </span>
+            </span>
+          ) : (
+            <span className="flex w-full items-center justify-center gap-0.5 text-[9px] font-medium leading-tight min-w-0">
+              {server?.sshEnabled && (
+                <span
+                  className={`shrink-0 rounded px-0.5 text-[7px] font-semibold tracking-wide leading-none ${SSH_BADGE_CLASS}`}
+                  title="SSH tunnel"
+                >
+                  SSH
+                </span>
+              )}
+              <span className="truncate">{tile.databaseName || '…'}</span>
+            </span>
+          )}
+        </button>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-56">
+        {server && (
+          <ContextMenuItem onClick={handleEdit}>
+            <Pencil className="w-3.5 h-3.5 mr-2" /> Edit connection
+          </ContextMenuItem>
+        )}
+        {server && connected && supportsImport(server.id) && (
+          <ContextMenuItem onClick={handleImport}>
+            <FileUp className="w-3.5 h-3.5 mr-2" /> Import data…
+          </ContextMenuItem>
+        )}
+        {server && connected && supportsExport(server.id) && (
+          <ContextMenuItem onClick={handleExport}>
+            <FileDown className="w-3.5 h-3.5 mr-2" /> Export data…
+          </ContextMenuItem>
+        )}
+        <ContextMenuItem onClick={handleCopyInfo}>
+          <Copy className="w-3.5 h-3.5 mr-2" /> Copy info
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        {/*
+          Disconnect is the unpin action now — dropping the tile from
+          the rail and closing the underlying connection are the same
+          user intent, so we collapsed the two into one item.
+        */}
+        <ContextMenuItem
+          className="text-destructive focus:text-destructive whitespace-nowrap"
+          onClick={handleDisconnect}
+        >
+          <Unplug className="w-3.5 h-3.5 mr-2" /> Disconnect
+        </ContextMenuItem>
+        {tiles.length > 1 && (
+          <>
+            <ContextMenuItem
+              className="text-destructive focus:text-destructive whitespace-nowrap"
+              onClick={handleDisconnectOthers}
+            >
+              <Unplug className="w-3.5 h-3.5 mr-2" /> Disconnect others
+            </ContextMenuItem>
+            <ContextMenuItem
+              className="text-destructive focus:text-destructive whitespace-nowrap"
+              onClick={handleDisconnectAll}
+            >
+              <Power className="w-3.5 h-3.5 mr-2" /> Disconnect all
+            </ContextMenuItem>
+          </>
+        )}
+      </ContextMenuContent>
+    </ContextMenu>
+  );
 }
 
 export default function ConnectionRail({
@@ -142,14 +387,17 @@ export default function ConnectionRail({
     return version || null;
   }
 
+  const handleRootPointerEnter = useCallback(() => onExpandChange(true), [onExpandChange]);
+  const handleRootPointerLeave = useCallback(() => {
+    // Don't collapse while a menu/dialog is open — those own the pointer.
+    if (!menuOpen && !settingsOpen) onExpandChange(false);
+  }, [menuOpen, settingsOpen, onExpandChange]);
+
   return (
     <div
       ref={rootRef}
-      onPointerEnter={() => onExpandChange(true)}
-      onPointerLeave={() => {
-        // Don't collapse while a menu/dialog is open — those own the pointer.
-        if (!menuOpen && !settingsOpen) onExpandChange(false);
-      }}
+      onPointerEnter={handleRootPointerEnter}
+      onPointerLeave={handleRootPointerLeave}
       style={{ width: expanded ? RAIL_EXPANDED_WIDTH : RAIL_COLLAPSED_WIDTH }}
       className="shrink-0 flex flex-col bg-sidebar-bg/70 border-r border-border h-full transition-[width] duration-200 ease-out overflow-hidden"
     >
@@ -168,138 +416,26 @@ export default function ConnectionRail({
           const connected = connectedServerIds.has(tile.serverId);
           const isConnecting = connState.connectingIds.has(tile.serverId);
           return (
-            <ContextMenu key={tile.id} onOpenChange={setMenuOpen}>
-              <ContextMenuTrigger>
-                <div className="relative group/tile">
-                <button
-                  type="button"
-                  // Focusing a tile must always work — even while it (or
-                  // another tile) is mid-connect. A slow connect, especially
-                  // over SSH, shouldn't trap the user on the connecting tile;
-                  // they need to be able to switch to a different connection.
-                  // The spinner badge still signals the in-flight state.
-                  onClick={() => onFocusTile(tile)}
-                  title={expanded ? undefined : `${primary} · ${secondary}`}
-                  className={`relative w-full rounded-md text-left transition-colors cursor-pointer
-                    ${expanded
-                      ? 'h-11 flex items-center gap-2.5 px-2'
-                      : 'h-14 flex flex-col items-center justify-center gap-0.5 px-1 py-1.5'}
-                    ${isFocused
-                      ? 'bg-primary/15 text-foreground'
-                      : 'text-muted-foreground hover:bg-muted/60 hover:text-foreground'}`}
-                >
-                  <span
-                    className="relative flex items-center justify-center shrink-0"
-                    style={server?.color ? { color: server.color } : undefined}
-                  >
-                    {server ? driverIcon(server.driver, 'w-5 h-5') : <Database className="w-5 h-5" />}
-                    {isConnecting ? (
-                      <Loader2 className="absolute -top-0.5 -right-1 w-2.5 h-2.5 animate-spin text-primary" />
-                    ) : connected ? (
-                      <span className="absolute -top-0.5 -right-1 w-2 h-2 rounded-full bg-emerald-500 ring-1 ring-background" />
-                    ) : null}
-                  </span>
-                  {expanded ? (
-                    <span className="min-w-0 flex-1 transition-opacity duration-150 opacity-100">
-                      <span className="block text-[13px] font-medium truncate leading-tight">{primary}</span>
-                      {/* SSH-tunnel marker — a tiny "SSH" text badge in the meta
-                          line so the user can tell which connections route
-                          through a jump host. Kept off the driver logo (overlap
-                          looked cluttered) and inline so it never collides. */}
-                      <span className="flex items-center gap-1 text-[10.5px] text-muted-foreground leading-tight min-w-0">
-                        {server?.sshEnabled && (
-                          <span
-                            className={`shrink-0 rounded px-1 py-px text-[8px] font-semibold tracking-wide leading-none ${SSH_BADGE_CLASS}`}
-                            title={server.sshHost ? `SSH tunnel via ${server.sshHost}` : 'SSH tunnel'}
-                          >
-                            SSH
-                          </span>
-                        )}
-                        <span className="truncate">{secondary}</span>
-                      </span>
-                    </span>
-                  ) : (
-                    <span className="flex w-full items-center justify-center gap-0.5 text-[9px] font-medium leading-tight min-w-0">
-                      {server?.sshEnabled && (
-                        <span
-                          className={`shrink-0 rounded px-0.5 text-[7px] font-semibold tracking-wide leading-none ${SSH_BADGE_CLASS}`}
-                          title="SSH tunnel"
-                        >
-                          SSH
-                        </span>
-                      )}
-                      <span className="truncate">{tile.databaseName || '…'}</span>
-                    </span>
-                  )}
-                </button>
-                </div>
-              </ContextMenuTrigger>
-              <ContextMenuContent className="w-56">
-                {server && (
-                  <ContextMenuItem onClick={() => onEditServer(server.id)}>
-                    <Pencil className="w-3.5 h-3.5 mr-2" /> Edit connection
-                  </ContextMenuItem>
-                )}
-                {server && connected && supportsImport(server.id) && (
-                  <ContextMenuItem onClick={() => onImportSql(server.id)}>
-                    <FileUp className="w-3.5 h-3.5 mr-2" /> Import data…
-                  </ContextMenuItem>
-                )}
-                {server && connected && supportsExport(server.id) && (
-                  <ContextMenuItem onClick={() => onExport(server.id)}>
-                    <FileDown className="w-3.5 h-3.5 mr-2" /> Export data…
-                  </ContextMenuItem>
-                )}
-                <ContextMenuItem
-                  onClick={() => {
-                    const text = [primary, secondary].join('\n');
-                    void copyText(text, 'Copied pin info');
-                  }}
-                >
-                  Copy info
-                </ContextMenuItem>
-                <ContextMenuSeparator />
-                {/*
-                  Disconnect is the unpin action now — dropping the tile from
-                  the rail and closing the underlying connection are the same
-                  user intent, so we collapsed the two into one item.
-                */}
-                <ContextMenuItem
-                  className="text-destructive focus:text-destructive whitespace-nowrap"
-                  onClick={() => {
-                    if (server && connected) onDisconnectServer(server.id);
-                    void unpinTile(tile.id);
-                  }}
-                >
-                  <Unplug className="w-3.5 h-3.5 mr-2" /> Disconnect
-                </ContextMenuItem>
-                {rail.tiles.length > 1 && (
-                  <>
-                    <ContextMenuItem
-                      className="text-destructive focus:text-destructive whitespace-nowrap"
-                      onClick={() => {
-                        const others = rail.tiles.filter(t => t.id !== tile.id);
-                        const otherServerIds = new Set(others.map(t => t.serverId));
-                        otherServerIds.forEach(id => onDisconnectServer(id));
-                        void unpinManyTiles(others.map(t => t.id));
-                      }}
-                    >
-                      Disconnect others
-                    </ContextMenuItem>
-                    <ContextMenuItem
-                      className="text-destructive focus:text-destructive whitespace-nowrap"
-                      onClick={() => {
-                        const serverIds = new Set(rail.tiles.map(t => t.serverId));
-                        serverIds.forEach(id => onDisconnectServer(id));
-                        void unpinManyTiles(rail.tiles.map(t => t.id));
-                      }}
-                    >
-                      Disconnect all
-                    </ContextMenuItem>
-                  </>
-                )}
-              </ContextMenuContent>
-            </ContextMenu>
+            <RailTileRow
+              key={tile.id}
+              tile={tile}
+              server={server}
+              isFocused={isFocused}
+              primary={primary}
+              secondary={secondary}
+              connected={connected}
+              isConnecting={isConnecting}
+              expanded={expanded}
+              tiles={rail.tiles}
+              onOpenChange={setMenuOpen}
+              onFocusTile={onFocusTile}
+              onEditServer={onEditServer}
+              onImportSql={onImportSql}
+              onExport={onExport}
+              onDisconnectServer={onDisconnectServer}
+              supportsImport={supportsImport}
+              supportsExport={supportsExport}
+            />
           );
         })}
         {rail.tiles.length === 0 && expanded && (
@@ -309,20 +445,10 @@ export default function ConnectionRail({
         )}
       </div>
 
-      {/* Settings button */}
-      <div className="shrink-0 px-1.5 pb-2 pt-1 border-t border-border/40">
-        <button
-          type="button"
-          onClick={() => setSettingsOpen(true)}
-          title="Settings"
-          className={`relative w-full rounded-lg text-left transition-colors cursor-pointer text-muted-foreground hover:bg-muted/60 hover:text-foreground
-            ${expanded ? 'h-9 flex items-center gap-2.5 px-2' : 'h-10 flex flex-col items-center justify-center gap-0.5'}`}
-        >
-          <Settings className="w-4 h-4 shrink-0" />
-          {expanded && <span className="text-[13px] font-medium">Settings</span>}
-        </button>
-      </div>
-
+      {/* Settings is reachable from the native menu (Cmd/Ctrl+,) and the home
+          screen, so the rail no longer carries its own button. The dialog stays
+          mounted to serve `tablerelay:open-settings` deep links (e.g. opening
+          straight to AI settings). */}
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialSection={settingsSection} />
     </div>
   );

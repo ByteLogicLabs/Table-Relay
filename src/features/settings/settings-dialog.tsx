@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { AlertCircle, ArrowDownUp, CheckCircle2, Eye, EyeOff, Loader2, Palette, Pencil, Plus, RefreshCw, RotateCcw, ScrollText, Settings2, ShieldCheck, Sparkles, SquarePen, Trash2, Zap } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -576,6 +576,43 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
 
   const meta = PROVIDERS.find(p => p.kind === form.kind)!;
 
+  // ── JSX handlers
+  // Nav section buttons (per-item id from the map → factory).
+  const makeHandleSelectSection = useCallback((id: Section) => () => setSection(id), []);
+
+  const handleOpenReleases = useCallback(() => {
+    const base = process.env.GIT_URL || 'https://github.com/ByteLogicLabs/Table-Relay';
+    void openUrl(`${base}/releases`).catch(() => {});
+  }, []);
+
+  const handleRowLimitChange = useCallback((v: string) => saveSettings({ defaultRowLimit: Number(v) }), []);
+  const handleNullDisplayChange = useCallback((v: string) => saveSettings({ nullDisplay: v as NullDisplay }), []);
+  const handleConfirmDestructiveChange = useCallback((v: boolean) => saveSettings({ confirmDestructive: v }), []);
+  const handleRestoreOnStartupChange = useCallback((v: boolean) => saveSettings({ restoreOnStartup: v }), []);
+  const handleAiEffortChange = useCallback((v: string) => saveSettings({ aiEffort: v as EffortLevel }), []);
+
+  const handleExportConnections = useCallback(() => setConnTransfer('export'), []);
+  const handleImportConnections = useCallback(() => setConnTransfer('import'), []);
+
+  // Credential rows (per-item cred from the map → factories).
+  const makeHandleActivate = useCallback((cred: CredentialProfile) => () => void activateProfile(cred), []);
+  const makeHandleEdit = useCallback((cred: CredentialProfile) => () => openEdit(cred), []);
+  const makeHandleDelete = useCallback((cred: CredentialProfile) => () => void handleDelete(cred), [handleDelete]);
+
+  const handleProviderChange = useCallback((v: string) => patchForm({ kind: v as AiProviderKind }), []);
+  const handleNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => patchForm({ name: e.target.value }), []);
+  const handleBaseUrlChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => patchForm({ baseUrl: e.target.value }), []);
+  const handleApiKeyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => patchForm({ apiKey: e.target.value }), []);
+  const handleToggleShowKey = useCallback(() => patchForm({ showKey: !form.showKey }), [form.showKey]);
+  const handleRefetchModels = useCallback(() => void fetchModels(true), [fetchModels]);
+  const handleModelChange = useCallback((m: string) => patchForm({ model: m }), []);
+  const handleSaveProfileClick = useCallback(() => void handleSaveProfile(), [handleSaveProfile]);
+  const handlePersistApprovalsChange = useCallback((v: boolean) => void handlePersistApprovals(v), []);
+
+  const handleConnTransferOpenChange = useCallback((v: boolean) => { if (!v) setConnTransfer(null); }, []);
+  const handlePwSubmit = useCallback((pw: string | null) => resolvePassword(pw), [resolvePassword]);
+  const handlePwOpenChange = useCallback((v: boolean) => { if (!v) resolvePassword(null); }, [resolvePassword]);
+
   return (
     <>
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -598,7 +635,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
               ([id, Icon, label]) => (
                 <button
                   key={id}
-                  onClick={() => setSection(id)}
+                  onClick={makeHandleSelectSection(id)}
                   className={`flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm text-left transition-colors
                     ${section === id ? 'bg-primary/15 text-primary font-medium' : 'text-muted-foreground hover:text-foreground hover:bg-muted/60'}`}
                 >
@@ -612,10 +649,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                 GitHub releases page (changelog / check for updates). */}
             <button
               type="button"
-              onClick={() => {
-                const base = process.env.GIT_URL || 'https://github.com/ByteLogicLabs/Table-Relay';
-                void openUrl(`${base}/releases`).catch(() => {});
-              }}
+              onClick={handleOpenReleases}
               title="View releases on GitHub"
               className="mt-auto mx-1 px-1.5 py-1 rounded text-left text-[10px] text-muted-foreground/60 hover:text-foreground hover:bg-muted/60 transition-colors"
             >
@@ -642,7 +676,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                 <Row title="Default row limit" desc="Page size used when opening a new table tab.">
                   <Select
                     value={String(settings.defaultRowLimit)}
-                    onValueChange={(v) => saveSettings({ defaultRowLimit: Number(v) })}
+                    onValueChange={handleRowLimitChange}
                   >
                     <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -656,7 +690,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                 <Row title="NULL display" desc="How NULL / empty cells render in the grid.">
                   <Select
                     value={settings.nullDisplay}
-                    onValueChange={(v) => saveSettings({ nullDisplay: v as NullDisplay })}
+                    onValueChange={handleNullDisplayChange}
                   >
                     <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
                     <SelectContent>
@@ -668,11 +702,11 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                 </Row>
 
                 <Row title="Confirm destructive queries" desc="Warn before running DELETE / UPDATE / DROP without a WHERE.">
-                  <Toggle checked={settings.confirmDestructive} onChange={(v) => saveSettings({ confirmDestructive: v })} />
+                  <Toggle checked={settings.confirmDestructive} onChange={handleConfirmDestructiveChange} />
                 </Row>
 
                 <Row title="Restore session on startup" desc="Reconnect to pinned databases when the app launches.">
-                  <Toggle checked={settings.restoreOnStartup} onChange={(v) => saveSettings({ restoreOnStartup: v })} />
+                  <Toggle checked={settings.restoreOnStartup} onChange={handleRestoreOnStartupChange} />
                 </Row>
 
                 <div className="flex justify-end pt-4 mt-2 border-t border-border">
@@ -692,7 +726,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                 </div>
                 <div className="rounded-md border border-border divide-y divide-border">
                   <DataRow label="Settings" desc="Appearance, editor and behaviour preferences" onExport={handleExportSettings} onImport={handleImportSettings} />
-                  <DataRow label="Connections" desc="Saved databases — pick which to export/import, or bring in from TablePlus, Navicat, HeidiSQL" onExport={() => setConnTransfer('export')} onImport={() => setConnTransfer('import')} />
+                  <DataRow label="Connections" desc="Saved databases — pick which to export/import, or bring in from TablePlus, Navicat, HeidiSQL" onExport={handleExportConnections} onImport={handleImportConnections} />
                   <DataRow label="AI credentials" desc="Provider profiles — includes API keys" onExport={handleExportCredentials} onImport={handleImportCredentials} />
                   <DataRow label="Conversations" desc="Full AI chat history" onExport={handleExportConversations} onImport={handleImportConversations} />
                 </div>
@@ -783,7 +817,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                                     size="sm"
                                     variant="ghost"
                                     className="h-7 text-xs gap-1 px-2"
-                                    onClick={() => void activateProfile(cred)}
+                                    onClick={makeHandleActivate(cred)}
                                     disabled={!!activating}
                                     title="Activate this credential"
                                   >
@@ -796,7 +830,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                                   size="sm"
                                   variant="ghost"
                                   className="h-7 w-7 p-0"
-                                  onClick={() => openEdit(cred)}
+                                  onClick={makeHandleEdit(cred)}
                                   title="Edit"
                                 >
                                   <Pencil className="w-3 h-3" />
@@ -805,7 +839,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                                   size="sm"
                                   variant="ghost"
                                   className="h-7 w-7 p-0 text-destructive hover:text-destructive"
-                                  onClick={() => void handleDelete(cred)}
+                                  onClick={makeHandleDelete(cred)}
                                   disabled={isDeleting}
                                   title="Remove"
                                 >
@@ -839,7 +873,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                     {/* Provider */}
                     <div className="space-y-1.5">
                       <Label className="text-xs">Provider</Label>
-                      <Select value={form.kind} onValueChange={v => patchForm({ kind: v as AiProviderKind })}>
+                      <Select value={form.kind} onValueChange={handleProviderChange}>
                         <SelectTrigger className="h-8 text-xs w-full">
                           <SelectValue>
                             {PROVIDERS.find(p => p.kind === form.kind)?.label}
@@ -869,7 +903,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                       <Input
                         placeholder={`e.g. ${meta.label} (work)`}
                         value={form.name}
-                        onChange={e => patchForm({ name: e.target.value })}
+                        onChange={handleNameChange}
                         className="h-8 text-xs"
                       />
                     </div>
@@ -905,7 +939,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                         <Input
                           placeholder="http://localhost:11434/v1"
                           value={form.baseUrl}
-                          onChange={e => patchForm({ baseUrl: e.target.value })}
+                          onChange={handleBaseUrlChange}
                           className="h-8 text-xs"
                         />
                       </div>
@@ -942,7 +976,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                             type={form.showKey ? 'text' : 'password'}
                             placeholder="sk-…"
                             value={form.apiKey}
-                            onChange={e => patchForm({ apiKey: e.target.value })}
+                            onChange={handleApiKeyChange}
                             className={`h-8 text-xs pr-8 font-mono ${
                               validationStatus === 'valid'   ? 'border-emerald-500/40' :
                               validationStatus === 'invalid' ? 'border-destructive/60' : ''
@@ -950,7 +984,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                           />
                           <button
                             type="button"
-                            onClick={() => patchForm({ showKey: !form.showKey })}
+                            onClick={handleToggleShowKey}
                             className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
                           >
                             {form.showKey ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
@@ -976,7 +1010,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                           return (
                             <button
                               type="button"
-                              onClick={() => void fetchModels(true)}
+                              onClick={handleRefetchModels}
                               disabled={modelLoading}
                               className="text-[10px] text-muted-foreground hover:text-foreground flex items-center gap-1 disabled:opacity-50"
                               title="Re-fetch model list"
@@ -994,7 +1028,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                           <SearchableSelect
                             value={form.model}
                             options={options}
-                            onChange={m => patchForm({ model: m })}
+                            onChange={handleModelChange}
                             placeholder={meta.defaultModel || 'Select a model'}
                             searchPlaceholder={modelLoading ? 'Loading models…' : 'Search or type a model id…'}
                             className="h-8 text-xs font-mono"
@@ -1006,7 +1040,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
 
                     {/* Actions */}
                     <div className="flex items-center gap-2 pt-1">
-                      <Button size="sm" className="h-7 text-xs" onClick={() => void handleSaveProfile()} disabled={saving}>
+                      <Button size="sm" className="h-7 text-xs" onClick={handleSaveProfileClick} disabled={saving}>
                         {saving ? <><Loader2 className="w-3 h-3 mr-1.5 animate-spin" />Saving…</> : (editingId ? 'Update' : 'Add')}
                       </Button>
                       <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={cancelForm}>
@@ -1030,7 +1064,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                     >
                       <Select
                         value={settings.aiEffort}
-                        onValueChange={(v) => saveSettings({ aiEffort: v as EffortLevel })}
+                        onValueChange={handleAiEffortChange}
                       >
                         <SelectTrigger className="h-8 text-xs w-32"><SelectValue /></SelectTrigger>
                         <SelectContent>
@@ -1066,7 +1100,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
                     >
                       {aiPermsBusy
                         ? <Loader2 className="w-4 h-4 animate-spin text-muted-foreground" />
-                        : <Toggle checked={settings.persistAiApprovals} onChange={(v) => void handlePersistApprovals(v)} />}
+                        : <Toggle checked={settings.persistAiApprovals} onChange={handlePersistApprovalsChange} />}
                     </Row>
 
                     <p className="text-[11px] text-muted-foreground/80 leading-relaxed pt-1">
@@ -1087,7 +1121,7 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
       <ConnectionTransferDialog
         open={connTransfer !== null}
         mode={connTransfer}
-        onOpenChange={(v) => { if (!v) setConnTransfer(null); }}
+        onOpenChange={handleConnTransferOpenChange}
       />
     )}
     {pwPrompt && (
@@ -1096,8 +1130,8 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
         mode={pwPrompt.mode}
         title={pwPrompt.title}
         description={pwPrompt.description}
-        onSubmit={(pw) => resolvePassword(pw)}
-        onOpenChange={(v) => { if (!v) resolvePassword(null); }}
+        onSubmit={handlePwSubmit}
+        onOpenChange={handlePwOpenChange}
       />
     )}
     </>

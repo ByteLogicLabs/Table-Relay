@@ -2682,6 +2682,210 @@ export default function DataGrid({
 
   const closeMenu = useCallback(() => setMenuState(null), []);
 
+  const handleSchemaSave = useCallback(async () => {
+    setSchemaSaving(true);
+    try {
+      await schemaRef.current?.save();
+    } finally {
+      setSchemaSaving(false);
+    }
+  }, []);
+
+  const handleSchemaDiscard = useCallback(() => schemaRef.current?.discard(), []);
+
+  const handleFilterPopoverChange = useCallback((open: boolean) => {
+    setFilterPopoverOpen(open);
+    if (open) setColumnsPopoverOpen(false);
+  }, []);
+
+  const handleColumnsPopoverChange = useCallback((open: boolean) => {
+    setColumnsPopoverOpen(open);
+    if (open) setFilterPopoverOpen(false);
+  }, []);
+
+  const makeFilterColumnChange = useCallback(
+    (id: string) => (v: string) => updateFilter(id, { column: v }),
+    // updateFilter only sets state via setter; stable enough to omit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const makeFilterOpChange = useCallback(
+    (id: string) => (v: string) => updateFilter(id, { op: v as FilterOperator }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const makeFilterValueChange = useCallback(
+    (id: string) => (e: React.ChangeEvent<HTMLInputElement>) =>
+      updateFilter(id, { value: e.target.value }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const makeRemoveFilter = useCallback(
+    (id: string) => () => removeFilter(id),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+  const makeToggleColumn = useCallback(
+    (col: string) => (checked: boolean | "indeterminate") =>
+      toggleColumn(col, checked === true),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
+
+  const handleShowSchema = useCallback(() => setViewMode("schema"), [setViewMode]);
+  const handleShowTable = useCallback(() => setViewMode("table"), [setViewMode]);
+  const handleShowJson = useCallback(() => setViewMode("json"), [setViewMode]);
+  const handleShowDiagram = useCallback(
+    () => setViewMode("diagram"),
+    [setViewMode],
+  );
+  const handleOpenRealtime = useCallback(
+    () => onOpenRealtime?.(connectionId),
+    [onOpenRealtime, connectionId],
+  );
+
+  const handleOpenDiscardConfirm = useCallback(
+    () => setConfirmDiscardOpen(true),
+    [],
+  );
+  const handleImportSql = useCallback(
+    () => onImportSql?.(connectionId),
+    [onImportSql, connectionId],
+  );
+  const handleOpenExport = useCallback(() => setIsExportModalOpen(true), []);
+  const handleToggleChat = useCallback(
+    () => window.dispatchEvent(new CustomEvent("tablerelay:toggle-chat")),
+    [],
+  );
+
+  const makeCycleSort = useCallback(
+    (col: string) => () => cycleSort(col),
+    [cycleSort],
+  );
+  const makeBeginInsertAt = useCallback(
+    (col: string) => () => beginInsertAt(col),
+    // beginInsertAt is recreated each render and reads current structure/data,
+    // so it must be a dependency or the handler captures stale (empty) state.
+    [beginInsertAt],
+  );
+
+  const handleJsonDiscard = useCallback(() => {
+    // Reset by re-applying the source text. Monaco's
+    // `value` prop is controlled-ish — pushing the same
+    // string back through state isn't enough (React
+    // skips it), so we write directly into the editor
+    // model.
+    const editor = jsonEditorRef.current;
+    if (editor) editor.setValue(jsonRowsText);
+    setJsonDirty(false);
+    setJsonError(null);
+  }, [jsonRowsText]);
+
+  const handleJsonSaveClick = useCallback(() => {
+    void handleSaveJsonEdits();
+    // handleSaveJsonEdits is recreated each render and reads current structure/
+    // data, so it must be a dependency to avoid saving with stale (null) state.
+  }, [handleSaveJsonEdits]);
+
+  const handleDismissJsonError = useCallback(() => setJsonError(null), []);
+
+  const handleEditorMount = useCallback(
+    (
+      editor: MonacoEditorNs.IStandaloneCodeEditor,
+      monaco: typeof import("monaco-editor"),
+    ) => {
+      jsonEditorRef.current = editor;
+      collapseJsonSubtrees(editor);
+      // Cmd/Ctrl+S → Save. Bound on the editor instance so it
+      // only fires when the JSON editor has focus; doesn't
+      // intercept the browser save shortcut elsewhere in the
+      // app. The handler dispatches through `jsonSaveRef` to
+      // see live state on every keystroke.
+      editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
+        jsonSaveRef.current();
+      });
+    },
+    [collapseJsonSubtrees],
+  );
+
+  const handleJsonEditorChange = useCallback(
+    (next: string | undefined) => {
+      const dirty = (next ?? "") !== jsonRowsText;
+      setJsonDirty(dirty);
+      if (!dirty) {
+        setJsonError(null);
+        return;
+      }
+      try {
+        JSON.parse(next ?? "");
+        setJsonError(null);
+      } catch (e) {
+        setJsonError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [jsonRowsText],
+  );
+
+  const handleCopyJson = useCallback(() => {
+    void copyText(
+      jsonEditorRef.current?.getValue() ?? jsonRowsText,
+      "JSON copied",
+    );
+  }, [jsonRowsText]);
+
+  const handlePrevPage = useCallback(
+    () => setPage((p) => Math.max(1, p - 1)),
+    [],
+  );
+  const handleNextPage = useCallback(() => setPage((p) => p + 1), []);
+
+  const handleExportModalClose = useCallback(
+    () => setIsExportModalOpen(false),
+    [],
+  );
+
+  const handleKeepEditingDiscard = useCallback(
+    () => setConfirmDiscardOpen(false),
+    [],
+  );
+  const handleConfirmDiscard = useCallback(() => {
+    discardAll();
+    setConfirmDiscardOpen(false);
+    // discardAll is recreated each render and snapshots current pending edits
+    // for undo, so it must be a dependency to avoid an empty undo snapshot.
+  }, [discardAll]);
+
+  const handleKeepEditingRefresh = useCallback(
+    () => setConfirmRefreshOpen(false),
+    [],
+  );
+  const handleConfirmRefresh = useCallback(() => {
+    setConfirmRefreshOpen(false);
+    runRefresh();
+    // runRefresh is recreated each render and reads current page/filters/sort,
+    // so it must be a dependency to reload the current view (not page 1).
+  }, [runRefresh]);
+
+  const handleSetNull = useCallback(
+    (rowId: string, col: string) => handleCellEdit(rowId, col, "NULL"),
+    // handleCellEdit is recreated each render and reads current data/editedCells,
+    // so it must be a dependency to avoid a stale lookup that clobbers edits.
+    [handleCellEdit],
+  );
+  const handleDuplicateRow = useCallback(
+    (rowId: string) => {
+      // If the right-clicked row is part of a multi-selection, duplicate
+      // the whole selection; otherwise just that row.
+      const ids = selectedRows.has(rowId)
+        ? Array.from(selectedRows)
+        : [rowId];
+      duplicateRows(ids);
+    },
+    [selectedRows, duplicateRows],
+  );
+
+  const handleCommitClick = useCallback(() => commitWithFlush(), [commitWithFlush]);
+
   return (
     <div className="flex flex-col h-full min-w-0 relative">
       {/* Top progress bar — absolute so it overlays without nudging layout. */}
@@ -2723,14 +2927,7 @@ export default function DataGrid({
                 size="sm"
                 variant="ghost"
                 disabled={!schemaDirty || schemaSaving}
-                onClick={async () => {
-                  setSchemaSaving(true);
-                  try {
-                    await schemaRef.current?.save();
-                  } finally {
-                    setSchemaSaving(false);
-                  }
-                }}
+                onClick={handleSchemaSave}
               >
                 <Check className="w-4 h-4 mr-2" />
                 {schemaSaving ? "Saving…" : "Save"}
@@ -2739,7 +2936,7 @@ export default function DataGrid({
                 size="sm"
                 variant="ghost"
                 disabled={!schemaDirty || schemaSaving}
-                onClick={() => schemaRef.current?.discard()}
+                onClick={handleSchemaDiscard}
               >
                 <X className="w-4 h-4 mr-2" />
                 Discard
@@ -2765,10 +2962,7 @@ export default function DataGrid({
               <div data-grid-toolbar-popover="true">
                 <Popover
                   open={filterPopoverOpen}
-                  onOpenChange={(open) => {
-                    setFilterPopoverOpen(open);
-                    if (open) setColumnsPopoverOpen(false);
-                  }}
+                  onOpenChange={handleFilterPopoverChange}
                 >
                 <PopoverTrigger
                   render={(props) => (
@@ -2832,9 +3026,7 @@ export default function DataGrid({
                               </span>
                               <Select
                                 value={f.column}
-                                onValueChange={(v) =>
-                                  updateFilter(f.id, { column: v })
-                                }
+                                onValueChange={makeFilterColumnChange(f.id)}
                               >
                                 <SelectTrigger className="h-7 w-28 text-xs">
                                   <SelectValue />
@@ -2853,11 +3045,7 @@ export default function DataGrid({
                               </Select>
                               <Select
                                 value={f.op}
-                                onValueChange={(v) =>
-                                  updateFilter(f.id, {
-                                    op: v as FilterOperator,
-                                  })
-                                }
+                                onValueChange={makeFilterOpChange(f.id)}
                               >
                                 <SelectTrigger className="h-7 w-32 text-xs">
                                   <SelectValue />
@@ -2879,15 +3067,13 @@ export default function DataGrid({
                                 disabled={op?.valueless}
                                 className="h-7 flex-1 min-w-0 text-xs"
                                 value={f.value}
-                                onChange={(e) =>
-                                  updateFilter(f.id, { value: e.target.value })
-                                }
+                                onChange={makeFilterValueChange(f.id)}
                               />
                               <Button
                                 variant="ghost"
                                 size="icon"
                                 className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive"
-                                onClick={() => removeFilter(f.id)}
+                                onClick={makeRemoveFilter(f.id)}
                                 aria-label="Remove condition"
                               >
                                 <Trash2 className="w-3.5 h-3.5" />
@@ -2937,10 +3123,7 @@ export default function DataGrid({
               <div data-grid-toolbar-popover="true">
                 <Popover
                   open={columnsPopoverOpen}
-                  onOpenChange={(open) => {
-                    setColumnsPopoverOpen(open);
-                    if (open) setFilterPopoverOpen(false);
-                  }}
+                  onOpenChange={handleColumnsPopoverChange}
                 >
                 <PopoverTrigger
                   render={(props) => (
@@ -2968,9 +3151,7 @@ export default function DataGrid({
                           <Checkbox
                             checked={visible}
                             disabled={visible && visibleCount <= 1}
-                            onCheckedChange={(checked) =>
-                              toggleColumn(col, checked === true)
-                            }
+                            onCheckedChange={makeToggleColumn(col)}
                           />
                           <span className="text-sm">{col}</span>
                         </label>
@@ -2991,7 +3172,7 @@ export default function DataGrid({
                 size="sm"
                 variant={viewMode === "schema" ? "secondary" : "ghost"}
                 className="h-7 px-2"
-                onClick={() => setViewMode("schema")}
+                onClick={handleShowSchema}
               >
                 <LayoutTemplate className="w-4 h-4 mr-1.5" /> Schema
               </Button>
@@ -3000,7 +3181,7 @@ export default function DataGrid({
               size="sm"
               variant={viewMode === "table" ? "secondary" : "ghost"}
               className="h-7 px-2"
-              onClick={() => setViewMode("table")}
+              onClick={handleShowTable}
             >
               <Table2 className="w-4 h-4 mr-1.5" /> Data
             </Button>
@@ -3009,7 +3190,7 @@ export default function DataGrid({
                 size="sm"
                 variant={viewMode === "json" ? "secondary" : "ghost"}
                 className="h-7 px-2"
-                onClick={() => setViewMode("json")}
+                onClick={handleShowJson}
               >
                 <ListTree className="w-4 h-4 mr-1.5" /> JSON Tree
               </Button>
@@ -3019,7 +3200,7 @@ export default function DataGrid({
                 size="sm"
                 variant={viewMode === "diagram" ? "secondary" : "ghost"}
                 className="h-7 px-2"
-                onClick={() => setViewMode("diagram")}
+                onClick={handleShowDiagram}
               >
                 <Waypoints className="w-4 h-4 mr-1.5" /> Diagram
               </Button>
@@ -3032,7 +3213,7 @@ export default function DataGrid({
                 size="sm"
                 variant="ghost"
                 className="h-7 px-2"
-                onClick={() => onOpenRealtime(connectionId)}
+                onClick={handleOpenRealtime}
                 title="Open realtime subscription in a new tab"
               >
                 <Radio className="w-4 h-4 mr-1.5" /> Realtime
@@ -3070,7 +3251,7 @@ export default function DataGrid({
                 variant="default"
                 className="bg-green-600 hover:bg-green-700 text-white"
                 disabled={isCommitting}
-                onClick={() => commitWithFlush()}
+                onClick={handleCommitClick}
                 title="Commit pending changes (⌘S)"
               >
                 <Check className="w-4 h-4 mr-2" />
@@ -3081,7 +3262,7 @@ export default function DataGrid({
                 variant="ghost"
                 className="text-destructive hover:text-destructive"
                 disabled={isCommitting}
-                onClick={() => setConfirmDiscardOpen(true)}
+                onClick={handleOpenDiscardConfirm}
               >
                 <X className="w-4 h-4 mr-2" />
                 Discard
@@ -3099,7 +3280,7 @@ export default function DataGrid({
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => onImportSql(connectionId)}
+                  onClick={handleImportSql}
                   title="Import SQL, CSV, or JSON into this connection"
                 >
                   <Upload className="w-4 h-4 mr-2" />
@@ -3110,7 +3291,7 @@ export default function DataGrid({
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setIsExportModalOpen(true)}
+                  onClick={handleOpenExport}
                 >
                   <Download className="w-4 h-4 mr-2" />
                   Export
@@ -3121,9 +3302,7 @@ export default function DataGrid({
           <Button
             variant="ghost"
             size="sm"
-            onClick={() =>
-              window.dispatchEvent(new CustomEvent("tablerelay:toggle-chat"))
-            }
+            onClick={handleToggleChat}
             title="Ask AI"
           >
             <Sparkles className="w-4 h-4 mr-2 text-primary" />
@@ -3190,7 +3369,7 @@ export default function DataGrid({
                 {displayCols.map((col) => (
                   <th
                     key={col}
-                    onClick={() => cycleSort(col)}
+                    onClick={makeCycleSort(col)}
                     aria-sort={
                       sortBy?.column === col
                         ? sortBy.direction === "asc"
@@ -3275,7 +3454,7 @@ export default function DataGrid({
                       // cursor signal it's editable.
                       <td
                         key={col}
-                        onClick={() => beginInsertAt(col)}
+                        onClick={makeBeginInsertAt(col)}
                         className="border-b border-r border-border/40 px-4 cursor-text hover:bg-accent/30"
                         title="Click to add a new row"
                       />
@@ -3315,17 +3494,7 @@ export default function DataGrid({
                       size="sm"
                       className="h-7"
                       disabled={jsonSaving}
-                      onClick={() => {
-                        // Reset by re-applying the source text. Monaco's
-                        // `value` prop is controlled-ish — pushing the same
-                        // string back through state isn't enough (React
-                        // skips it), so we write directly into the editor
-                        // model.
-                        const editor = jsonEditorRef.current;
-                        if (editor) editor.setValue(jsonRowsText);
-                        setJsonDirty(false);
-                        setJsonError(null);
-                      }}
+                      onClick={handleJsonDiscard}
                       title="Discard edits and revert to server state"
                     >
                       <Undo2 className="w-3.5 h-3.5 mr-1.5" /> Discard
@@ -3334,9 +3503,7 @@ export default function DataGrid({
                       variant="default"
                       size="sm"
                       className="h-7"
-                      onClick={() => {
-                        void handleSaveJsonEdits();
-                      }}
+                      onClick={handleJsonSaveClick}
                       disabled={jsonSaving || !!jsonError}
                       title={
                         jsonError
@@ -3367,7 +3534,7 @@ export default function DataGrid({
                 <button
                   type="button"
                   className="shrink-0 text-red-600/70 dark:text-red-400/70 hover:text-red-600 dark:hover:text-red-400 -mr-1 p-0.5"
-                  onClick={() => setJsonError(null)}
+                  onClick={handleDismissJsonError}
                   title="Dismiss"
                   aria-label="Dismiss error"
                 >
@@ -3380,35 +3547,8 @@ export default function DataGrid({
                 value={jsonRowsText}
                 language="json"
                 theme={editorTheme}
-                onMount={(editor, monaco) => {
-                  jsonEditorRef.current = editor;
-                  collapseJsonSubtrees(editor);
-                  // Cmd/Ctrl+S → Save. Bound on the editor instance so it
-                  // only fires when the JSON editor has focus; doesn't
-                  // intercept the browser save shortcut elsewhere in the
-                  // app. The handler dispatches through `jsonSaveRef` to
-                  // see live state on every keystroke.
-                  editor.addCommand(
-                    monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS,
-                    () => {
-                      jsonSaveRef.current();
-                    },
-                  );
-                }}
-                onChange={(next) => {
-                  const dirty = (next ?? "") !== jsonRowsText;
-                  setJsonDirty(dirty);
-                  if (!dirty) {
-                    setJsonError(null);
-                    return;
-                  }
-                  try {
-                    JSON.parse(next ?? "");
-                    setJsonError(null);
-                  } catch (e) {
-                    setJsonError(e instanceof Error ? e.message : String(e));
-                  }
-                }}
+                onMount={handleEditorMount}
+                onChange={handleJsonEditorChange}
                 options={{
                   readOnly: jsonSaving,
                   minimap: { enabled: false },
@@ -3435,12 +3575,7 @@ export default function DataGrid({
               variant="secondary"
               size="icon"
               className="absolute bottom-3 right-3 z-10 h-8 w-8 rounded-full shadow-sm"
-              onClick={() => {
-                void copyText(
-                  jsonEditorRef.current?.getValue() ?? jsonRowsText,
-                  "JSON copied",
-                );
-              }}
+              onClick={handleCopyJson}
               title="Copy JSON"
               aria-label="Copy JSON"
             >
@@ -3536,7 +3671,7 @@ export default function DataGrid({
                     size="icon"
                     className="h-6 w-6"
                     disabled={!canPrev || loading || isRefreshing}
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
+                    onClick={handlePrevPage}
                     title="Previous page"
                   >
                     <ChevronLeft className="w-3 h-3" />
@@ -3551,7 +3686,7 @@ export default function DataGrid({
                     size="icon"
                     className="h-6 w-6"
                     disabled={!canNext || loading || isRefreshing}
-                    onClick={() => setPage((p) => p + 1)}
+                    onClick={handleNextPage}
                     title="Next page"
                   >
                     <ChevronRight className="w-3 h-3" />
@@ -3565,7 +3700,7 @@ export default function DataGrid({
 
       <ExportModal
         isOpen={isExportModalOpen}
-        onClose={() => setIsExportModalOpen(false)}
+        onClose={handleExportModalClose}
         schemas={exportSchemas}
         initialSchema={schema}
         initialTable={tableName}
@@ -3586,16 +3721,13 @@ export default function DataGrid({
           <DialogFooter>
             <Button
               variant="ghost"
-              onClick={() => setConfirmDiscardOpen(false)}
+              onClick={handleKeepEditingDiscard}
             >
               Keep editing
             </Button>
             <Button
               variant="destructive"
-              onClick={() => {
-                discardAll();
-                setConfirmDiscardOpen(false);
-              }}
+              onClick={handleConfirmDiscard}
             >
               Discard changes
             </Button>
@@ -3616,16 +3748,13 @@ export default function DataGrid({
           <DialogFooter>
             <Button
               variant="ghost"
-              onClick={() => setConfirmRefreshOpen(false)}
+              onClick={handleKeepEditingRefresh}
             >
               Keep editing
             </Button>
             <Button
               variant="destructive"
-              onClick={() => {
-                setConfirmRefreshOpen(false);
-                runRefresh();
-              }}
+              onClick={handleConfirmRefresh}
             >
               Discard and reload
             </Button>
@@ -3642,15 +3771,8 @@ export default function DataGrid({
         onBeginEdit={beginEdit}
         onUndoRowDelete={undoRowDelete}
         onDiscardInsert={discardInsert}
-        onSetNull={(rowId, col) => handleCellEdit(rowId, col, "NULL")}
-        onDuplicateRow={(rowId) => {
-          // If the right-clicked row is part of a multi-selection, duplicate
-          // the whole selection; otherwise just that row.
-          const ids = selectedRows.has(rowId)
-            ? Array.from(selectedRows)
-            : [rowId];
-          duplicateRows(ids);
-        }}
+        onSetNull={handleSetNull}
+        onDuplicateRow={handleDuplicateRow}
       />
     </div>
   );

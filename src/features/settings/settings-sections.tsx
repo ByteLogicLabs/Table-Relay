@@ -19,6 +19,8 @@ export function AppearanceSettings({ theme, onSelectTheme, settings }: {
   onSelectTheme: (t: AppTheme) => void;
   settings: AppSettings;
 }) {
+  const handleRailModeChange = useCallback((v: string) => saveSettings({ connectionRailMode: v as RailMode }), []);
+  const makeHandleSelectTheme = useCallback((id: AppTheme) => () => onSelectTheme(id), [onSelectTheme]);
   return (
     <div className="space-y-5">
       <div>
@@ -27,7 +29,7 @@ export function AppearanceSettings({ theme, onSelectTheme, settings }: {
         <Row title="Connection sidebar" desc="Auto expands on hover; pin it open or icons-only.">
           <Select
             value={settings.connectionRailMode}
-            onValueChange={(v) => saveSettings({ connectionRailMode: v as RailMode })}
+            onValueChange={handleRailModeChange}
           >
             <SelectTrigger className="h-8 text-xs w-32"><SelectValue /></SelectTrigger>
             <SelectContent>
@@ -46,7 +48,7 @@ export function AppearanceSettings({ theme, onSelectTheme, settings }: {
           {THEMES.map(t => (
             <button
               key={t.id}
-              onClick={() => onSelectTheme(t.id)}
+              onClick={makeHandleSelectTheme(t.id)}
               className={`group relative rounded-xl overflow-hidden border-2 transition-all text-left
                 ${theme === t.id ? 'border-primary shadow-md' : 'border-border hover:border-border/80'}`}
             >
@@ -80,6 +82,11 @@ export function AppearanceSettings({ theme, onSelectTheme, settings }: {
 // ── Editor ──────────────────────────────────────────────────────────────────────
 
 export function EditorSettings({ settings }: { settings: AppSettings }) {
+  const handleFontSizeChange = useCallback((v: string) => saveSettings({ editorFontSize: Number(v) }), []);
+  const handleTabSizeChange = useCallback((v: string) => saveSettings({ editorTabSize: Number(v) }), []);
+  const handleWordWrapChange = useCallback((v: boolean) => saveSettings({ editorWordWrap: v }), []);
+  const handleMinimapChange = useCallback((v: boolean) => saveSettings({ editorMinimap: v }), []);
+  const handleAutocompleteChange = useCallback((v: boolean) => saveSettings({ editorAutocomplete: v }), []);
   return (
     <div className="space-y-1">
       <div className="mb-2">
@@ -90,7 +97,7 @@ export function EditorSettings({ settings }: { settings: AppSettings }) {
       <Row title="Font size" desc="Editor font size in pixels.">
         <Select
           value={String(settings.editorFontSize)}
-          onValueChange={(v) => saveSettings({ editorFontSize: Number(v) })}
+          onValueChange={handleFontSizeChange}
         >
           <SelectTrigger className="h-8 text-xs w-20"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -104,7 +111,7 @@ export function EditorSettings({ settings }: { settings: AppSettings }) {
       <Row title="Tab size" desc="Spaces per indent level.">
         <Select
           value={String(settings.editorTabSize)}
-          onValueChange={(v) => saveSettings({ editorTabSize: Number(v) })}
+          onValueChange={handleTabSizeChange}
         >
           <SelectTrigger className="h-8 text-xs w-20"><SelectValue /></SelectTrigger>
           <SelectContent>
@@ -116,15 +123,15 @@ export function EditorSettings({ settings }: { settings: AppSettings }) {
       </Row>
 
       <Row title="Word wrap" desc="Wrap long lines instead of scrolling horizontally.">
-        <Toggle checked={settings.editorWordWrap} onChange={(v) => saveSettings({ editorWordWrap: v })} />
+        <Toggle checked={settings.editorWordWrap} onChange={handleWordWrapChange} />
       </Row>
 
       <Row title="Minimap" desc="Show the code minimap on the right edge.">
-        <Toggle checked={settings.editorMinimap} onChange={(v) => saveSettings({ editorMinimap: v })} />
+        <Toggle checked={settings.editorMinimap} onChange={handleMinimapChange} />
       </Row>
 
       <Row title="Autocomplete" desc="Schema-aware suggestions while typing.">
-        <Toggle checked={settings.editorAutocomplete} onChange={(v) => saveSettings({ editorAutocomplete: v })} />
+        <Toggle checked={settings.editorAutocomplete} onChange={handleAutocompleteChange} />
       </Row>
     </div>
   );
@@ -223,7 +230,7 @@ export function LogsSettings() {
 
   useEffect(() => { void refresh(); }, [refresh]);
 
-  const toggle = async (on: boolean) => {
+  const toggle = useCallback(async (on: boolean) => {
     try {
       await invoke('logging_set_enabled', { enabled: on });
       setEnabled(on);
@@ -231,7 +238,8 @@ export function LogsSettings() {
     } catch (e) {
       toast.error(`Failed to update logging: ${String(e)}`);
     }
-  };
+  }, []);
+  const handleToggleEnabled = useCallback((v: boolean) => void toggle(v), [toggle]);
 
   const current = logs.find((l) => l.name === active);
 
@@ -258,12 +266,18 @@ export function LogsSettings() {
   // Copy/export honor the search so the user can grab just the matching lines.
   const exportText = () => filtered.map((p) => p.raw).join('\n');
 
+  const handleQueryChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setQuery(e.target.value), []);
+  const handleClearQuery = useCallback(() => setQuery(''), []);
+  const handleRefresh = useCallback(() => void refresh(), [refresh]);
+  const makeHandleSetActive = useCallback((name: 'app' | 'chat') => () => setActive(name), []);
+
   const handleCopy = async () => {
     const text = exportText();
     if (!text) { toast(isFiltered ? 'No lines match the search' : 'Log is empty'); return; }
     await copyText(text);
     toast.success(isFiltered ? `Copied ${filtered.length} matching lines` : 'Log copied to clipboard');
   };
+  const handleCopyClick = () => void handleCopy();
 
   const handleExport = async () => {
     const text = exportText();
@@ -280,6 +294,7 @@ export function LogsSettings() {
       toast.error(`Save failed: ${String(e)}`);
     }
   };
+  const handleExportClick = () => void handleExport();
 
   const handleClear = async () => {
     try {
@@ -290,6 +305,7 @@ export function LogsSettings() {
       toast.error(`Clear failed: ${String(e)}`);
     }
   };
+  const handleClearClick = () => void handleClear();
 
   const handleOpenDir = async () => {
     try {
@@ -298,6 +314,7 @@ export function LogsSettings() {
       toast.error(`Could not open logs folder: ${String(e)}`);
     }
   };
+  const handleOpenDirClick = () => void handleOpenDir();
 
   return (
     <div className="space-y-4">
@@ -305,7 +322,7 @@ export function LogsSettings() {
         title="Enable file logging"
         desc="Write diagnostic logs to disk to help debug issues. Off by default. Each log is capped at 5 MB (oldest lines are dropped)."
       >
-        <Toggle checked={enabled} onChange={(v) => void toggle(v)} />
+        <Toggle checked={enabled} onChange={handleToggleEnabled} />
       </Row>
 
       {/* Viewer card: tabs + header (search + actions) above a framed surface. */}
@@ -319,7 +336,7 @@ export function LogsSettings() {
               return (
                 <button
                   key={name}
-                  onClick={() => setActive(name)}
+                  onClick={makeHandleSetActive(name)}
                   className={`flex items-center gap-1.5 px-2.5 py-1 rounded-[5px] transition-colors ${
                     isActive
                       ? 'bg-background text-foreground shadow-sm font-medium'
@@ -342,14 +359,14 @@ export function LogsSettings() {
             <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground/60 pointer-events-none" />
             <input
               value={query}
-              onChange={(e) => setQuery(e.target.value)}
+              onChange={handleQueryChange}
               placeholder="Search log…"
               className="w-full h-7 pl-7 pr-7 rounded-md bg-background border border-border text-xs outline-none focus:border-primary/50 select-text"
             />
             {query ? (
               <button
                 type="button"
-                onClick={() => setQuery('')}
+                onClick={handleClearQuery}
                 title="Clear search"
                 className="absolute right-1.5 top-1/2 -translate-y-1/2 text-muted-foreground/60 hover:text-foreground"
               >
@@ -359,20 +376,20 @@ export function LogsSettings() {
           </div>
 
           <div className="flex items-center gap-0.5 shrink-0">
-            <IconAction title="Refresh" onClick={() => void refresh()} disabled={loading}>
+            <IconAction title="Refresh" onClick={handleRefresh} disabled={loading}>
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
             </IconAction>
-            <IconAction title="Copy to clipboard" onClick={() => void handleCopy()}>
+            <IconAction title="Copy to clipboard" onClick={handleCopyClick}>
               <Copy className="w-3.5 h-3.5" />
             </IconAction>
-            <IconAction title="Export to file" onClick={() => void handleExport()}>
+            <IconAction title="Export to file" onClick={handleExportClick}>
               <Download className="w-3.5 h-3.5" />
             </IconAction>
-            <IconAction title="Open logs folder" onClick={() => void handleOpenDir()}>
+            <IconAction title="Open logs folder" onClick={handleOpenDirClick}>
               <FolderOpen className="w-3.5 h-3.5" />
             </IconAction>
             <div className="w-px h-4 bg-border mx-0.5" />
-            <IconAction title="Clear log" onClick={() => void handleClear()} destructive>
+            <IconAction title="Clear log" onClick={handleClearClick} destructive>
               <Trash2 className="w-3.5 h-3.5" />
             </IconAction>
           </div>

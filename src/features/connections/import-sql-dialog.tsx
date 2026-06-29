@@ -424,6 +424,29 @@ export default function ImportSqlDialog({
     }
   };
 
+  const handleDialogOpenChange = useCallback(
+    (o: boolean) => {
+      if (!o) onClose();
+    },
+    [onClose],
+  );
+
+  const makeHandleFormatSelect = useCallback(
+    (value: ImportFormat) => () => setFormat(value),
+    [],
+  );
+
+  const handleProgressCancel = useCallback(() => {
+    cancelRef.current = true;
+  }, []);
+
+  const handleProgressClose = useCallback(() => {
+    if (progress?.phase === 'running') return;
+    setProgress(null);
+    // Close the whole import flow once the run settled successfully.
+    if (progress?.phase === 'done') onClose();
+  }, [progress, onClose]);
+
   const actionLabel =
     format === 'sql'
       ? mode === 'execute'
@@ -433,7 +456,7 @@ export default function ImportSqlDialog({
 
   return (
     <>
-    <Dialog open={isOpen && !progress} onOpenChange={(o) => !o && onClose()}>
+    <Dialog open={isOpen && !progress} onOpenChange={handleDialogOpenChange}>
       <DialogContent className="sm:max-w-2xl w-[92vw] max-h-[85vh] overflow-hidden flex flex-col gap-0 p-0">
         <DialogHeader className="px-5 pt-5 pb-4 border-b border-border/60">
           <DialogTitle className="flex items-center gap-2">
@@ -459,7 +482,7 @@ export default function ImportSqlDialog({
                   <button
                     key={f.value}
                     type="button"
-                    onClick={() => setFormat(f.value)}
+                    onClick={makeHandleFormatSelect(f.value)}
                     disabled={executing}
                     className={`flex flex-col items-center gap-1 rounded-lg border px-2 py-2.5 text-xs font-medium transition-colors ${
                       active
@@ -702,15 +725,8 @@ export default function ImportSqlDialog({
       // SQL runs as a single server-side call — there's nothing to interrupt, so
       // don't show a Cancel that would do nothing. Row imports cancel cleanly.
       cancellable={isRowImport}
-      onCancel={() => {
-        cancelRef.current = true;
-      }}
-      onClose={() => {
-        if (progress?.phase === 'running') return;
-        setProgress(null);
-        // Close the whole import flow once the run settled successfully.
-        if (progress?.phase === 'done') onClose();
-      }}
+      onCancel={handleProgressCancel}
+      onClose={handleProgressClose}
     />
     </>
   );
@@ -741,11 +757,12 @@ function ModeOption({
   disabled?: boolean;
 }) {
   const selected = current === value;
+  const handleClick = useCallback(() => onChange(value), [onChange, value]);
   return (
     <button
       type="button"
       disabled={disabled}
-      onClick={() => onChange(value)}
+      onClick={handleClick}
       className={`text-left rounded-md border px-3 py-2 transition-colors ${
         selected
           ? 'border-primary bg-primary/5'

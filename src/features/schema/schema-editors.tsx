@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Loader2, Trash2, Link2, Link2Off } from 'lucide-react';
 import { Button } from '../../components/ui/button';
@@ -21,18 +21,21 @@ export function CellInput({
   const [local, setLocal] = useState(value);
   const ref = useRef<HTMLInputElement | null>(null);
   useEffect(() => { setLocal(value); }, [value]);
+  const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setLocal(e.target.value), []);
+  const handleBlur = useCallback(() => { if (local !== value) onCommit(local); }, [local, value, onCommit]);
+  const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); }
+    if (e.key === 'Escape') { setLocal(value); (e.target as HTMLInputElement).blur(); }
+  }, [value]);
   return (
     <input
       ref={ref}
       value={local}
       disabled={disabled}
       placeholder={placeholder}
-      onChange={e => setLocal(e.target.value)}
-      onBlur={() => { if (local !== value) onCommit(local); }}
-      onKeyDown={e => {
-        if (e.key === 'Enter') { (e.target as HTMLInputElement).blur(); }
-        if (e.key === 'Escape') { setLocal(value); (e.target as HTMLInputElement).blur(); }
-      }}
+      onChange={handleChange}
+      onBlur={handleBlur}
+      onKeyDown={handleKeyDown}
       className="w-full px-2.5 py-1.5 bg-transparent text-sm font-[inherit] outline-none focus:bg-muted/40 disabled:opacity-50"
     />
   );
@@ -137,12 +140,12 @@ export function CellCombobox({
     return options.filter(o => o.toLowerCase().includes(q));
   }, [options, local, typing]);
 
-  const commit = (v: string) => {
+  const commit = useCallback((v: string) => {
     setLocal(v);
     setTyping(false);
     if (v !== value) onCommit(v);
     setOpen(false);
-  };
+  }, [value, onCommit]);
 
   // Choose above vs. below based on which side has more room, so the
   // dropdown doesn't get clipped by the grid's overflow container.
@@ -152,6 +155,26 @@ export function CellCombobox({
   const openUp = anchorRect != null && spaceBelow < 180 && spaceAbove > spaceBelow;
   const maxH = Math.max(120, Math.min(288, openUp ? spaceAbove - 8 : spaceBelow - 8));
 
+  const handleInputChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    setLocal(e.target.value); setTyping(true); if (!open) setOpen(true);
+  }, [open]);
+  const handleInputFocus = useCallback(() => { setOpen(true); setTyping(false); }, []);
+  const handleInputBlur = useCallback(() => { if (local !== value && !open) onCommit(local); }, [local, value, open, onCommit]);
+  const handleInputKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') { commit(local); (e.target as HTMLInputElement).blur(); }
+    if (e.key === 'Escape') { setLocal(value); setOpen(false); setTyping(false); (e.target as HTMLInputElement).blur(); }
+    if (e.key === 'ArrowDown' && !open) { setOpen(true); }
+  }, [commit, local, value, open]);
+  const handleCaretMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault(); setTyping(false); setOpen(o => !o); ref.current?.focus();
+  }, []);
+  const makeHandleOptionMouseDown = useCallback((o: string) => (e: React.MouseEvent) => {
+    e.preventDefault(); commit(o);
+  }, [commit]);
+  const handleManualMouseDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault(); setOpen(false); ref.current?.focus();
+  }, []);
+
   return (
     <div ref={wrapRef} className={`relative w-full ${className ?? ''}`}>
       <input
@@ -159,21 +182,17 @@ export function CellCombobox({
         value={local}
         disabled={disabled}
         placeholder={placeholder}
-        onChange={e => { setLocal(e.target.value); setTyping(true); if (!open) setOpen(true); }}
-        onFocus={() => { setOpen(true); setTyping(false); }}
-        onBlur={() => { if (local !== value && !open) onCommit(local); }}
-        onKeyDown={e => {
-          if (e.key === 'Enter') { commit(local); (e.target as HTMLInputElement).blur(); }
-          if (e.key === 'Escape') { setLocal(value); setOpen(false); setTyping(false); (e.target as HTMLInputElement).blur(); }
-          if (e.key === 'ArrowDown' && !open) { setOpen(true); }
-        }}
+        onChange={handleInputChange}
+        onFocus={handleInputFocus}
+        onBlur={handleInputBlur}
+        onKeyDown={handleInputKeyDown}
         className="w-full px-2.5 py-1.5 pr-5 bg-transparent text-sm font-[inherit] outline-none focus:bg-muted/40 disabled:opacity-50"
       />
       <button
         type="button"
         tabIndex={-1}
         disabled={disabled}
-        onMouseDown={(e) => { e.preventDefault(); setTyping(false); setOpen(o => !o); ref.current?.focus(); }}
+        onMouseDown={handleCaretMouseDown}
         className="absolute right-1 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
       >
         <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor"><path d="M2 4l3 3 3-3z" /></svg>
@@ -195,7 +214,7 @@ export function CellCombobox({
             <button
               key={o}
               type="button"
-              onMouseDown={(e) => { e.preventDefault(); commit(o); }}
+              onMouseDown={makeHandleOptionMouseDown(o)}
               className={`w-full text-left px-3 py-1.5 text-sm hover:bg-accent hover:text-accent-foreground ${
                 o === value ? 'bg-accent/50' : ''
               }`}
@@ -206,7 +225,7 @@ export function CellCombobox({
           <div className="border-t border-border/60 mt-1 pt-1">
             <button
               type="button"
-              onMouseDown={(e) => { e.preventDefault(); setOpen(false); ref.current?.focus(); }}
+              onMouseDown={handleManualMouseDown}
               className="w-full text-left px-3 py-1.5 text-sm text-muted-foreground italic hover:bg-accent hover:text-accent-foreground"
             >
               Manual input…
@@ -288,13 +307,33 @@ export function FkCell({
 
   const hasFk = !!fk;
 
+  const handleOpenChange = useCallback((next: boolean) => {
+    if (disabled && next) return;
+    setOpen(next);
+  }, [disabled]);
+  const handleNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setName(e.target.value), []);
+  const handleRefTableChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setRefTable(e.target.value), []);
+  const handleRefColumnChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setRefColumn(e.target.value), []);
+  const handleOnUpdateChange = useCallback((v: string) => setOnUpdate(v as FkAction), []);
+  const handleOnDeleteChange = useCallback((v: string) => setOnDelete(v as FkAction), []);
+  const handleRemove = useCallback(() => { onRemove(); setOpen(false); }, [onRemove]);
+  const handleCancel = useCallback(() => setOpen(false), []);
+  const handleApply = useCallback(() => {
+    onApply({
+      columns: [col],
+      refTable: refTable.trim(),
+      refColumns: refColumn.trim(),
+      onUpdate,
+      onDelete,
+      name: name.trim() || undefined,
+    });
+    setOpen(false);
+  }, [onApply, col, refTable, refColumn, onUpdate, onDelete, name]);
+
   return (
     <Popover
       open={open}
-      onOpenChange={(next) => {
-        if (disabled && next) return;
-        setOpen(next);
-      }}
+      onOpenChange={handleOpenChange}
     >
       <PopoverTrigger
         render={(props) => (
@@ -326,7 +365,7 @@ export function FkCell({
         <FkField label="Constraint name">
           <Input
             value={name}
-            onChange={e => setName(e.target.value)}
+            onChange={handleNameChange}
             placeholder={`fk_${tableName}_${col || 'col'}`}
             disabled={disabled}
           />
@@ -358,7 +397,7 @@ export function FkCell({
               </SelectContent>
             </Select>
           ) : (
-            <Input value={refTable} onChange={e => setRefTable(e.target.value)} placeholder="referenced_table" disabled={disabled} />
+            <Input value={refTable} onChange={handleRefTableChange} placeholder="referenced_table" disabled={disabled} />
           )}
         </FkField>
 
@@ -381,7 +420,7 @@ export function FkCell({
             ) : (
               <Input
                 value={refColumn}
-                onChange={e => setRefColumn(e.target.value)}
+                onChange={handleRefColumnChange}
                 placeholder="id"
                 disabled={disabled}
               />
@@ -393,7 +432,7 @@ export function FkCell({
 
         <div className="grid grid-cols-2 gap-2">
           <FkField label="On Update">
-            <Select value={onUpdate} onValueChange={v => setOnUpdate(v as FkAction)} disabled={disabled}>
+            <Select value={onUpdate} onValueChange={handleOnUpdateChange} disabled={disabled}>
               <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {FK_ACTIONS.map(a => <SelectItem key={a} value={a}>{a}</SelectItem>)}
@@ -401,7 +440,7 @@ export function FkCell({
             </Select>
           </FkField>
           <FkField label="On Delete">
-            <Select value={onDelete} onValueChange={v => setOnDelete(v as FkAction)} disabled={disabled}>
+            <Select value={onDelete} onValueChange={handleOnDeleteChange} disabled={disabled}>
               <SelectTrigger size="sm" className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent>
                 {FK_ACTIONS.map(a => <SelectItem key={a} value={a}>{a}</SelectItem>)}
@@ -416,29 +455,19 @@ export function FkCell({
               variant="destructive"
               size="sm"
               disabled={disabled}
-              onClick={() => { onRemove(); setOpen(false); }}
+              onClick={handleRemove}
             >
               <Trash2 className="w-3.5 h-3.5 mr-1" />
               Delete
             </Button>
           ) : <span />}
           <div className="flex gap-2">
-            <Button variant="ghost" size="sm" onClick={() => setOpen(false)} disabled={disabled}>Cancel</Button>
+            <Button variant="ghost" size="sm" onClick={handleCancel} disabled={disabled}>Cancel</Button>
             <Button
               variant="default"
               size="sm"
               disabled={disabled || !col || !refTable.trim() || !refColumn.trim()}
-              onClick={() => {
-                onApply({
-                  columns: [col],
-                  refTable: refTable.trim(),
-                  refColumns: refColumn.trim(),
-                  onUpdate,
-                  onDelete,
-                  name: name.trim() || undefined,
-                });
-                setOpen(false);
-              }}
+              onClick={handleApply}
             >
               OK
             </Button>

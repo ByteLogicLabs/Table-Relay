@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { toast } from 'sonner';
 import ExportModal, { type ExportConfig } from '../data-grid/export-modal';
@@ -124,6 +124,23 @@ export default function ConnectionExportDialog({
 
   const progressRunning = progress?.phase === 'running';
 
+  const handleProgressCancel = useCallback(() => {
+    cancelRef.current = true;
+    // Immediate feedback — the loop stops at the next row/page boundary,
+    // which can lag a moment behind a slow in-flight query.
+    setProgress((p) =>
+      p && p.phase === 'running'
+        ? { ...p, step: 'Cancelling… (finishing current page)' }
+        : p,
+    );
+  }, []);
+
+  const handleProgressClose = useCallback(() => {
+    if (progressRunning) return;
+    setProgress(null);
+    onClose();
+  }, [progressRunning, onClose]);
+
   return (
     <>
       <ExportModal
@@ -140,21 +157,8 @@ export default function ConnectionExportDialog({
         open={progress !== null}
         title="Export Data"
         state={progress}
-        onCancel={() => {
-          cancelRef.current = true;
-          // Immediate feedback — the loop stops at the next row/page boundary,
-          // which can lag a moment behind a slow in-flight query.
-          setProgress((p) =>
-            p && p.phase === 'running'
-              ? { ...p, step: 'Cancelling… (finishing current page)' }
-              : p,
-          );
-        }}
-        onClose={() => {
-          if (progressRunning) return;
-          setProgress(null);
-          onClose();
-        }}
+        onCancel={handleProgressCancel}
+        onClose={handleProgressClose}
       />
     </>
   );

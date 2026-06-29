@@ -115,19 +115,30 @@ export default function TabsShell({
 
   // One viewport-width worth of tabs per click feels like too much; step by a
   // comfortable chunk instead. 240px is roughly 1.5 tabs wide.
-  const scrollTabs = (dir: 'left' | 'right') => {
+  const scrollTabs = useCallback((dir: 'left' | 'right') => {
     const el = tabScrollRef.current;
     if (!el) return;
     el.scrollBy({ left: dir === 'left' ? -240 : 240, behavior: 'smooth' });
-  };
+  }, []);
 
-  const handleCreateNewQuery = () => {
+  const handleScrollTabsLeft = useCallback(() => scrollTabs('left'), [scrollTabs]);
+  const handleScrollTabsRight = useCallback(() => scrollTabs('right'), [scrollTabs]);
+
+  const handleCreateNewQuery = useCallback(() => {
     if (connection) {
       onNewQuery(connection.id);
     } else if (activeConnections.length > 0) {
       onNewQuery(activeConnections[0].id);
     }
-  };
+  }, [connection, activeConnections, onNewQuery]);
+
+  const openChat = useCallback(() => {
+    window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'));
+  }, []);
+
+  const handleClearActiveQueryLog = useCallback(() => {
+    if (connection) onClearQueryLog(connection.id);
+  }, [connection, onClearQueryLog]);
 
   const navigateTab = useCallback((direction: 'previous' | 'next') => {
     if (!activeTabId || tabs.length === 0) return;
@@ -196,8 +207,6 @@ export default function TabsShell({
   }, [onCloseTab]);
   
   if (tabs.length === 0) {
-    const openChat = () =>
-      window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'));
     if (noDatabaseSelected) {
       return (
         <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground bg-background px-6 text-center gap-4">
@@ -246,7 +255,7 @@ export default function TabsShell({
           variant="ghost"
           size="icon"
           className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-          onClick={() => scrollTabs('left')}
+          onClick={handleScrollTabsLeft}
           title="Scroll tabs left"
           aria-label="Scroll tabs left"
         >
@@ -256,7 +265,7 @@ export default function TabsShell({
           variant="ghost"
           size="icon"
           className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
-          onClick={() => scrollTabs('right')}
+          onClick={handleScrollTabsRight}
           title="Scroll tabs right"
           aria-label="Scroll tabs right"
         >
@@ -277,86 +286,20 @@ export default function TabsShell({
           const hasRight = idx < tabs.length - 1;
           const hasOthers = tabs.length > 1;
           return (
-            <ContextMenu key={tab.id}>
-              <ContextMenuTrigger className="shrink-0">
-                <div
-                  ref={activeTabId === tab.id ? activeTabRef : null}
-                  className={`flex items-center gap-2 px-3 py-1.5 h-8 rounded-md text-sm cursor-pointer select-none min-w-30 max-w-50 shrink-0 group transition-colors ${
-                    activeTabId === tab.id
-                      ? 'bg-background shadow-sm border border-border/50 text-foreground'
-                      : 'text-muted-foreground hover:bg-muted/50'
-                  }`}
-                  onClick={() => onTabChange(tab.id)}
-                  onAuxClick={(e) => handleTabAuxClick(e, tab.id)}
-                  // Suppress the browser's "open in new tab" middle-click
-                  // behavior on links inside the tab content area too — but
-                  // mainly here to silence the default scroll-to-pan cursor.
-                  onMouseDown={(e) => { if (e.button === 1) e.preventDefault(); }}
-                >
-                  {tab.type === 'data' && <TableIcon className="w-3.5 h-3.5 shrink-0" />}
-                  {tab.type === 'structure' && <LayoutTemplate className="w-3.5 h-3.5 shrink-0" />}
-                  {tab.type === 'query' && <Terminal className="w-3.5 h-3.5 shrink-0" />}
-                  {tab.type === 'erd' && <Waypoints className="w-3.5 h-3.5 shrink-0" />}
-                  {tab.type === 'routine' && <FunctionSquare className="w-3.5 h-3.5 shrink-0" />}
-                  {tab.type === 'trigger' && <Zap className="w-3.5 h-3.5 shrink-0" />}
-                  {tab.type === 'realtime' && <Radio className="w-3.5 h-3.5 shrink-0" />}
-
-                  <span className="truncate flex-1">{tab.title}</span>
-
-                  {/* Close / unsaved-dot slot (VSCode-style). When the tab has
-                      unsaved edits we show a dot by default and reveal the X on
-                      hover; otherwise the X follows the usual show-on-active/
-                      hover rule. The dot sits in the SAME slot so the layout
-                      never shifts. */}
-                  <div
-                    className={`group/close relative w-4 h-4 rounded-sm flex items-center justify-center hover:bg-muted shrink-0 ${
-                      tab.dirty || activeTabId === tab.id
-                        ? 'opacity-100'
-                        : 'opacity-0 group-hover:opacity-100'
-                    }`}
-                    title={tab.dirty ? 'Unsaved changes — click to close' : 'Close'}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onCloseTab(tab.id);
-                    }}
-                  >
-                    {tab.dirty && (
-                      <span className="absolute inset-0 flex items-center justify-center group-hover/close:opacity-0 transition-opacity">
-                        <span className="w-2 h-2 rounded-full bg-sky-500 dark:bg-sky-400" />
-                      </span>
-                    )}
-                    <X
-                      className={`w-3 h-3 ${tab.dirty ? 'opacity-0 group-hover/close:opacity-100 transition-opacity' : ''}`}
-                    />
-                  </div>
-                </div>
-              </ContextMenuTrigger>
-              <ContextMenuContent className="w-52">
-                <ContextMenuItem onClick={() => onCloseTab(tab.id)}>Close Tab</ContextMenuItem>
-                <ContextMenuItem disabled={!hasOthers} onClick={() => onCloseTabs('others', tab.id)}>
-                  Close Other Tabs
-                </ContextMenuItem>
-                <ContextMenuItem disabled={!hasLeft} onClick={() => onCloseTabs('left', tab.id)}>
-                  Close Tabs to the Left
-                </ContextMenuItem>
-                <ContextMenuItem disabled={!hasRight} onClick={() => onCloseTabs('right', tab.id)}>
-                  Close Tabs to the Right
-                </ContextMenuItem>
-                <ContextMenuItem onClick={() => onCloseTabs('all', tab.id)}>
-                  Close All Tabs
-                </ContextMenuItem>
-                <ContextMenuSeparator />
-                <ContextMenuItem
-                  onClick={() => {
-                    void copyText(tab.title, 'Title copied');
-                  }}
-                >
-                  Copy Title
-                </ContextMenuItem>
-                <ContextMenuSeparator />
-                <ContextMenuItem onClick={handleCreateNewQuery}>New Query</ContextMenuItem>
-              </ContextMenuContent>
-            </ContextMenu>
+            <TabBarItem
+              key={tab.id}
+              tab={tab}
+              isActive={activeTabId === tab.id}
+              activeTabRef={activeTabRef}
+              hasLeft={hasLeft}
+              hasRight={hasRight}
+              hasOthers={hasOthers}
+              onTabChange={onTabChange}
+              onAuxClick={handleTabAuxClick}
+              onCloseTab={onCloseTab}
+              onCloseTabs={onCloseTabs}
+              onNewQuery={handleCreateNewQuery}
+            />
           );
         })}
         </div>
@@ -387,32 +330,17 @@ export default function TabsShell({
             if (!tabConnection) return null;
             const isActive = tab.id === activeTabId;
             return (
-              <div
+              <DataPane
                 key={tab.id}
-                className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}
-              >
-                <DataGrid
-                  tabId={tab.id}
-                  isActive={isActive}
-                  connectionId={tab.connectionId}
-                  schema={tab.schema ?? ''}
-                  tableName={tab.table!}
-                  connection={tabConnection}
-                  viewMode={tab.dataViewMode ?? 'table'}
-                  onViewModeChange={(mode) => onTabViewModeChange(tab.id, mode)}
-                  onImportSql={onImportSql}
-                  onOpenRealtime={onOpenRealtime}
-                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
-                  onLogQuery={(statement, opts) => onAppendQueryLog({
-                    connectionId: tabConnection.id,
-                    statement,
-                    source: opts?.source ?? 'grid',
-                    durationMs: opts?.durationMs,
-                    status: opts?.status ?? 'ok',
-                    message: opts?.message,
-                  })}
-                />
-              </div>
+                tab={tab}
+                tabConnection={tabConnection}
+                isActive={isActive}
+                onTabViewModeChange={onTabViewModeChange}
+                onImportSql={onImportSql}
+                onOpenRealtime={onOpenRealtime}
+                onTabDirtyChange={onTabDirtyChange}
+                onAppendQueryLog={onAppendQueryLog}
+              />
             );
           })}
           {/*
@@ -429,16 +357,14 @@ export default function TabsShell({
             if (!tabConnection) return null;
             const isActive = tab.id === activeTabId;
             return (
-              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
-                <SchemaView
-                  tableName={tab.table!}
-                  connection={tabConnection}
-                  schema={tab.schema}
-                  isNew={tab.isNew}
-                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
-                  onTableCreated={(savedName) => onTableCreated?.(tab.id, savedName)}
-                />
-              </div>
+              <StructurePane
+                key={tab.id}
+                tab={tab}
+                tabConnection={tabConnection}
+                isActive={isActive}
+                onTabDirtyChange={onTabDirtyChange}
+                onTableCreated={onTableCreated}
+              />
             );
           })}
           {tabs.filter(t => t.type === 'query').map(tab => {
@@ -450,24 +376,15 @@ export default function TabsShell({
               ?? tabConnection.database
               ?? undefined;
             return (
-              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
-                <SqlEditor
-                  tabId={tab.id}
-                  isActive={isActive}
-                  initialQuery={tab.query}
-                  connection={tabConnection}
-                  defaultSchema={tabSchema}
-                  onQueryChange={(q) => onTabQueryChange?.(tab.id, q)}
-                  onLogQuery={(statement, opts) => onAppendQueryLog({
-                    connectionId: tabConnection.id,
-                    statement,
-                    source: opts?.source ?? 'editor',
-                    durationMs: opts?.durationMs,
-                    status: opts?.status ?? 'ok',
-                    message: opts?.message,
-                  })}
-                />
-              </div>
+              <QueryPane
+                key={tab.id}
+                tab={tab}
+                tabConnection={tabConnection}
+                isActive={isActive}
+                tabSchema={tabSchema}
+                onTabQueryChange={onTabQueryChange}
+                onAppendQueryLog={onAppendQueryLog}
+              />
             );
           })}
           {activeTab?.type === 'erd' && connection && (
@@ -483,24 +400,14 @@ export default function TabsShell({
             if (!tabConnection || !tab.routine) return null;
             const isActive = tab.id === activeTabId;
             return (
-              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
-                <RoutineView
-                  connection={tabConnection}
-                  schema={tab.routine.schema}
-                  name={tab.routine.name}
-                  kind={tab.routine.kind}
-                  isNew={tab.isNew}
-                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
-                  onLogQuery={(statement, opts) => onAppendQueryLog({
-                    connectionId: tabConnection.id,
-                    statement,
-                    source: opts?.source ?? 'system',
-                    durationMs: opts?.durationMs,
-                    status: opts?.status ?? 'ok',
-                    message: opts?.message,
-                  })}
-                />
-              </div>
+              <RoutinePane
+                key={tab.id}
+                tab={tab}
+                tabConnection={tabConnection}
+                isActive={isActive}
+                onTabDirtyChange={onTabDirtyChange}
+                onAppendQueryLog={onAppendQueryLog}
+              />
             );
           })}
           {tabs.filter(t => t.type === 'trigger' && t.trigger).map(tab => {
@@ -508,26 +415,15 @@ export default function TabsShell({
             if (!tabConnection || !tab.trigger) return null;
             const isActive = tab.id === activeTabId;
             return (
-              <div key={tab.id} className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
-                <TriggerView
-                  connection={tabConnection}
-                  schema={tab.trigger.schema}
-                  name={tab.trigger.name}
-                  isNew={tab.trigger.isNew}
-                  initialSql={tab.trigger.initialSql}
-                  draft={tab.trigger.draft}
-                  onDraftChange={(d) => onTabTriggerDraftChange?.(tab.id, d)}
-                  onDirtyChange={(d) => onTabDirtyChange?.(tab.id, d)}
-                  onLogQuery={(statement, opts) => onAppendQueryLog({
-                    connectionId: tabConnection.id,
-                    statement,
-                    source: opts?.source ?? 'system',
-                    durationMs: opts?.durationMs,
-                    status: opts?.status ?? 'ok',
-                    message: opts?.message,
-                  })}
-                />
-              </div>
+              <TriggerPane
+                key={tab.id}
+                tab={tab}
+                tabConnection={tabConnection}
+                isActive={isActive}
+                onTabTriggerDraftChange={onTabTriggerDraftChange}
+                onTabDirtyChange={onTabDirtyChange}
+                onAppendQueryLog={onAppendQueryLog}
+              />
             );
           })}
           {/*
@@ -541,24 +437,14 @@ export default function TabsShell({
             if (!tabConnection) return null;
             const isActive = tab.id === activeTabId;
             return (
-              <div
+              <RealtimePane
                 key={tab.id}
-                className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}
-              >
-                <RealtimeView
-                  connection={tabConnection}
-                  initialPattern={tab.realtimePattern}
-                  onPatternChange={(p) => onTabRealtimePatternChange?.(tab.id, p)}
-                  onLogQuery={(statement, opts) => onAppendQueryLog({
-                    connectionId: tabConnection.id,
-                    statement,
-                    source: opts?.source ?? 'editor',
-                    durationMs: opts?.durationMs,
-                    status: opts?.status ?? 'ok',
-                    message: opts?.message,
-                  })}
-                />
-              </div>
+                tab={tab}
+                tabConnection={tabConnection}
+                isActive={isActive}
+                onTabRealtimePatternChange={onTabRealtimePatternChange}
+                onAppendQueryLog={onAppendQueryLog}
+              />
             );
           })}
           {/*
@@ -615,11 +501,429 @@ export default function TabsShell({
         {activeTab && connection && (activeTab.type === 'data' || activeTab.type === 'query' || activeTab.type === 'routine' || activeTab.type === 'trigger' || activeTab.type === 'realtime') && (
           <QueryLog
             entries={queryLogs[connection.id] ?? []}
-            onClear={() => onClearQueryLog(connection.id)}
+            onClear={handleClearActiveQueryLog}
           />
         )}
       </div>
     </div>
+  );
+}
+
+type AppendQueryLogFn = (
+  entry: Omit<QueryLogEntry, 'id' | 'timestamp'> & { id?: string; timestamp?: number },
+) => void;
+
+interface DataPaneProps {
+  tab: AppTab;
+  tabConnection: ConnectionProfile;
+  isActive: boolean;
+  onTabViewModeChange: (tabId: string, mode: DataViewMode) => void;
+  onImportSql: (connectionId: string) => void;
+  onOpenRealtime?: (connectionId: string) => void;
+  onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
+  onAppendQueryLog: AppendQueryLogFn;
+}
+
+function DataPane({
+  tab,
+  tabConnection,
+  isActive,
+  onTabViewModeChange,
+  onImportSql,
+  onOpenRealtime,
+  onTabDirtyChange,
+  onAppendQueryLog,
+}: DataPaneProps) {
+  const handleViewModeChange = useCallback(
+    (mode: DataViewMode) => onTabViewModeChange(tab.id, mode),
+    [onTabViewModeChange, tab.id],
+  );
+  const handleDirtyChange = useCallback(
+    (d: boolean) => onTabDirtyChange?.(tab.id, d),
+    [onTabDirtyChange, tab.id],
+  );
+  const handleLogQuery = useCallback(
+    (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
+      onAppendQueryLog({
+        connectionId: tabConnection.id,
+        statement,
+        source: opts?.source ?? 'grid',
+        durationMs: opts?.durationMs,
+        status: opts?.status ?? 'ok',
+        message: opts?.message,
+      }),
+    [onAppendQueryLog, tabConnection.id],
+  );
+  return (
+    <div className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+      <DataGrid
+        tabId={tab.id}
+        isActive={isActive}
+        connectionId={tab.connectionId}
+        schema={tab.schema ?? ''}
+        tableName={tab.table!}
+        connection={tabConnection}
+        viewMode={tab.dataViewMode ?? 'table'}
+        onViewModeChange={handleViewModeChange}
+        onImportSql={onImportSql}
+        onOpenRealtime={onOpenRealtime}
+        onDirtyChange={handleDirtyChange}
+        onLogQuery={handleLogQuery}
+      />
+    </div>
+  );
+}
+
+interface StructurePaneProps {
+  tab: AppTab;
+  tabConnection: ConnectionProfile;
+  isActive: boolean;
+  onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
+  onTableCreated?: (tabId: string, savedName: string) => void;
+}
+
+function StructurePane({
+  tab,
+  tabConnection,
+  isActive,
+  onTabDirtyChange,
+  onTableCreated,
+}: StructurePaneProps) {
+  const handleDirtyChange = useCallback(
+    (d: boolean) => onTabDirtyChange?.(tab.id, d),
+    [onTabDirtyChange, tab.id],
+  );
+  const handleTableCreated = useCallback(
+    (savedName: string) => onTableCreated?.(tab.id, savedName),
+    [onTableCreated, tab.id],
+  );
+  return (
+    <div className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+      <SchemaView
+        tableName={tab.table!}
+        connection={tabConnection}
+        schema={tab.schema}
+        isNew={tab.isNew}
+        onDirtyChange={handleDirtyChange}
+        onTableCreated={handleTableCreated}
+      />
+    </div>
+  );
+}
+
+interface QueryPaneProps {
+  tab: AppTab;
+  tabConnection: ConnectionProfile;
+  isActive: boolean;
+  tabSchema: string | undefined;
+  onTabQueryChange?: (tabId: string, query: string) => void;
+  onAppendQueryLog: AppendQueryLogFn;
+}
+
+function QueryPane({
+  tab,
+  tabConnection,
+  isActive,
+  tabSchema,
+  onTabQueryChange,
+  onAppendQueryLog,
+}: QueryPaneProps) {
+  const handleQueryChange = useCallback(
+    (q: string) => onTabQueryChange?.(tab.id, q),
+    [onTabQueryChange, tab.id],
+  );
+  const handleLogQuery = useCallback(
+    (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
+      onAppendQueryLog({
+        connectionId: tabConnection.id,
+        statement,
+        source: opts?.source ?? 'editor',
+        durationMs: opts?.durationMs,
+        status: opts?.status ?? 'ok',
+        message: opts?.message,
+      }),
+    [onAppendQueryLog, tabConnection.id],
+  );
+  return (
+    <div className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+      <SqlEditor
+        tabId={tab.id}
+        isActive={isActive}
+        initialQuery={tab.query}
+        connection={tabConnection}
+        defaultSchema={tabSchema}
+        onQueryChange={handleQueryChange}
+        onLogQuery={handleLogQuery}
+      />
+    </div>
+  );
+}
+
+interface RoutinePaneProps {
+  tab: AppTab;
+  tabConnection: ConnectionProfile;
+  isActive: boolean;
+  onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
+  onAppendQueryLog: AppendQueryLogFn;
+}
+
+function RoutinePane({
+  tab,
+  tabConnection,
+  isActive,
+  onTabDirtyChange,
+  onAppendQueryLog,
+}: RoutinePaneProps) {
+  const handleDirtyChange = useCallback(
+    (d: boolean) => onTabDirtyChange?.(tab.id, d),
+    [onTabDirtyChange, tab.id],
+  );
+  const handleLogQuery = useCallback(
+    (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
+      onAppendQueryLog({
+        connectionId: tabConnection.id,
+        statement,
+        source: opts?.source ?? 'system',
+        durationMs: opts?.durationMs,
+        status: opts?.status ?? 'ok',
+        message: opts?.message,
+      }),
+    [onAppendQueryLog, tabConnection.id],
+  );
+  return (
+    <div className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+      <RoutineView
+        connection={tabConnection}
+        schema={tab.routine!.schema}
+        name={tab.routine!.name}
+        kind={tab.routine!.kind}
+        isNew={tab.isNew}
+        onDirtyChange={handleDirtyChange}
+        onLogQuery={handleLogQuery}
+      />
+    </div>
+  );
+}
+
+interface TriggerPaneProps {
+  tab: AppTab;
+  tabConnection: ConnectionProfile;
+  isActive: boolean;
+  onTabTriggerDraftChange?: (tabId: string, draft: string) => void;
+  onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
+  onAppendQueryLog: AppendQueryLogFn;
+}
+
+function TriggerPane({
+  tab,
+  tabConnection,
+  isActive,
+  onTabTriggerDraftChange,
+  onTabDirtyChange,
+  onAppendQueryLog,
+}: TriggerPaneProps) {
+  const handleDraftChange = useCallback(
+    (d: string) => onTabTriggerDraftChange?.(tab.id, d),
+    [onTabTriggerDraftChange, tab.id],
+  );
+  const handleDirtyChange = useCallback(
+    (d: boolean) => onTabDirtyChange?.(tab.id, d),
+    [onTabDirtyChange, tab.id],
+  );
+  const handleLogQuery = useCallback(
+    (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
+      onAppendQueryLog({
+        connectionId: tabConnection.id,
+        statement,
+        source: opts?.source ?? 'system',
+        durationMs: opts?.durationMs,
+        status: opts?.status ?? 'ok',
+        message: opts?.message,
+      }),
+    [onAppendQueryLog, tabConnection.id],
+  );
+  return (
+    <div className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+      <TriggerView
+        connection={tabConnection}
+        schema={tab.trigger!.schema}
+        name={tab.trigger!.name}
+        isNew={tab.trigger!.isNew}
+        initialSql={tab.trigger!.initialSql}
+        draft={tab.trigger!.draft}
+        onDraftChange={handleDraftChange}
+        onDirtyChange={handleDirtyChange}
+        onLogQuery={handleLogQuery}
+      />
+    </div>
+  );
+}
+
+interface RealtimePaneProps {
+  tab: AppTab;
+  tabConnection: ConnectionProfile;
+  isActive: boolean;
+  onTabRealtimePatternChange?: (tabId: string, pattern: string) => void;
+  onAppendQueryLog: AppendQueryLogFn;
+}
+
+function RealtimePane({
+  tab,
+  tabConnection,
+  isActive,
+  onTabRealtimePatternChange,
+  onAppendQueryLog,
+}: RealtimePaneProps) {
+  const handlePatternChange = useCallback(
+    (p: string) => onTabRealtimePatternChange?.(tab.id, p),
+    [onTabRealtimePatternChange, tab.id],
+  );
+  const handleLogQuery = useCallback(
+    (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
+      onAppendQueryLog({
+        connectionId: tabConnection.id,
+        statement,
+        source: opts?.source ?? 'editor',
+        durationMs: opts?.durationMs,
+        status: opts?.status ?? 'ok',
+        message: opts?.message,
+      }),
+    [onAppendQueryLog, tabConnection.id],
+  );
+  return (
+    <div className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
+      <RealtimeView
+        connection={tabConnection}
+        initialPattern={tab.realtimePattern}
+        onPatternChange={handlePatternChange}
+        onLogQuery={handleLogQuery}
+      />
+    </div>
+  );
+}
+
+interface TabBarItemProps {
+  tab: AppTab;
+  isActive: boolean;
+  activeTabRef: React.RefObject<HTMLDivElement | null>;
+  hasLeft: boolean;
+  hasRight: boolean;
+  hasOthers: boolean;
+  onTabChange: (id: string) => void;
+  onAuxClick: (e: React.MouseEvent, tabId: string) => void;
+  onCloseTab: (id: string) => void;
+  onCloseTabs: (mode: 'all' | 'others' | 'left' | 'right', anchorId: string) => void;
+  onNewQuery: () => void;
+}
+
+function TabBarItem({
+  tab,
+  isActive,
+  activeTabRef,
+  hasLeft,
+  hasRight,
+  hasOthers,
+  onTabChange,
+  onAuxClick,
+  onCloseTab,
+  onCloseTabs,
+  onNewQuery,
+}: TabBarItemProps) {
+  const handleSelect = useCallback(() => onTabChange(tab.id), [onTabChange, tab.id]);
+  const handleAuxClick = useCallback((e: React.MouseEvent) => onAuxClick(e, tab.id), [onAuxClick, tab.id]);
+  // Suppress the browser's "open in new tab" middle-click
+  // behavior on links inside the tab content area too — but
+  // mainly here to silence the default scroll-to-pan cursor.
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    if (e.button === 1) e.preventDefault();
+  }, []);
+  const handleCloseClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onCloseTab(tab.id);
+  }, [onCloseTab, tab.id]);
+  const handleCloseTab = useCallback(() => onCloseTab(tab.id), [onCloseTab, tab.id]);
+  const handleCloseOthers = useCallback(() => onCloseTabs('others', tab.id), [onCloseTabs, tab.id]);
+  const handleCloseLeft = useCallback(() => onCloseTabs('left', tab.id), [onCloseTabs, tab.id]);
+  const handleCloseRight = useCallback(() => onCloseTabs('right', tab.id), [onCloseTabs, tab.id]);
+  const handleCloseAll = useCallback(() => onCloseTabs('all', tab.id), [onCloseTabs, tab.id]);
+  const handleCopyTitle = useCallback(() => {
+    void copyText(tab.title, 'Title copied');
+  }, [tab.title]);
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger className="shrink-0">
+        <div
+          ref={isActive ? activeTabRef : null}
+          className={`flex items-center gap-2 px-3 py-1.5 h-8 rounded-md text-sm cursor-pointer select-none min-w-30 max-w-50 shrink-0 group transition-colors ${
+            isActive
+              ? 'bg-background shadow-sm border border-border/50 text-foreground'
+              : 'text-muted-foreground hover:bg-muted/50'
+          }`}
+          onClick={handleSelect}
+          onAuxClick={handleAuxClick}
+          // Suppress the browser's "open in new tab" middle-click
+          // behavior on links inside the tab content area too — but
+          // mainly here to silence the default scroll-to-pan cursor.
+          onMouseDown={handleMouseDown}
+        >
+          {tab.type === 'data' && <TableIcon className="w-3.5 h-3.5 shrink-0" />}
+          {tab.type === 'structure' && <LayoutTemplate className="w-3.5 h-3.5 shrink-0" />}
+          {tab.type === 'query' && <Terminal className="w-3.5 h-3.5 shrink-0" />}
+          {tab.type === 'erd' && <Waypoints className="w-3.5 h-3.5 shrink-0" />}
+          {tab.type === 'routine' && <FunctionSquare className="w-3.5 h-3.5 shrink-0" />}
+          {tab.type === 'trigger' && <Zap className="w-3.5 h-3.5 shrink-0" />}
+          {tab.type === 'realtime' && <Radio className="w-3.5 h-3.5 shrink-0" />}
+
+          <span className="truncate flex-1">{tab.title}</span>
+
+          {/* Close / unsaved-dot slot (VSCode-style). When the tab has
+              unsaved edits we show a dot by default and reveal the X on
+              hover; otherwise the X follows the usual show-on-active/
+              hover rule. The dot sits in the SAME slot so the layout
+              never shifts. */}
+          <div
+            className={`group/close relative w-4 h-4 rounded-sm flex items-center justify-center hover:bg-muted shrink-0 ${
+              tab.dirty || isActive
+                ? 'opacity-100'
+                : 'opacity-0 group-hover:opacity-100'
+            }`}
+            title={tab.dirty ? 'Unsaved changes — click to close' : 'Close'}
+            onClick={handleCloseClick}
+          >
+            {tab.dirty && (
+              <span className="absolute inset-0 flex items-center justify-center group-hover/close:opacity-0 transition-opacity">
+                <span className="w-2 h-2 rounded-full bg-sky-500 dark:bg-sky-400" />
+              </span>
+            )}
+            <X
+              className={`w-3 h-3 ${tab.dirty ? 'opacity-0 group-hover/close:opacity-100 transition-opacity' : ''}`}
+            />
+          </div>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-52">
+        <ContextMenuItem onClick={handleCloseTab}>Close Tab</ContextMenuItem>
+        <ContextMenuItem disabled={!hasOthers} onClick={handleCloseOthers}>
+          Close Other Tabs
+        </ContextMenuItem>
+        <ContextMenuItem disabled={!hasLeft} onClick={handleCloseLeft}>
+          Close Tabs to the Left
+        </ContextMenuItem>
+        <ContextMenuItem disabled={!hasRight} onClick={handleCloseRight}>
+          Close Tabs to the Right
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleCloseAll}>
+          Close All Tabs
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={handleCopyTitle}>
+          Copy Title
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={onNewQuery}>New Query</ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 

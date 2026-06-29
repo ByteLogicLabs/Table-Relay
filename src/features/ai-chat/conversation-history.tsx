@@ -196,6 +196,23 @@ export function ConversationHistory({ onSelect }: Props) {
     [],
   );
 
+  const handleOpenHistory = useCallback(() => setOpen(true), []);
+  const handleCloseHistory = useCallback(() => setOpen(false), []);
+  const handleDeleteSelected = useCallback(
+    () => requestDelete([...selection.selectedIds]),
+    [requestDelete, selection],
+  );
+  const handleClearAll = useCallback(
+    () => requestDelete(conversations.map(c => c.id)),
+    [conversations, requestDelete],
+  );
+  const handleConfirmOpenChange = useCallback((o: boolean) => {
+    if (!o) setConfirmTargets(null);
+  }, []);
+  const handleConfirmDelete = useCallback(() => {
+    void performDelete();
+  }, [performDelete]);
+
   return (
     <>
       <Button
@@ -204,7 +221,7 @@ export function ConversationHistory({ onSelect }: Props) {
         className="h-7 w-7"
         title="Chat history"
         aria-label="Chat history"
-        onClick={() => setOpen(true)}
+        onClick={handleOpenHistory}
       >
         <History className="w-3.5 h-3.5" />
       </Button>
@@ -241,7 +258,7 @@ export function ConversationHistory({ onSelect }: Props) {
                   variant="ghost"
                   size="sm"
                   className="h-8 text-destructive hover:text-destructive"
-                  onClick={() => requestDelete([...selection.selectedIds])}
+                  onClick={handleDeleteSelected}
                   title="Delete selected"
                 >
                   Delete {selection.selectedIds.size}
@@ -252,7 +269,7 @@ export function ConversationHistory({ onSelect }: Props) {
                   variant="ghost"
                   size="sm"
                   className="h-8 text-destructive hover:text-destructive"
-                  onClick={() => requestDelete(conversations.map(c => c.id))}
+                  onClick={handleClearAll}
                   title="Delete all conversations"
                 >
                   Clear all
@@ -262,7 +279,7 @@ export function ConversationHistory({ onSelect }: Props) {
                 variant="ghost"
                 size="icon"
                 className="h-8 w-8"
-                onClick={() => setOpen(false)}
+                onClick={handleCloseHistory}
                 title="Close history"
                 aria-label="Close history"
               >
@@ -285,92 +302,26 @@ export function ConversationHistory({ onSelect }: Props) {
                 // While a resume is in flight, dim the other rows so it's clear
                 // the click registered and the panel is busy.
                 const dimmed = openingId !== null && !isOpening;
+                const multiSelected =
+                  selection.selectedIds.size > 1 && selection.selectedIds.has(conv.id);
                 return (
-                  <ContextMenu key={conv.id}>
-                    <ContextMenuTrigger>
-                      <div
-                        role="option"
-                        aria-selected={isSelected}
-                        data-focused={isFocused || undefined}
-                        className={
-                          'group/conv flex items-center gap-3 px-4 py-3 ' +
-                          (openingId ? 'cursor-default ' : 'cursor-pointer ') +
-                          (isSelected
-                            ? 'bg-accent/70 hover:bg-accent'
-                            : 'hover:bg-accent') +
-                          (isFocused ? ' ring-1 ring-inset ring-primary/40' : '') +
-                          (dimmed ? ' opacity-40 pointer-events-none' : '')
-                        }
-                        onClick={(e) => handleRowClick(e, conv.id)}
-                        onContextMenu={() => handleRowContextMenu(conv.id)}
-                      >
-                        {/* Per-row select checkbox — toggles this conversation
-                            in the delete selection without opening it. */}
-                        <Checkbox
-                          checked={isSelected}
-                          onCheckedChange={() => selection.toggleSelection(conv.id)}
-                          onClick={(e) => e.stopPropagation()}
-                          aria-label={`Select ${conv.title}`}
-                          className="shrink-0"
-                        />
-                        <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center shrink-0">
-                          {isOpening ? (
-                            <Loader2 className="w-4 h-4 text-primary animate-spin" />
-                          ) : (
-                            <MessageSquare className="w-4 h-4 text-muted-foreground" />
-                          )}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="truncate text-sm font-medium">{conv.title}</div>
-                          <div className="text-xs text-muted-foreground truncate">
-                            {conv.model ?? conv.providerKind ?? 'Unknown'}
-                            {' · '}
-                            {new Date(conv.updatedAt).toLocaleString()}
-                          </div>
-                        </div>
-                        {/* Per-row delete — visible on hover (and always on
-                            touch). Stops propagation so it doesn't open the
-                            conversation. */}
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive opacity-0 group-hover/conv:opacity-100 focus:opacity-100 transition-opacity"
-                          title="Delete conversation"
-                          aria-label={`Delete ${conv.title}`}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            requestDelete([conv.id]);
-                          }}
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </Button>
-                      </div>
-                    </ContextMenuTrigger>
-                    <ContextMenuContent className="w-48">
-                      <ContextMenuItem onClick={() => void openConversation(conv.id)}>
-                        Open
-                      </ContextMenuItem>
-                      <ContextMenuItem
-                        onClick={() => {
-                          void copyText(conv.title, 'Title copied');
-                        }}
-                      >
-                        Copy title
-                      </ContextMenuItem>
-                      <ContextMenuSeparator />
-                      <ContextMenuItem
-                        onClick={() => requestDelete(
-                          selection.selectedIds.size > 1 && selection.selectedIds.has(conv.id)
-                            ? [...selection.selectedIds]
-                            : [conv.id]
-                        )}
-                      >
-                        {selection.selectedIds.size > 1 && selection.selectedIds.has(conv.id)
-                          ? `Delete ${selection.selectedIds.size} conversations`
-                          : 'Delete'}
-                      </ContextMenuItem>
-                    </ContextMenuContent>
-                  </ContextMenu>
+                  <ConversationRow
+                    key={conv.id}
+                    conv={conv}
+                    isSelected={isSelected}
+                    isFocused={isFocused}
+                    isOpening={isOpening}
+                    dimmed={dimmed}
+                    anyOpening={openingId !== null}
+                    multiSelected={multiSelected}
+                    selectedCount={selection.selectedIds.size}
+                    onRowClick={handleRowClick}
+                    onRowContextMenu={handleRowContextMenu}
+                    onToggleSelection={selection.toggleSelection}
+                    onOpenConversation={openConversation}
+                    onRequestDelete={requestDelete}
+                    selectedIds={selection.selectedIds}
+                  />
                 );
               })}
             </div>
@@ -380,14 +331,152 @@ export function ConversationHistory({ onSelect }: Props) {
 
       <DestructiveConfirmDialog
         open={confirmTargets !== null}
-        onOpenChange={(o) => { if (!o) setConfirmTargets(null); }}
+        onOpenChange={handleConfirmOpenChange}
         action="Delete"
         itemNoun="conversation"
         itemNames={confirmTargets?.map(c => c.title) ?? []}
         showList={false}
         warning="This cannot be undone."
-        onConfirm={() => { void performDelete(); }}
+        onConfirm={handleConfirmDelete}
       />
     </>
+  );
+}
+
+interface ConversationRowProps {
+  conv: Conversation;
+  isSelected: boolean;
+  isFocused: boolean;
+  isOpening: boolean;
+  dimmed: boolean;
+  anyOpening: boolean;
+  multiSelected: boolean;
+  selectedCount: number;
+  selectedIds: Set<string>;
+  onRowClick: (e: React.MouseEvent, id: string) => void;
+  onRowContextMenu: (id: string) => void;
+  onToggleSelection: (id: string) => void;
+  onOpenConversation: (id: string) => Promise<void>;
+  onRequestDelete: (ids: string[]) => void;
+}
+
+function ConversationRow({
+  conv,
+  isSelected,
+  isFocused,
+  isOpening,
+  dimmed,
+  anyOpening,
+  multiSelected,
+  selectedCount,
+  selectedIds,
+  onRowClick,
+  onRowContextMenu,
+  onToggleSelection,
+  onOpenConversation,
+  onRequestDelete,
+}: ConversationRowProps) {
+  const handleClick = useCallback(
+    (e: React.MouseEvent) => onRowClick(e, conv.id),
+    [onRowClick, conv.id],
+  );
+  const handleContextMenu = useCallback(
+    () => onRowContextMenu(conv.id),
+    [onRowContextMenu, conv.id],
+  );
+  const handleCheckedChange = useCallback(
+    () => onToggleSelection(conv.id),
+    [onToggleSelection, conv.id],
+  );
+  const handleCheckboxClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+  }, []);
+  const handleDeleteClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    onRequestDelete([conv.id]);
+  }, [onRequestDelete, conv.id]);
+  const handleOpen = useCallback(() => {
+    void onOpenConversation(conv.id);
+  }, [onOpenConversation, conv.id]);
+  const handleCopyTitle = useCallback(() => {
+    void copyText(conv.title, 'Title copied');
+  }, [conv.title]);
+  const handleContextDelete = useCallback(() => {
+    onRequestDelete(multiSelected ? [...selectedIds] : [conv.id]);
+  }, [onRequestDelete, multiSelected, selectedIds, conv.id]);
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger>
+        <div
+          role="option"
+          aria-selected={isSelected}
+          data-focused={isFocused || undefined}
+          className={
+            'group/conv flex items-center gap-3 px-4 py-3 ' +
+            (anyOpening ? 'cursor-default ' : 'cursor-pointer ') +
+            (isSelected
+              ? 'bg-accent/70 hover:bg-accent'
+              : 'hover:bg-accent') +
+            (isFocused ? ' ring-1 ring-inset ring-primary/40' : '') +
+            (dimmed ? ' opacity-40 pointer-events-none' : '')
+          }
+          onClick={handleClick}
+          onContextMenu={handleContextMenu}
+        >
+          {/* Per-row select checkbox — toggles this conversation
+              in the delete selection without opening it. */}
+          <Checkbox
+            checked={isSelected}
+            onCheckedChange={handleCheckedChange}
+            onClick={handleCheckboxClick}
+            aria-label={`Select ${conv.title}`}
+            className="shrink-0"
+          />
+          <div className="h-9 w-9 rounded-md bg-muted flex items-center justify-center shrink-0">
+            {isOpening ? (
+              <Loader2 className="w-4 h-4 text-primary animate-spin" />
+            ) : (
+              <MessageSquare className="w-4 h-4 text-muted-foreground" />
+            )}
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="truncate text-sm font-medium">{conv.title}</div>
+            <div className="text-xs text-muted-foreground truncate">
+              {conv.model ?? conv.providerKind ?? 'Unknown'}
+              {' · '}
+              {new Date(conv.updatedAt).toLocaleString()}
+            </div>
+          </div>
+          {/* Per-row delete — visible on hover (and always on
+              touch). Stops propagation so it doesn't open the
+              conversation. */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7 shrink-0 text-muted-foreground hover:text-destructive opacity-0 group-hover/conv:opacity-100 focus:opacity-100 transition-opacity"
+            title="Delete conversation"
+            aria-label={`Delete ${conv.title}`}
+            onClick={handleDeleteClick}
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+          </Button>
+        </div>
+      </ContextMenuTrigger>
+      <ContextMenuContent className="w-48">
+        <ContextMenuItem onClick={handleOpen}>
+          Open
+        </ContextMenuItem>
+        <ContextMenuItem onClick={handleCopyTitle}>
+          Copy title
+        </ContextMenuItem>
+        <ContextMenuSeparator />
+        <ContextMenuItem onClick={handleContextDelete}>
+          {multiSelected
+            ? `Delete ${selectedCount} conversations`
+            : 'Delete'}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
