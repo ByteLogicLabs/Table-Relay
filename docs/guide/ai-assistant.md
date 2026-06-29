@@ -36,6 +36,8 @@ Pick **Local Llama** - no key, no account, **nothing leaves your machine.**
 Rough RAM guidance from the model catalog: 3B ≈ 6 GB, 7B ≈ 8 GB, 14B ≈ 16 GB.
 Downloads resume and are SHA-256 verified.
 
+![The on-device models settings, showing the llama.cpp catalog with download buttons](../screenshots/local-model.png)
+
 ### CLI providers
 
 Drive a coding agent you've already installed and logged in: **Claude Code,
@@ -44,6 +46,8 @@ terminal as usual; Table Relay only invokes the binary you authenticated, never
 reads or stores those credentials, and usage is billed to your own account.
 
 ## Using it
+
+![The AI chat panel discussing a database, with results and a query suggestion](../screenshots/ai-chat.png)
 
 - Conversations and the chosen model/provider are saved **per conversation** and
   restored across restarts.
