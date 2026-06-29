@@ -32,6 +32,9 @@ export default defineConfig(({mode}) => {
       // Version from package.json (the file the team bumps). Drives the in-app
       // version label + update check, instead of Tauri's tauri.conf.json.
       'process.env.APP_VERSION': JSON.stringify(pkgVersion),
+      // Dev-only debug overlay. Off by default even in dev; set DEV_DEBUG=true
+      // in .env to show the floating bug panel.
+      'process.env.DEV_DEBUG': JSON.stringify(env.DEV_DEBUG || 'false'),
     },
     resolve: {
       alias: {

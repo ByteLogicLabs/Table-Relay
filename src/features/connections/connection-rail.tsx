@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, Settings, Unplug, Pencil, FileUp, FileDown, Loader2, Copy, Power } from 'lucide-react';
+import { Database, Unplug, Pencil, FileUp, FileDown, Loader2, Copy, Power } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -392,7 +392,6 @@ export default function ConnectionRail({
     // Don't collapse while a menu/dialog is open — those own the pointer.
     if (!menuOpen && !settingsOpen) onExpandChange(false);
   }, [menuOpen, settingsOpen, onExpandChange]);
-  const handleOpenSettings = useCallback(() => setSettingsOpen(true), []);
 
   return (
     <div
@@ -446,20 +445,10 @@ export default function ConnectionRail({
         )}
       </div>
 
-      {/* Settings button */}
-      <div className="shrink-0 px-1.5 pb-2 pt-1 border-t border-border/40">
-        <button
-          type="button"
-          onClick={handleOpenSettings}
-          title="Settings"
-          className={`relative w-full rounded-lg text-left transition-colors cursor-pointer text-muted-foreground hover:bg-muted/60 hover:text-foreground
-            ${expanded ? 'h-9 flex items-center gap-2.5 px-2' : 'h-10 flex flex-col items-center justify-center gap-0.5'}`}
-        >
-          <Settings className="w-4 h-4 shrink-0" />
-          {expanded && <span className="text-[13px] font-medium">Settings</span>}
-        </button>
-      </div>
-
+      {/* Settings is reachable from the native menu (Cmd/Ctrl+,) and the home
+          screen, so the rail no longer carries its own button. The dialog stays
+          mounted to serve `tablerelay:open-settings` deep links (e.g. opening
+          straight to AI settings). */}
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialSection={settingsSection} />
     </div>
   );

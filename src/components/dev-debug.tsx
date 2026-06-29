@@ -31,7 +31,9 @@ export default function DevDebug() {
   const rail = useRail();
   const page = useDebugPage();
 
-  if (!import.meta.env.DEV) return null;
+  // Dev-only, AND opt-in via DEV_DEBUG=true in .env (default off). Both gates
+  // are build-time constants, so the hook order below stays stable per build.
+  if (!import.meta.env.DEV || process.env.DEV_DEBUG !== 'true') return null;
 
   const envEntries = Object.entries(import.meta.env as Record<string, string>).filter(
     ([k]) => !k.includes('SECRET') && !k.includes('PASSWORD') && !k.includes('KEY'),
