@@ -67,6 +67,7 @@ import { copyText } from "../../lib/clipboard";
 import { displayHost } from "../../lib/connection-display";
 import { Section } from "./sidebar-section";
 import {
+  loadViewDefinitionSql,
   pickDdlColumn,
   quoteIdentForDialect,
   toTitleCaseLabel,
@@ -961,54 +962,12 @@ export default function Sidebar({
     viewName: string,
   ) => {
     try {
-      let editable: string;
-      if (dialect === "postgres") {
-        // Postgres has no SHOW CREATE. `pg_get_viewdef` returns the SELECT
-        // body; we wrap it into a CREATE OR REPLACE VIEW so the editor can
-        // run it back. Schema-qualify via regclass.
-        const qualified = `${quoteIdentForDialect(dbName, dialect)}.${quoteIdentForDialect(viewName, dialect)}`;
-        const res = await db.runQuery(
-          connectionId,
-          `SELECT pg_get_viewdef('${qualified.replace(/'/g, "''")}'::regclass, true) AS def`,
-        );
-        const last = res.statements[res.statements.length - 1];
-        if (!last || last.error)
-          throw new Error(last?.error ?? "no definition returned");
-        const body = last.rows[0]?.[0];
-        if (typeof body !== "string")
-          throw new Error("definition not found in response");
-        editable = `CREATE OR REPLACE VIEW ${qualified} AS\n${body.trim()}\n`;
-      } else if (dialect === "sqlite") {
-        // SQLite stores the original CREATE VIEW text in sqlite_master.
-        const res = await db.runQuery(
-          connectionId,
-          `SELECT sql FROM sqlite_master WHERE type='view' AND name='${viewName.replace(/'/g, "''")}'`,
-        );
-        const last = res.statements[res.statements.length - 1];
-        if (!last || last.error)
-          throw new Error(last?.error ?? "no definition returned");
-        const ddl = last.rows[0]?.[0];
-        if (typeof ddl !== "string")
-          throw new Error("definition not found in response");
-        editable = `DROP VIEW IF EXISTS ${quoteIdentForDialect(viewName, dialect)};\n\n${ddl.trim()};\n`;
-      } else {
-        // MySQL / generic: SHOW CREATE VIEW. No row limit — it rejects a
-        // trailing LIMIT.
-        const res = await db.runQuery(
-          connectionId,
-          `SHOW CREATE VIEW \`${dbName}\`.\`${viewName}\``,
-        );
-        const last = res.statements[res.statements.length - 1];
-        if (!last || last.error)
-          throw new Error(last?.error ?? "no definition returned");
-        const idx = pickDdlColumn(last.columns, "Create View");
-        const ddl = idx >= 0 ? last.rows[0]?.[idx] : null;
-        if (typeof ddl !== "string")
-          throw new Error("definition not found in response");
-        // MySQL returns `CREATE ALGORITHM=... DEFINER=... VIEW ... AS ...`.
-        const replaced = ddl.replace(/^CREATE\s+/i, "CREATE OR REPLACE ");
-        editable = `USE \`${dbName}\`;\n\n${replaced};\n`;
-      }
+      const editable = await loadViewDefinitionSql(
+        connectionId,
+        dbName,
+        viewName,
+        dialect,
+      );
       onOpenDefinition(
         connectionId,
         `view:${dbName}.${viewName}`,
@@ -1637,7 +1596,6 @@ export default function Sidebar({
                         rowCls={rowCls}
                         iconCls={iconCls}
                         onOpenTable={onOpenTable}
-                        onOpenStructure={onOpenStructure}
                         openViewDefinition={openViewDefinition}
                       />
                     );
@@ -2029,11 +1987,6 @@ interface ViewRowProps {
   rowCls: (active: boolean) => string;
   iconCls: (active: boolean) => string;
   onOpenTable: (connectionId: string, schema: string, tableName: string) => void;
-  onOpenStructure: (
-    connectionId: string,
-    schema: string,
-    tableName: string,
-  ) => void;
   openViewDefinition: (
     connectionId: string,
     dbName: string,
@@ -2049,7 +2002,6 @@ function ViewRow({
   rowCls,
   iconCls,
   onOpenTable,
-  onOpenStructure,
   openViewDefinition,
 }: ViewRowProps) {
   const handleEditDefinition = useCallback(
@@ -2060,17 +2012,13 @@ function ViewRow({
     () => onOpenTable(connId, schemaForActions, v.name),
     [onOpenTable, connId, schemaForActions, v.name],
   );
-  const handleOpenStructure = useCallback(
-    () => onOpenStructure(connId, schemaForActions, v.name),
-    [onOpenStructure, connId, schemaForActions, v.name],
-  );
   return (
     <ContextMenu>
       <ContextMenuTrigger>
         <button
           className={rowCls(active)}
           title={v.name}
-          onClick={handleEditDefinition}
+          onClick={handleOpenData}
         >
           <LayoutTemplate className={iconCls(active)} />
           <span className="flex-1 whitespace-nowrap">{v.name}</span>
@@ -2087,9 +2035,6 @@ function ViewRow({
         </ContextMenuItem>
         <ContextMenuItem onClick={handleEditDefinition}>
           Edit definition
-        </ContextMenuItem>
-        <ContextMenuItem onClick={handleOpenStructure}>
-          Open Schema
         </ContextMenuItem>
       </ContextMenuContent>
     </ContextMenu>

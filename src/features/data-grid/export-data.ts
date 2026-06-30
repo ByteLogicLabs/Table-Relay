@@ -152,7 +152,15 @@ export async function runExport(args: RunExportArgs): Promise<number> {
     return `'${raw.replace(/'/g, "''")}'`;
   };
 
-  const INSERT_BATCH = 500;
+  // Cap each multi-row INSERT so it can't exceed the destination server's
+  // packet limit. MySQL 5.7's default `max_allowed_packet` is 4 MB, and a
+  // single statement over that makes the server drop the connection mid-import
+  // ("got 0 bytes at EOF"). We bound by characters (cheap to measure) with a
+  // wide safety margin: even at a worst-case ~3 bytes/char for non-ASCII text,
+  // 800k chars stays comfortably under 4 MB. A row count cap still applies so
+  // tiny rows don't produce one gigantic statement either.
+  const MAX_INSERT_CHARS = 800_000;
+  const MAX_INSERT_ROWS = 500;
   const buildInsertSql = (
     qualified: string,
     cols: string[],
@@ -162,14 +170,32 @@ export async function runExport(args: RunExportArgs): Promise<number> {
     if (rows.length === 0 || cols.length === 0) return "";
     const colList = cols.map(qi).join(", ");
     const upsert = table ? buildUpsertClause(cols, table.primaryKey) : "";
+    const prefix = `INSERT INTO ${qualified} (${colList}) VALUES\n  `;
     const out: string[] = [];
-    for (let i = 0; i < rows.length; i += INSERT_BATCH) {
-      const slice = rows.slice(i, i + INSERT_BATCH);
-      const tuples = slice
-        .map((row) => `(${cols.map((col) => sqlLiteral(row[col])).join(", ")})`)
-        .join(",\n  ");
-      out.push(`INSERT INTO ${qualified} (${colList}) VALUES\n  ${tuples}${upsert};`);
+    let batch: string[] = [];
+    let batchChars = 0;
+    const flush = () => {
+      if (batch.length === 0) return;
+      out.push(`${prefix}${batch.join(",\n  ")}${upsert};`);
+      batch = [];
+      batchChars = 0;
+    };
+    for (const row of rows) {
+      const tuple = `(${cols.map((col) => sqlLiteral(row[col])).join(", ")})`;
+      // Flush BEFORE adding when this tuple would push the statement over a
+      // cap — but never flush an empty batch, so a single oversized row still
+      // goes out on its own (can't be split further).
+      if (
+        batch.length > 0 &&
+        (batchChars + tuple.length > MAX_INSERT_CHARS ||
+          batch.length >= MAX_INSERT_ROWS)
+      ) {
+        flush();
+      }
+      batch.push(tuple);
+      batchChars += tuple.length + 4; // ",\n  " separator overhead
     }
+    flush();
     return out.join("\n");
   };
 

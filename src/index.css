@@ -147,11 +147,18 @@
   }
 }
 
-/* Custom utilities for macOS feel */
+/* Custom utilities for macOS feel.
+ * NOTE: no `backdrop-filter: blur()` here. The window is opaque (no
+ * `transparent: true` in tauri.conf.json, no native window-vibrancy), so a
+ * blur has nothing real to sample and produces no visible effect — but a
+ * window-sized backdrop-filter still forces the WebView compositor to keep a
+ * full-window blur pass alive every frame. On macOS WKWebView that surfaces as
+ * sustained UI lag right after the window is un-occluded (the GPU surface is
+ * dropped while backgrounded and must re-composite the whole blurred layer on
+ * return). Real macOS vibrancy needs a transparent window + NSVisualEffectView
+ * (the `window-vibrancy` crate), not CSS. Keep just the solid background. */
 .mac-vibrancy {
   background-color: var(--sidebar-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
 }
 
 .mac-window {

@@ -403,7 +403,13 @@ export default function TriggerView({
               Refresh
             </Button>
           )}
-          <Button variant="ghost" size="sm" disabled={!dirty || saving} onClick={save}>
+          <Button
+            variant={dirty ? 'default' : 'ghost'}
+            size="sm"
+            className={dirty ? 'bg-green-600 hover:bg-green-700 text-white' : undefined}
+            disabled={!dirty || saving}
+            onClick={save}
+          >
             <Check className="w-4 h-4 mr-2" />
             {saving ? 'Saving…' : 'Save'}
           </Button>

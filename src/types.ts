@@ -36,7 +36,7 @@ export interface ConnectionTag {
 
 export type TabType = 'data' | 'structure' | 'query' | 'erd' | 'routine' | 'trigger' | 'realtime';
 
-export type DataViewMode = 'table' | 'json' | 'diagram' | 'schema';
+export type DataViewMode = 'table' | 'json' | 'diagram' | 'schema' | 'definition';
 
 export interface QueryLogEntry {
   id: string;

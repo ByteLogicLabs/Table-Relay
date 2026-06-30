@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import Editor from '@monaco-editor/react';
 import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
@@ -28,6 +28,10 @@ interface RoutineViewProps {
   /** Reports unsaved state to the owning tab (drives the unsaved dot). */
   onDirtyChange?: (dirty: boolean) => void;
   onLogQuery?: (statement: string, opts?: LogQueryOptions) => void;
+  /** Optional element rendered in the toolbar's right group (before the object
+   *  label). Used when embedded in the data grid to host the Edit/Data toggle,
+   *  so the view tab has a single toolbar instead of two stacked rows. */
+  toolbarLeading?: ReactNode;
 }
 
 function scaffoldFor(kind: 'function' | 'procedure' | 'view', schema: string): string {
@@ -130,7 +134,7 @@ function stripDefiner(ddl: string): string {
  * body with its internal `;` in one shot.
  */
 export default function RoutineView({
-  connection, schema, name, kind, isNew, onDirtyChange, onLogQuery,
+  connection, schema, name, kind, isNew, onDirtyChange, onLogQuery, toolbarLeading,
 }: RoutineViewProps) {
   const manifests = useAdapterManifests();
   const settings = useSettings();
@@ -360,14 +364,14 @@ export default function RoutineView({
 
   if (loading) {
     return (
-      <div className="flex-1 flex items-center justify-center text-muted-foreground">
+      <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
         <Loader2 className="w-4 h-4 mr-2 animate-spin" /> Loading {kind}…
       </div>
     );
   }
   if (error) {
     return (
-      <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground gap-2 text-sm">
+      <div className="h-full flex flex-col items-center justify-center text-muted-foreground gap-2 text-sm">
         <AlertCircle className="w-4 h-4 text-destructive" />
         {error}
       </div>
@@ -386,7 +390,13 @@ export default function RoutineView({
               Refresh
             </Button>
           )}
-          <Button variant="ghost" size="sm" disabled={!dirty || saving} onClick={save}>
+          <Button
+            variant={dirty ? 'default' : 'ghost'}
+            size="sm"
+            className={dirty ? 'bg-green-600 hover:bg-green-700 text-white' : undefined}
+            disabled={!dirty || saving}
+            onClick={save}
+          >
             <Check className="w-4 h-4 mr-2" />
             {saving ? 'Saving…' : 'Save'}
           </Button>
@@ -400,6 +410,7 @@ export default function RoutineView({
           </Button>
         </div>
         <div className="flex items-center gap-3 min-w-0">
+          {toolbarLeading}
           <div className="text-xs text-muted-foreground font-mono truncate">
             {kind.toUpperCase()} · {schema}.{def?.name ?? (isNew ? '(new)' : '')}
             {def?.definer && <span className="opacity-70"> · definer {def.definer}</span>}

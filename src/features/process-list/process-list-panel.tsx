@@ -34,6 +34,11 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [killing, setKilling] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
+  // Index of the row whose Info (full query) is opened in place. The column is
+  // truncated by default; clicking a cell swaps it for a focused read-only
+  // editor box showing the full query — same as the data grid's cell edit, but
+  // not editable. Only one is open at a time; blur / Escape closes it.
+  const [openInfo, setOpenInfo] = useState<number | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const fetchProcesses = useCallback(async () => {
@@ -43,6 +48,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
       const list = await db.processList(connectionId);
       setProcesses(list);
       setSelected(new Set());
+      setOpenInfo(null);
     } catch (err) {
       setError(isDbError(err) ? err.message : String(err));
     } finally {
@@ -56,6 +62,7 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
     } else {
       setSelected(new Set());
       setProcesses([]);
+      setOpenInfo(null);
     }
   }, [open, fetchProcesses]);
 
@@ -122,8 +129,8 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
     void fetchProcesses();
   }, [fetchProcesses]);
 
-  const handleToggleAutoRefresh = useCallback(() => {
-    setAutoRefresh((prev) => !prev);
+  const handleWatchChange = useCallback((v: boolean | 'indeterminate') => {
+    setAutoRefresh(v === true);
   }, []);
 
   const handleKillSelectedClick = useCallback(() => {
@@ -143,6 +150,17 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
     (id: string) => () => void killSingle(id),
     [killSingle],
   );
+
+  const makeHandleOpenInfo = useCallback(
+    (idx: number) => () => setOpenInfo(idx),
+    [],
+  );
+
+  const handleInfoClose = useCallback(() => setOpenInfo(null), []);
+
+  const handleInfoKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') setOpenInfo(null);
+  }, []);
 
   const handleClose = useCallback(() => {
     onOpenChange(false);
@@ -171,13 +189,6 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
             )}
             Refresh
           </Button>
-          <Button
-            variant={autoRefresh ? 'default' : 'outline'}
-            size="sm"
-            onClick={handleToggleAutoRefresh}
-          >
-            Auto {autoRefresh ? 'ON' : 'OFF'}
-          </Button>
           {selected.size > 0 && (
             <Button
               variant="destructive"
@@ -194,6 +205,12 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
           <span className="text-xs text-muted-foreground ml-auto">
             {processes.length} process{processes.length !== 1 ? 'es' : ''}
           </span>
+          {/* Auto-refresh as a Watch toggle: "Watched" while polling, off
+              otherwise. Polls every 5s (see the autoRefresh effect). */}
+          <label className="flex items-center gap-1.5 text-xs cursor-pointer select-none">
+            <Checkbox checked={autoRefresh} onCheckedChange={handleWatchChange} />
+            {autoRefresh ? 'Watched' : 'Watch'}
+          </label>
         </div>
 
         {error && (
@@ -247,8 +264,31 @@ export function ProcessListPanel({ open, onOpenChange, connectionId }: Props) {
                   <td className="px-4 py-1.5 border-r border-border">{p.command ?? '-'}</td>
                   <td className="px-4 py-1.5 border-r border-border">{formatTime(p.time)}</td>
                   <td className="px-4 py-1.5 border-r border-border">{p.state ?? '-'}</td>
-                  <td className="px-4 py-1.5 border-r border-border max-w-xs truncate" title={p.info ?? undefined}>
-                    {p.info ?? '-'}
+                  <td className="px-4 py-1.5 border-r border-border max-w-xs align-top">
+                    {p.info ? (
+                      openInfo === idx ? (
+                        <div
+                          tabIndex={0}
+                          ref={(el) => el?.focus()}
+                          onBlur={handleInfoClose}
+                          onKeyDown={handleInfoKeyDown}
+                          className="w-full overflow-x-auto whitespace-nowrap bg-background text-foreground font-mono text-xs px-2 py-1 border-2 border-primary outline-none select-text"
+                        >
+                          {p.info}
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="block w-full truncate text-left font-mono cursor-pointer hover:text-primary"
+                          title="Click to view the full query"
+                          onClick={makeHandleOpenInfo(idx)}
+                        >
+                          {p.info}
+                        </button>
+                      )
+                    ) : (
+                      '-'
+                    )}
                   </td>
                   <td className="px-4 py-1.5">
                     <Button

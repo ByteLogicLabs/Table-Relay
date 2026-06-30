@@ -209,6 +209,15 @@ function UnlockedApp() {
         // instantly from the surviving tab-data cache (Chrome-tab behaviour:
         // a backgrounded connection keeps its rows and comes back on its own).
         setActiveConnectionIds(prev => (prev.includes(connectionId) ? prev : [...prev, connectionId]));
+        // Data may have changed while the socket was down, and any schema reads
+        // issued against the dead pool were lost. Re-adding to the active set
+        // only remounts the data grids (which refetch); the sidebar's tables /
+        // views / routines / triggers and any open view / trigger / routine
+        // editor tab would otherwise stay stale. A connection-scoped reload
+        // invalidates cached structures and refetches all of them.
+        window.dispatchEvent(
+          new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
+        );
       });
       const unC = await listen<ReconnectEvent>('connection:lost', (ev) => {
         const { connectionId, error } = ev.payload;
