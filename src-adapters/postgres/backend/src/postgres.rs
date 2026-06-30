@@ -15,7 +15,7 @@ use adapter_api::log_line;
 use adapter_api::{
     AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
     ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest,
-    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
+    SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
     TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use bigdecimal::BigDecimal;
@@ -119,6 +119,95 @@ impl PostgresDriver {
             flavor,
             default_schema: self.default_db.clone(),
         })
+    }
+
+    /// Live server + database stats for the connection "Information" dialog.
+    /// Best-effort: a failed probe is skipped, not fatal. The `schema` argument
+    /// is the focused SQL schema (namespace) within the connected database; the
+    /// PostgreSQL database itself is fixed at connect time.
+    pub async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        let mut out: Vec<ServerDetail> = Vec::new();
+        let push = |out: &mut Vec<ServerDetail>, label: &str, value: String| {
+            if !value.is_empty() {
+                out.push(ServerDetail { label: label.into(), value });
+            }
+        };
+
+        if let Ok(v) = sqlx::query_scalar::<_, String>("SHOW server_version")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "Server version", v);
+        }
+        if let Ok(db) = sqlx::query_scalar::<_, String>("SELECT current_database()")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "Database", db);
+        }
+        // Database encoding + collation from pg_database.
+        if let Ok((enc, collate, ctype)) = sqlx::query_as::<_, (String, String, String)>(
+            "SELECT pg_encoding_to_char(encoding), datcollate, datctype \
+             FROM pg_database WHERE datname = current_database()",
+        )
+        .fetch_one(&self.pool)
+        .await
+        {
+            push(&mut out, "Encoding", enc);
+            push(&mut out, "Collation", collate);
+            push(&mut out, "Character type", ctype);
+        }
+        // Database on-disk size.
+        if let Ok(size) =
+            sqlx::query_scalar::<_, i64>("SELECT pg_database_size(current_database())")
+                .fetch_one(&self.pool)
+                .await
+        {
+            push(&mut out, "Database size", human_bytes(size.max(0) as u64));
+        }
+        // Object counts: schemas + tables across user namespaces.
+        if let Ok(n) = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM information_schema.tables \
+             WHERE table_schema NOT IN ('pg_catalog','information_schema')",
+        )
+        .fetch_one(&self.pool)
+        .await
+        {
+            push(&mut out, "Tables", n.to_string());
+        }
+        // Focused-schema table count + size, when a schema is in view.
+        if let Some(s) = schema.filter(|s| !s.is_empty()) {
+            if let Ok(n) = sqlx::query_scalar::<_, i64>(
+                "SELECT count(*) FROM information_schema.tables WHERE table_schema = $1",
+            )
+            .bind(s)
+            .fetch_one(&self.pool)
+            .await
+            {
+                push(&mut out, &format!("Tables in {s}"), n.to_string());
+            }
+        }
+        // Uptime + active connections.
+        if let Ok(secs) = sqlx::query_scalar::<_, f64>(
+            "SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time()))",
+        )
+        .fetch_one(&self.pool)
+        .await
+        {
+            push(&mut out, "Uptime", human_duration(secs.max(0.0) as u64));
+        }
+        if let Ok(n) =
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM pg_stat_activity")
+                .fetch_one(&self.pool)
+                .await
+        {
+            push(&mut out, "Active connections", n.to_string());
+        }
+
+        Ok(out)
     }
 
     pub async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
@@ -668,6 +757,23 @@ impl PostgresDriver {
             .collect())
     }
 
+    /// `CREATE OR REPLACE VIEW` DDL for one view, for SQL export.
+    /// `pg_get_viewdef(..., true)` pretty-prints the underlying SELECT.
+    pub async fn view_definition(&self, schema: &str, name: &str) -> Result<String, AdapterError> {
+        let body: String = sqlx::query_scalar(
+            "SELECT pg_get_viewdef(format('%I.%I', $1::text, $2::text)::regclass, true)",
+        )
+        .bind(schema)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await?;
+        let qschema = format!("\"{}\"", schema.replace('"', "\"\""));
+        let qname = format!("\"{}\"", name.replace('"', "\"\""));
+        // pg_get_viewdef returns the SELECT body, sometimes with a trailing ';'.
+        let body = body.trim().trim_end_matches(';');
+        Ok(format!("CREATE OR REPLACE VIEW {qschema}.{qname} AS\n{body};"))
+    }
+
     pub async fn list_routines(
         &self,
         schema: &str,
@@ -1208,6 +1314,37 @@ impl PostgresDriver {
 /// Parse `SHOW server_version` (e.g. `"16.2"`) into (major, minor) +
 /// detect the flavor from the banner. EDB/Greenplum/Timescale all ship
 /// identifiable strings in `version()`.
+/// Format a byte count as a human-readable size (e.g. `1.5 GB`).
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
+}
+
+/// Format a duration in seconds as `Xd Yh Zm` (or smaller units when short).
+fn human_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let mins = (secs % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {}s", secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn parse_pg_version(
     banner: &str,
     short: &str,

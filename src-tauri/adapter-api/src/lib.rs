@@ -73,7 +73,7 @@ pub use manifest::{
 pub use types::{
     BrowseResult, ColumnInfo, ColumnMeta, CommandWarning, ConnectionProfile, ForeignKey, IndexInfo,
     KillResult, ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam,
-    SaveTriggerRequest, SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind,
+    SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind,
     TableStructure, TriggerDefinition, TriggerInfo, ViewInfo, WarningKind,
 };
 
@@ -89,6 +89,21 @@ pub trait Adapter: Send + Sync {
 
     /// Round-trip check. Returns server identity + default schema.
     async fn ping(&self) -> Result<ServerInfo, AdapterError>;
+
+    /// Live server/database statistics for the connection "Information" dialog:
+    /// default collation/charset, on-disk size, table/collection count, server
+    /// uptime, active connections, and so on. `schema` is the
+    /// currently-focused database, so size/collation can be scoped to it.
+    ///
+    /// Each adapter returns whatever is meaningful for its engine, already
+    /// formatted for display. Default is empty — the dialog then shows only the
+    /// connection profile fields.
+    async fn server_details(
+        &self,
+        _schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        Ok(Vec::new())
+    }
 
     // ---- schema introspection -----------------------------------------
 
@@ -151,6 +166,19 @@ pub trait Adapter: Send + Sync {
     async fn list_views(&self, _schema: &str) -> Result<Vec<ViewInfo>, AdapterError> {
         Err(AdapterError::Unsupported(
             "list_views not implemented for this adapter".into(),
+        ))
+    }
+
+    /// `CREATE VIEW` DDL for one view, used by SQL export. Default
+    /// `Unsupported` — adapters without views (or without a way to render the
+    /// DDL) leave it, and the export simply skips views for that driver.
+    async fn view_definition(
+        &self,
+        _schema: &str,
+        _name: &str,
+    ) -> Result<String, AdapterError> {
+        Err(AdapterError::Unsupported(
+            "view_definition not implemented for this adapter".into(),
         ))
     }
 
@@ -234,6 +262,26 @@ pub trait Adapter: Send + Sync {
         &self,
         req: CountRequest,
     ) -> Result<Option<u64>, AdapterError>;
+
+    /// Fetch one full record by primary-key value, untruncated.
+    ///
+    /// Adapters whose `browse` returns size-capped previews of huge values
+    /// (Mongo) override this so the UI can lazy-load the complete record when
+    /// the user opens a single row. `id` is the JSON form of the record's
+    /// primary key. Returns `None` if no record matches.
+    ///
+    /// Default returns `Unsupported` — SQL adapters return full values in
+    /// `browse` already and don't need a second fetch.
+    async fn get_record(
+        &self,
+        _schema: &str,
+        _table: &str,
+        _id: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, AdapterError> {
+        Err(AdapterError::Unsupported(
+            "get_record not implemented for this adapter".into(),
+        ))
+    }
 
     // ---- data mutation -------------------------------------------------
 

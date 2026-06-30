@@ -10,6 +10,7 @@ import {
   truncateForCell,
   CELL_MAX_RENDER_CHARS,
 } from "./data-grid-utils";
+import { isPreviewMarker, formatPreviewMarker } from "./preview-marker";
 
 interface DataRowProps {
   row: GridRow;
@@ -159,13 +160,21 @@ function DataCell({
       ? editedCells[cellKey]
       : row[col];
   const isNull = rawValue === null || rawValue === undefined;
+  // Oversized values come back from browse as a preview stub (see
+  // preview-marker.ts): the backend didn't ship the full value to keep the
+  // page small. Render a friendly summary and treat the cell as read-only —
+  // the real value is reachable by opening the row's JSON view, which fetches
+  // the full document on demand.
+  const isPreview = isPreviewMarker(rawValue);
   // Real cell value is always '' for NULL (edit/length/blob logic keys off
   // an empty string); the NULL marker is purely a display concern.
   const fullValue = isNull
     ? ""
-    : typeof rawValue === "object"
-      ? JSON.stringify(rawValue)
-      : String(rawValue);
+    : isPreview
+      ? formatPreviewMarker(rawValue)
+      : typeof rawValue === "object"
+        ? JSON.stringify(rawValue)
+        : String(rawValue);
   // Display-only marker for NULL cells, per the user's nullDisplay setting.
   const nullMarker =
     isNull && nullDisplay === "null-text"
@@ -210,13 +219,16 @@ function DataCell({
         : value;
 
   const handleDoubleClick = useCallback(() => {
+    // A preview stub isn't the real value — editing the summary string would
+    // write garbage back. Open the row's JSON view to see/edit the full doc.
+    if (isPreview) return;
     // Editing a BLOB in a tiny text box would corrupt it — bail.
     if (isBlobCol && fullValue.length > 0) return;
     // Huge text values open the editor fine, but we pass the full
     // value so the user can actually edit what's there, not the
     // truncated display string.
     onBeginEdit(row.__rowId, col, fullValue);
-  }, [isBlobCol, fullValue, onBeginEdit, row.__rowId, col]);
+  }, [isPreview, isBlobCol, fullValue, onBeginEdit, row.__rowId, col]);
   const handleContextMenu = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
@@ -248,7 +260,7 @@ function DataCell({
         />
       ) : (
         <div
-          className={`px-4 py-1.5 truncate ${isBlobCol && fullValue.length > 0 ? "italic text-muted-foreground" : ""} ${isNull && nullMarker ? "text-muted-foreground/40" : ""}`}
+          className={`px-4 py-1.5 truncate ${(isBlobCol && fullValue.length > 0) || isPreview ? "italic text-muted-foreground" : ""} ${isNull && nullMarker ? "text-muted-foreground/40" : ""}`}
         >
           {isNull && nullMarker ? nullMarker : value}
           {didTruncate && !isBlobCol && (

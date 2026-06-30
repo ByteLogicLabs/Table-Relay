@@ -110,6 +110,24 @@ pub async fn db_list_views(
     .await
 }
 
+/// `CREATE VIEW` DDL for one view, used by SQL export.
+#[tauri::command]
+pub async fn db_view_definition(
+    app: AppHandle,
+    connection_id: String,
+    schema: String,
+    name: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<String, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let schema = schema.clone();
+        let name = name.clone();
+        async move { a.view_definition(&schema, &name).await }
+    })
+    .await
+}
+
 #[tauri::command]
 pub async fn db_list_routines(
     app: AppHandle,

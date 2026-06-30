@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use adapter_api::{AdapterError, BrowseRequest, BrowseResult, Page, QueryResult, StatementResult};
+use adapter_api::{AdapterError, BrowseRequest, BrowseResult, Page, QueryResult, ServerDetail, StatementResult};
 use tauri::{ipc::Channel, AppHandle, State};
 
 use crate::db::adapter_registry::FactoryRegistry;
@@ -117,6 +117,47 @@ pub async fn db_browse(
             include_total: request.include_total,
         };
         async move { a.browse(req).await }
+    })
+    .await
+}
+
+/// Live server/database statistics for the connection "Information" dialog
+/// (collation, on-disk size, table count, uptime, …). `schema` scopes the
+/// database-specific stats to the focused database. Empty for adapters that
+/// don't implement it.
+#[tauri::command]
+pub async fn db_server_details(
+    app: AppHandle,
+    connection_id: String,
+    schema: Option<String>,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<Vec<ServerDetail>, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let schema = schema.clone();
+        async move { a.server_details(schema.as_deref()).await }
+    })
+    .await
+}
+
+/// Fetch one full record by primary-key value, untruncated. Used by the grid's
+/// row-open / JSON-edit view for adapters (Mongo) whose `browse` returns
+/// size-capped previews of huge values. Returns `null` if no record matches.
+#[tauri::command]
+pub async fn db_get_record(
+    app: AppHandle,
+    connection_id: String,
+    schema: String,
+    table: String,
+    id: serde_json::Value,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<Option<serde_json::Value>, AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let schema = schema.clone();
+        let table = table.clone();
+        let id = id.clone();
+        async move { a.get_record(&schema, &table, &id).await }
     })
     .await
 }

@@ -55,9 +55,10 @@ export default function ConnectionExportDialog({
     cancelRef.current = false;
     const log: ProgressLogLine[] = [];
     const total = config.targets.length;
-    // Per-table progress: index of the table currently streaming + its row counts.
-    let tableIndex = 0;
-    let lastTable = '';
+    const objects =
+      config.views.length + config.routines.length + config.triggers.length;
+    // Track the base step label so the log gets one line per object/table.
+    let lastLabel = '';
 
     const update = (patch: Partial<ProgressState>) =>
       setProgress((prev) => ({
@@ -79,37 +80,32 @@ export default function ConnectionExportDialog({
         path,
         splitBytes: config.splitMb != null ? config.splitMb * 1024 * 1024 : null,
         cancelRef,
-        onProgress: ({ rows, total: tableTotal, table }) => {
-          if (table !== lastTable) {
-            if (lastTable) log.push({ text: `✓ ${lastTable}`, kind: 'success' });
-            lastTable = table;
-            tableIndex += 1;
-            log.push({ text: `→ Exporting ${table}…` });
+        // runExport reports ONE overall fraction across every table + object.
+        onProgress: ({ fraction, label, detail }) => {
+          if (label !== lastLabel) {
+            lastLabel = label;
+            log.push({ text: `→ ${label}` });
           }
-          // Overall fraction: completed tables + this table's row progress.
-          const tableFrac = tableTotal ? Math.min(1, rows / tableTotal) : 0;
-          const fraction = Math.min(1, (tableIndex - 1 + tableFrac) / total);
           update({
-            // Once cancel is requested, keep the "Cancelling…" message instead of
-            // overwriting it with ongoing per-page progress.
             step: cancelRef.current
               ? 'Cancelling… (finishing current page)'
-              : `Exporting ${table} (${tableIndex}/${total})`,
+              : label,
             fraction,
-            detail: tableTotal
-              ? `${rows.toLocaleString()} / ${tableTotal.toLocaleString()} rows`
-              : `${rows.toLocaleString()} rows`,
+            detail,
           });
         },
       });
-      if (lastTable) log.push({ text: `✓ ${lastTable}`, kind: 'success' });
 
       if (cancelRef.current) {
         log.push({ text: 'Cancelled — partial file(s) written.', kind: 'error' });
         update({ step: 'Cancelled', phase: 'cancelled', fraction: null });
         return;
       }
-      const what = `${total.toLocaleString()} ${total === 1 ? 'table' : 'tables'}`;
+      const bits = [
+        total ? `${total} ${total === 1 ? 'table' : 'tables'}` : null,
+        objects ? `${objects} object${objects === 1 ? '' : 's'}` : null,
+      ].filter(Boolean);
+      const what = bits.join(' + ') || 'data';
       const extras = [config.gzip ? 'gzip' : null, parts > 1 ? `${parts} parts` : null].filter(Boolean);
       log.push({ text: `Done — exported ${what}${extras.length ? ` (${extras.join(', ')})` : ''}`, kind: 'success' });
       update({ step: 'Export complete', phase: 'done', fraction: 1 });
@@ -146,6 +142,7 @@ export default function ConnectionExportDialog({
       <ExportModal
         isOpen={isOpen && !progress}
         onClose={onClose}
+        connectionId={connectionId}
         schemas={schemas}
         initialSchema={firstSchema}
         initialTable={firstTable}

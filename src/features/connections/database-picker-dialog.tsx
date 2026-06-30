@@ -481,7 +481,9 @@ export default function DatabasePickerDialog({
                   >
                     <Database className="w-4 h-4 shrink-0" />
                     <span className="flex-1 truncate">{s.name}</span>
-                    <span className="text-[10px] text-muted-foreground">{s.tables.length}</span>
+                    {/* No table-count badge: the picker lists database names
+                        without eagerly loading each one's tables, so the count
+                        was always "0" and misleading. */}
                   </button>
                 );
               })}

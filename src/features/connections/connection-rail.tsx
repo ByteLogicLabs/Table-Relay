@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import SettingsDialog from '../settings/settings-dialog';
 import { ConnectionProfile } from '../../types';
 import MacWindowControls from '../workspace/mac-window-controls';
-import { Database, Unplug, Pencil, FileUp, FileDown, Loader2, Copy, Power } from 'lucide-react';
+import { Database, Unplug, Pencil, FileUp, FileDown, Loader2, Copy, Power, Info, Eye, EyeOff, KeyRound } from 'lucide-react';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -10,10 +10,20 @@ import {
   ContextMenuTrigger,
   ContextMenuSeparator,
 } from '../../components/ui/context-menu';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../../components/ui/dialog';
+import { Button } from '../../components/ui/button';
 import { refreshRail, unpinTile, useRail, unpinManyTiles } from '../../state/rail';
 import { useConnections } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
 import { copyText } from '../../lib/clipboard';
+import { db, isDbError, type ServerDetail } from '../../lib/db';
 import { SSH_BADGE_CLASS } from '../../lib/driver-colors';
 import { isUriHost } from '../../lib/connection-display';
 import type { RailTile } from '../../lib/rail';
@@ -100,6 +110,229 @@ function buildFullInfo(c: ConnectionProfile): string {
   return lines.join('\n');
 }
 
+/** Labeled field for the Information dialog. `secret` fields are masked in the
+ *  on-screen view but still copied by "Copy with credentials". */
+interface InfoField {
+  label: string;
+  value: string;
+  secret?: boolean;
+}
+
+/** Every connection field as display rows. Passwords/passphrases are flagged
+ *  `secret` so the dialog can mask them on screen while still copying them. */
+function buildInfoFields(c: ConnectionProfile): InfoField[] {
+  const fields: InfoField[] = [];
+  const add = (label: string, value: unknown, secret = false) => {
+    if (value !== undefined && value !== null && value !== '') {
+      fields.push({ label, value: String(value), secret });
+    }
+  };
+  add('Name', c.name);
+  add('Driver', c.driver);
+  add('Host', c.host);
+  add('Port', c.port);
+  add('User', c.user);
+  add('Password', c.password, true);
+  add('Database', c.database);
+  add('SSL Mode', c.sslMode);
+  if (c.sshEnabled) {
+    add('SSH Host', c.sshHost);
+    add('SSH Port', c.sshPort);
+    add('SSH User', c.sshUser);
+    add('SSH Auth', c.sshAuthKind);
+    add('SSH Key Path', c.sshKeyPath);
+    add('SSH Password', c.sshPassword, true);
+    add('SSH Key Passphrase', c.sshKeyPassphrase, true);
+  }
+  const uri = buildConnectionString(c);
+  if (uri) add('Connection String', uri, true);
+  return fields;
+}
+
+/** Connection "Information" dialog: connection profile fields plus live server
+ *  stats (collation, on-disk size, uptime, …) fetched from the backend.
+ *  Secrets are masked on screen with a reveal toggle, and two copy actions
+ *  (without / with credentials) are offered. */
+function InfoDialog({
+  server,
+  schema,
+  connected,
+  open,
+  onOpenChange,
+}: {
+  server: ConnectionProfile | null;
+  schema: string | null;
+  connected: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [reveal, setReveal] = useState(false);
+  const [serverStats, setServerStats] = useState<ServerDetail[] | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState<string | null>(null);
+
+  // Re-mask whenever the dialog opens for a (possibly different) server.
+  useEffect(() => {
+    if (open) setReveal(false);
+  }, [open, server?.id]);
+
+  // Fetch live server stats when the dialog opens for a connected server.
+  useEffect(() => {
+    if (!open || !server) {
+      setServerStats(null);
+      setStatsError(null);
+      return;
+    }
+    if (!connected) {
+      // No active adapter to query — show profile fields only.
+      setServerStats(null);
+      setStatsError(null);
+      return;
+    }
+    let cancelled = false;
+    setStatsLoading(true);
+    setStatsError(null);
+    void (async () => {
+      try {
+        const details = await db.serverDetails(server.id, schema);
+        if (!cancelled) setServerStats(details);
+      } catch (e) {
+        if (!cancelled) {
+          setServerStats(null);
+          setStatsError(isDbError(e) ? e.message : String(e));
+        }
+      } finally {
+        if (!cancelled) setStatsLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, server, schema, connected]);
+
+  const fields = server ? buildInfoFields(server) : [];
+
+  const handleToggleReveal = useCallback(() => setReveal((v) => !v), []);
+  const handleCopyPublic = useCallback(() => {
+    if (!server) return;
+    // Public copy: everything except secrets.
+    const text = buildInfoFields(server)
+      .filter((f) => !f.secret)
+      .map((f) => `${f.label}: ${f.value}`)
+      .join('\n');
+    void copyText(text, 'Copied connection info (no credentials)');
+  }, [server]);
+  const handleCopyWithCreds = useCallback(() => {
+    if (!server) return;
+    void copyText(buildFullInfo(server), 'Copied connection info (with credentials)');
+  }, [server]);
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Info className="w-4 h-4 text-primary" />
+            {server?.name ?? 'Connection'} · Information
+          </DialogTitle>
+          <DialogDescription>
+            Connection settings and live server stats. Passwords are hidden
+            here; use <span className="font-medium">Copy with credentials</span>{' '}
+            to include them.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex flex-col gap-4 max-h-[60vh] overflow-y-auto">
+          {/* Connection profile fields. */}
+          <section>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">
+              Connection
+            </h3>
+            <div className="rounded-md border border-border/60 divide-y divide-border/40 text-sm">
+              {fields.map((f) => (
+                <div key={f.label} className="flex items-start gap-3 px-3 py-2">
+                  <span className="w-40 shrink-0 text-xs text-muted-foreground">
+                    {f.label}
+                  </span>
+                  <span className="min-w-0 flex-1 font-mono text-xs break-all">
+                    {f.secret && !reveal ? '••••••••' : f.value}
+                  </span>
+                </div>
+              ))}
+              {fields.length === 0 && (
+                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                  No connection details available.
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* Live server / database stats (collation, size, uptime, …). */}
+          <section>
+            <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground mb-1.5">
+              Server
+            </h3>
+            <div className="rounded-md border border-border/60 divide-y divide-border/40 text-sm">
+              {!connected ? (
+                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                  Connect to this server to see live details (collation, size,
+                  uptime, …).
+                </div>
+              ) : statsLoading ? (
+                <div className="px-3 py-4 flex items-center justify-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading server
+                  details…
+                </div>
+              ) : statsError ? (
+                <div className="px-3 py-3 text-xs text-destructive break-all">
+                  Couldn’t load server details: {statsError}
+                </div>
+              ) : serverStats && serverStats.length > 0 ? (
+                serverStats.map((d) => (
+                  <div key={d.label} className="flex items-start gap-3 px-3 py-2">
+                    <span className="w-40 shrink-0 text-xs text-muted-foreground">
+                      {d.label}
+                    </span>
+                    <span className="min-w-0 flex-1 font-mono text-xs break-all">
+                      {d.value}
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="px-3 py-4 text-center text-xs text-muted-foreground">
+                  No additional server details available for this driver.
+                </div>
+              )}
+            </div>
+          </section>
+        </div>
+
+        <DialogFooter className="sm:justify-between gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleToggleReveal}
+            className="gap-1.5"
+          >
+            {reveal ? (
+              <EyeOff className="w-3.5 h-3.5" />
+            ) : (
+              <Eye className="w-3.5 h-3.5" />
+            )}
+            {reveal ? 'Hide secrets' : 'Reveal secrets'}
+          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={handleCopyPublic} className="gap-1.5">
+              <Copy className="w-3.5 h-3.5" /> Copy info
+            </Button>
+            <Button size="sm" onClick={handleCopyWithCreds} className="gap-1.5">
+              <KeyRound className="w-3.5 h-3.5" /> Copy with credentials
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 interface RailTileRowProps {
   tile: RailTile;
   server: ConnectionProfile | undefined;
@@ -116,6 +349,7 @@ interface RailTileRowProps {
   onImportSql: (serverId: string) => void;
   onExport: (serverId: string) => void;
   onDisconnectServer: (serverId: string) => void;
+  onShowInfo: (server: ConnectionProfile, schema: string | null) => void;
   supportsImport: (serverId: string) => boolean;
   supportsExport: (serverId: string) => boolean;
 }
@@ -136,6 +370,7 @@ function RailTileRow({
   onImportSql,
   onExport,
   onDisconnectServer,
+  onShowInfo,
   supportsImport,
   supportsExport,
 }: RailTileRowProps) {
@@ -155,10 +390,22 @@ function RailTileRow({
       : [primary, secondary].join('\n');
     void copyText(text, server ? 'Copied connection info (with credentials)' : 'Copied pin info');
   }, [server, primary, secondary]);
+  const handleShowInfo = useCallback(() => {
+    if (server) onShowInfo(server, tile.databaseName || null);
+  }, [onShowInfo, server, tile.databaseName]);
   const handleDisconnect = useCallback(() => {
-    if (server && connected) onDisconnectServer(server.id);
+    // Multiple tiles can pin the same server (e.g. two databases on one
+    // connection); they all share ONE backend adapter. Only tear the adapter
+    // down when THIS is the last tile for the server — otherwise we'd kill the
+    // pool the sibling tiles are still using, and their next op would trip the
+    // reconnect supervisor (a phantom "Reconnecting…" on a connection the user
+    // never touched). When siblings remain, just unpin this tile.
+    const siblingsRemain = tiles.some(
+      t => t.id !== tile.id && t.serverId === tile.serverId,
+    );
+    if (server && connected && !siblingsRemain) onDisconnectServer(server.id);
     void unpinTile(tile.id);
-  }, [server, connected, onDisconnectServer, tile.id]);
+  }, [server, connected, onDisconnectServer, tile.id, tile.serverId, tiles]);
   const handleDisconnectOthers = useCallback(() => {
     const others = tiles.filter(t => t.id !== tile.id);
     const otherServerIds = new Set(others.map(t => t.serverId));
@@ -254,6 +501,11 @@ function RailTileRow({
             <FileDown className="w-3.5 h-3.5 mr-2" /> Export data…
           </ContextMenuItem>
         )}
+        {server && (
+          <ContextMenuItem onClick={handleShowInfo}>
+            <Info className="w-3.5 h-3.5 mr-2" /> Information
+          </ContextMenuItem>
+        )}
         <ContextMenuItem onClick={handleCopyInfo}>
           <Copy className="w-3.5 h-3.5 mr-2" /> Copy info
         </ContextMenuItem>
@@ -307,6 +559,20 @@ export default function ConnectionRail({
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<string | undefined>(undefined);
+  // Connection whose "Information" dialog is open (null = closed). Carries the
+  // focused database so live stats (size/collation) scope correctly.
+  const [infoState, setInfoState] = useState<{
+    server: ConnectionProfile;
+    schema: string | null;
+  } | null>(null);
+  const handleShowInfo = useCallback(
+    (s: ConnectionProfile, schema: string | null) =>
+      setInfoState({ server: s, schema }),
+    [],
+  );
+  const handleInfoOpenChange = useCallback((open: boolean) => {
+    if (!open) setInfoState(null);
+  }, []);
   useEffect(() => {
     const handler = (e: Event) => {
       const section = (e as CustomEvent<{ section?: string }>).detail?.section;
@@ -433,6 +699,7 @@ export default function ConnectionRail({
               onImportSql={onImportSql}
               onExport={onExport}
               onDisconnectServer={onDisconnectServer}
+              onShowInfo={handleShowInfo}
               supportsImport={supportsImport}
               supportsExport={supportsExport}
             />
@@ -450,6 +717,15 @@ export default function ConnectionRail({
           mounted to serve `tablerelay:open-settings` deep links (e.g. opening
           straight to AI settings). */}
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} initialSection={settingsSection} />
+      <InfoDialog
+        server={infoState?.server ?? null}
+        schema={infoState?.schema ?? null}
+        connected={
+          infoState ? connectedServerIds.has(infoState.server.id) : false
+        }
+        open={infoState !== null}
+        onOpenChange={handleInfoOpenChange}
+      />
     </div>
   );
 }

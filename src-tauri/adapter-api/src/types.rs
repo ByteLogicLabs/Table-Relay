@@ -63,6 +63,18 @@ pub struct ServerInfo {
     pub default_schema: Option<String>,
 }
 
+/// One labeled server/database statistic for the connection "Information"
+/// dialog (server version, default collation, on-disk size, table count,
+/// uptime, …). Adapters return whatever is meaningful for their engine as
+/// pre-formatted display strings; the UI renders them verbatim as label/value
+/// rows, so adapters own the formatting (human-readable byte sizes, etc.).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ServerDetail {
+    pub label: String,
+    pub value: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SchemaInfo {

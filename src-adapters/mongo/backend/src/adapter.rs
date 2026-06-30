@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use adapter_api::{
     Adapter, AdapterError, BrowseRequest, BrowseResult, CommandWarning, CountRequest,
-    ModifyIndexesRequest, MutateRequest, Mutation, ProcessInfo, QueryResult, SchemaInfo, ServerInfo,
-    TableStructure,
+    ModifyIndexesRequest, MutateRequest, Mutation, ProcessInfo, QueryResult, SchemaInfo,
+    ServerDetail, ServerInfo, TableStructure,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -46,6 +46,13 @@ impl Adapter for MongoAdapter {
         self.driver.ping().await
     }
 
+    async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        self.driver.server_details(schema).await
+    }
+
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
         self.driver.list_schemas().await
     }
@@ -78,6 +85,15 @@ impl Adapter for MongoAdapter {
         req: CountRequest,
     ) -> Result<Option<u64>, AdapterError> {
         self.driver.count_records(req).await
+    }
+
+    async fn get_record(
+        &self,
+        schema: &str,
+        table: &str,
+        id: &serde_json::Value,
+    ) -> Result<Option<serde_json::Value>, AdapterError> {
+        self.driver.get_document(schema, table, id).await
     }
 
     async fn mutate(&self, req: MutateRequest) -> Result<Mutation, AdapterError> {

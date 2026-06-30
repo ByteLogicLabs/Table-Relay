@@ -52,6 +52,11 @@ import {
 } from "../../components/ui/dialog";
 import { toast } from "sonner";
 import ExportModal, { type ExportConfig } from "./export-modal";
+import { runExport, type ExportDialect } from "./export-data";
+import ProgressDialog, {
+  type ProgressState,
+  type ProgressLogLine,
+} from "../../components/ui/progress-dialog";
 import { ConnectionProfile, DataViewMode } from "../../types";
 import DiagramView from "../diagram/diagram-view";
 import SchemaView, { type SchemaViewHandle } from "../schema/schema-view";
@@ -99,15 +104,14 @@ import {
   parseClipboardTable,
   type GridRow,
   rowHasData,
-  csvCell,
   type GridData,
   EMPTY_DATA,
   KEY_SEP,
   pad,
 } from "./data-grid-utils";
-import { ExportWriter } from "./export-writer";
 import { copyText } from "../../lib/clipboard";
 import { DataRow, SharedContextMenu } from "./data-row";
+import { rowHasPreview } from "./preview-marker";
 
 interface LogQueryOptions {
   source?: "editor" | "grid" | "system";
@@ -218,12 +222,8 @@ export default function DataGrid({
   );
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   // Live export progress. `null` = no export running; otherwise drives the
-  // progress toast. `exportCancelRef` lets the Cancel button abort the loop.
-  const [exportProgress, setExportProgress] = useState<{
-    rows: number;
-    total: number | null;
-    table: string;
-  } | null>(null);
+  // ProgressDialog (a real 0-100% bar). `exportCancelRef` aborts the loop.
+  const [exportProgress, setExportProgress] = useState<ProgressState | null>(null);
   const exportCancelRef = useRef(false);
   const [draftFilters, setDraftFilters] = useState<FilterCondition[]>([]);
   const [appliedFilters, setAppliedFilters] = useState<FilterCondition[]>([]);
@@ -529,6 +529,75 @@ export default function DataGrid({
     setJsonDirty(false);
     setJsonError(null);
   }, [jsonRowsText]);
+
+  // Lazy-hydrate oversized documents when the user opens the JSON view.
+  //
+  // For document stores (Mongo), `browse` ships size-capped previews of huge
+  // field values to keep the page small (see preview-marker.ts). The table
+  // view renders those as read-only stubs, but the JSON view shows AND edits
+  // the raw documents — a stub there would both mislead the user and, worse,
+  // get written back verbatim on save, corrupting the document. So before the
+  // JSON view is usable we fetch the full record for every row that carries a
+  // preview marker (by `_id`) and splice the complete values into grid state.
+  const hydratingRef = useRef(false);
+  useEffect(() => {
+    if (viewMode !== "json" || !isDocumentStore) return;
+    if (jsonDirty || hydratingRef.current) return;
+    const idCol = structure?.primaryKey[0];
+    if (!idCol) return;
+    const stubRows = data.rows.filter((r) => rowHasPreview(r));
+    if (stubRows.length === 0) return;
+
+    hydratingRef.current = true;
+    void (async () => {
+      try {
+        const full = await Promise.all(
+          stubRows.map(async (r) => {
+            const id = r[idCol];
+            const rec = (await db.getRecord(
+              connectionId,
+              schema,
+              tableName,
+              id,
+            )) as Record<string, unknown> | null;
+            return { rowId: r.__rowId, rec };
+          }),
+        );
+        const byRowId = new Map(
+          full
+            .filter((f) => f.rec !== null)
+            .map((f) => [f.rowId, f.rec as Record<string, unknown>]),
+        );
+        if (byRowId.size === 0) return;
+        setData((prev) => ({
+          cols: prev.cols,
+          // Merge the full field values over the stub row, preserving the
+          // synthetic __rowId so selection / edit bookkeeping still lines up.
+          rows: prev.rows.map((r) => {
+            const rec = byRowId.get(r.__rowId);
+            return rec ? { ...r, ...rec, __rowId: r.__rowId } : r;
+          }),
+        }));
+      } catch (e) {
+        toast.error(
+          `Failed to load full document${stubRows.length > 1 ? "s" : ""}: ${
+            isDbError(e) ? e.message : String(e)
+          }`,
+        );
+      } finally {
+        hydratingRef.current = false;
+      }
+    })();
+  }, [
+    viewMode,
+    isDocumentStore,
+    jsonDirty,
+    data.rows,
+    structure,
+    connectionId,
+    schema,
+    tableName,
+  ]);
 
   // When the query returned zero rows we still want the table to feel present:
   // render headers from the last query's cols if available, or fall back to
@@ -976,34 +1045,19 @@ export default function DataGrid({
       window.removeEventListener("tablerelay:menu-export", onMenuExport);
   }, [tabId]);
 
-  // Live export progress toast with a Cancel action. A single persistent toast
-  // (id "data-export") is updated as `exportProgress` changes and dismissed
-  // when the export ends.
-  useEffect(() => {
-    const TOAST_ID = "data-export";
-    if (!exportProgress) {
-      toast.dismiss(TOAST_ID);
-      return;
-    }
-    const { rows, total, table } = exportProgress;
-    const pct = total && total > 0 ? Math.min(100, Math.round((rows / total) * 100)) : null;
-    const count = total != null
-      ? `${rows.toLocaleString()} / ${total.toLocaleString()} rows`
-      : `${rows.toLocaleString()} rows`;
-    toast.loading(
-      `Exporting ${table} — ${count}${pct != null ? ` (${pct}%)` : ""}`,
-      {
-        id: TOAST_ID,
-        duration: Infinity,
-        action: {
-          label: "Cancel",
-          onClick: () => {
-            exportCancelRef.current = true;
-          },
-        },
-      },
+  // Export progress is rendered as a ProgressDialog (a real 0-100% bar), driven
+  // by `exportProgress` — see handleExport + the ProgressDialog at the bottom.
+  const handleExportCancel = useCallback(() => {
+    exportCancelRef.current = true;
+    setExportProgress((p) =>
+      p && p.phase === "running"
+        ? { ...p, step: "Cancelling… (finishing current page)" }
+        : p,
     );
-  }, [exportProgress]);
+  }, []);
+  const handleExportProgressClose = useCallback(() => {
+    setExportProgress((p) => (p && p.phase === "running" ? p : null));
+  }, []);
 
   // Top progress bar driver. When any async work is active we creep from 0 to
   // 90 with an easing curve (fast at first, slow near the top) so long queries
@@ -2102,6 +2156,17 @@ export default function DataGrid({
     for (const row of rowsForView) {
       originalsById.set(idKey(row), row);
     }
+    // Safety net: a row still holding a preview stub means its full document
+    // never loaded (fetch failed, or the doc was deleted under us). Diffing /
+    // writing against a stub would corrupt the document, so refuse the save
+    // and tell the user to refresh.
+    if (rowsForView.some((r) => rowHasPreview(r))) {
+      setJsonError(
+        "Some documents are too large and haven't fully loaded yet. " +
+          "Refresh the grid and reopen the JSON view before saving.",
+      );
+      return;
+    }
     const realCols = new Set(structure.columns.map((c) => c.name));
     const pkColSet = new Set(pkCols);
     type Patch = {
@@ -2267,10 +2332,14 @@ export default function DataGrid({
   const handleExport = async (config: ExportConfig) => {
     const ext = config.format + (config.gzip ? ".gz" : "");
     const first = config.targets[0];
-    const safeTarget =
-      config.targets.length === 1
-        ? `${first.schema}_${first.table}`.replace(/[^\w.-]+/g, "_")
-        : `${first.schema}_export`.replace(/[^\w.-]+/g, "_");
+    // Filename: single table → schema_table; otherwise (multi-table or
+    // objects-only) → schema_export.
+    const base = first
+      ? config.targets.length === 1
+        ? `${first.schema}_${first.table}`
+        : `${first.schema}_export`
+      : `${config.schema || "export"}_export`;
+    const safeTarget = base.replace(/[^\w.-]+/g, "_");
     const baseFilter =
       config.format === "json"
         ? { name: "JSON", extensions: config.gzip ? ["json.gz"] : ["json"] }
@@ -2284,279 +2353,71 @@ export default function DataGrid({
     });
     if (!path) return;
 
+    // Hand off from the export modal to the progress dialog.
+    setIsExportModalOpen(false);
     exportCancelRef.current = false;
-    setExportProgress({ rows: 0, total: null, table: first.table });
+    const log: ProgressLogLine[] = [];
+    let lastLabel = "";
+    setExportProgress({ step: "Starting export…", fraction: 0, phase: "running", log: [] });
     const splitBytes = config.splitMb != null ? config.splitMb * 1024 * 1024 : null;
+    // Map the grid's richer Dialect to the export-layer's dialect (generic /
+    // none have no SQL output, so they become null).
+    const exportDialect: ExportDialect =
+      dialect === "mysql" || dialect === "postgres" || dialect === "sqlite"
+        ? dialect
+        : null;
     try {
-      const parts = await streamExport(config, path, splitBytes);
+      const parts = await runExport({
+        connectionId,
+        dialect: exportDialect,
+        config,
+        path,
+        splitBytes,
+        cancelRef: exportCancelRef,
+        // One overall 0-100% bar across every table + object.
+        onProgress: ({ fraction, label, detail }) => {
+          if (label !== lastLabel) {
+            lastLabel = label;
+            log.push({ text: `→ ${label}` });
+          }
+          setExportProgress({
+            step: exportCancelRef.current ? "Cancelling… (finishing current page)" : label,
+            fraction,
+            detail,
+            phase: "running",
+            log: [...log],
+          });
+        },
+      });
+      const objects =
+        config.views.length + config.routines.length + config.triggers.length;
+      const bits = [
+        config.targets.length
+          ? `${config.targets.length} ${config.targets.length === 1 ? "table" : "tables"}`
+          : null,
+        objects ? `${objects} object${objects === 1 ? "" : "s"}` : null,
+      ].filter(Boolean);
+      const extras = [
+        config.gzip ? "gzip" : null,
+        parts > 1 ? `${parts} parts` : null,
+      ].filter(Boolean);
+      const what = `${bits.join(" + ") || "data"}${extras.length ? ` (${extras.join(", ")})` : ""}`;
       if (exportCancelRef.current) {
-        toast.message("Export canceled — partial file(s) written.");
+        log.push({ text: "Cancelled — partial file(s) written.", kind: "error" });
+        setExportProgress({ step: "Cancelled", fraction: null, phase: "cancelled", log: [...log] });
       } else {
-        const what = `${config.targets.length.toLocaleString()} ${config.targets.length === 1 ? "table" : "tables"}`;
-        const extras = [
-          config.gzip ? "gzip" : null,
-          parts > 1 ? `${parts} parts` : null,
-        ].filter(Boolean);
-        toast.success(`Exported ${what}${extras.length ? ` (${extras.join(", ")})` : ""}`);
+        log.push({ text: `Done — exported ${what}`, kind: "success" });
+        setExportProgress({ step: "Export complete", fraction: 1, phase: "done", log: [...log] });
+        toast.success(`Exported ${what}`);
       }
     } catch (err) {
       const msg = isDbError(err) ? err.message : String(err);
+      log.push({ text: `Error: ${msg}`, kind: "error" });
+      setExportProgress({ step: "Export failed", fraction: null, phase: "error", log: [...log] });
       toast.error(`Export failed: ${msg}`);
-      throw err;
-    } finally {
-      setExportProgress(null);
     }
   };
 
-  // Streams the export page-by-page so memory stays flat regardless of table
-  // size. Splits into part files when `splitBytes` is set; each part is a valid
-  // standalone file (CSV re-emits the header, SQL re-emits the table comment +
-  // CREATE, JSON parts are independent arrays). Returns the number of parts.
-  const streamExport = async (
-    config: ExportConfig,
-    path: string,
-    splitBytes: number | null,
-  ): Promise<number> => {
-    if (config.format === "csv") {
-      // CSV: single table (enforced by the modal). Re-emit the header at the
-      // top of every part so each file opens cleanly in a spreadsheet.
-      const target = config.targets[0];
-      let header: string | null = null;
-      const writer = await ExportWriter.create(path, config.gzip, splitBytes, {
-        onNewPart: async () => {
-          if (config.includeHeader && header) await writer.write(header + "\n");
-        },
-      });
-      try {
-        await streamRowsForExport(target.schema, target.table, async (cols, rows, isFirstPage) => {
-          if (isFirstPage) {
-            header = cols.map(csvCell).join(",");
-            if (config.includeHeader) await writer.write(header + "\n");
-          }
-          for (const row of rows) {
-            await writer.write(cols.map((c) => csvCell(row[c])).join(",") + "\n");
-            await writer.maybeRollover();
-          }
-        });
-        return writer.parts;
-      } finally {
-        await writer.close();
-      }
-    }
-
-    if (config.format === "json") {
-      // Each part is its own standalone JSON array; rollover only happens
-      // between top-level elements so files never split mid-object. The
-      // bracket bookkeeping lives in `arrayOpen`/`arrayHasItems` so the
-      // rollover hooks and the per-table transitions stay in sync — `onEndPart`
-      // closes the array only if one is currently open, and `onNewPart` opens a
-      // fresh one for the rows that continue in the next part.
-      let arrayOpen = false;
-      let arrayHasItems = false;
-      const openArray = async () => {
-        await writer.write("[");
-        arrayOpen = true;
-        arrayHasItems = false;
-      };
-      const closeArray = async () => {
-        if (!arrayOpen) return;
-        await writer.write(arrayHasItems ? "\n]\n" : "]\n");
-        arrayOpen = false;
-      };
-      const writer = await ExportWriter.create(path, config.gzip, splitBytes, {
-        onEndPart: closeArray,
-        onNewPart: openArray,
-      });
-      try {
-        for (const target of config.targets) {
-          if (exportCancelRef.current) break;
-          // Close the previous table's array (if any) and roll if oversized,
-          // then open this table's array. Each table is its own JSON array.
-          await closeArray();
-          await writer.maybeRollover();
-          await openArray();
-          await streamRowsForExport(target.schema, target.table, async (cols, rows) => {
-            for (const row of rows) {
-              const obj: Record<string, unknown> = {};
-              cols.forEach((c) => { obj[c] = row[c] ?? null; });
-              await writer.write((arrayHasItems ? "," : "") + "\n  " + JSON.stringify(obj));
-              arrayHasItems = true;
-              await writer.maybeRollover();
-            }
-          });
-        }
-        await closeArray();
-        return writer.parts;
-      } finally {
-        await writer.close();
-      }
-    }
-
-    // SQL. On each new part, re-emit the current table's comment + CREATE so the
-    // part runs standalone. We track the "current table preamble" in a ref the
-    // onNewPart hook reads.
-    let currentPreamble = "";
-    const writer = await ExportWriter.create(path, config.gzip, splitBytes, {
-      onNewPart: async () => { if (currentPreamble) await writer.write(currentPreamble); },
-    });
-    try {
-      for (const target of config.targets) {
-        if (exportCancelRef.current) break;
-        const qualified = qualifiedTableName(target.schema, target.table);
-        // Build this table's standalone preamble (comment + optional CREATE).
-        let preamble = `-- ${target.schema}.${target.table}\n`;
-        if (target.includeSchema) {
-          const structure = await ensureTableStructure(connectionId, target.schema, target.table);
-          preamble += buildCreateTableSql(structure) + "\n";
-        }
-        currentPreamble = preamble;
-        await writer.write(`-- ${target.schema}.${target.table}\n`);
-        if (target.dropIfExists) {
-          await writer.write(`DROP TABLE IF EXISTS ${qualified};\n`);
-        }
-        if (target.includeSchema) {
-          const structure = await ensureTableStructure(connectionId, target.schema, target.table);
-          await writer.write(buildCreateTableSql(structure) + "\n");
-        }
-        if (target.includeData) {
-          const structure = target.updateIfExists
-            ? await ensureTableStructure(connectionId, target.schema, target.table)
-            : null;
-          await streamRowsForExport(target.schema, target.table, async (cols, rows) => {
-            const sql = buildInsertSql(qualified, cols, rows, target.updateIfExists ? structure : null);
-            if (sql) await writer.write(sql + "\n");
-            await writer.maybeRollover();
-          });
-        }
-        await writer.write("\n");
-      }
-      return writer.parts;
-    } finally {
-      await writer.close();
-    }
-  };
-
-  const qualifiedTableName = (targetSchema: string, targetTable: string) =>
-    targetSchema ? `${qi(targetSchema)}.${qi(targetTable)}` : qi(targetTable);
-
-  const buildCreateTableSql = (table: TableStructure) => {
-    const defs = table.columns.map((col) => {
-      const parts = [qi(col.name), col.dataType || "TEXT"];
-      if (!col.nullable) parts.push("NOT NULL");
-      if (col.default !== null && col.default !== undefined) {
-        parts.push(`DEFAULT ${col.default}`);
-      }
-      return `  ${parts.join(" ")}`;
-    });
-    if (table.primaryKey.length > 0) {
-      defs.push(`  PRIMARY KEY (${table.primaryKey.map(qi).join(", ")})`);
-    }
-    return `CREATE TABLE ${qualifiedTableName(table.schema, table.name)} (\n${defs.join(",\n")}\n);`;
-  };
-
-  // Batched multi-row INSERTs: groups up to INSERT_BATCH rows into a single
-  // `INSERT INTO t (...) VALUES (...),(...),...;` statement. Far smaller files
-  // and dramatically faster to re-import than one statement per row. The upsert
-  // clause (when requested) is appended once per batched statement.
-  const INSERT_BATCH = 500;
-  const buildInsertSql = (
-    qualified: string,
-    cols: string[],
-    rows: Record<string, unknown>[],
-    table: TableStructure | null,
-  ) => {
-    if (rows.length === 0 || cols.length === 0) return "";
-    const colList = cols.map(qi).join(", ");
-    const upsert = table ? buildUpsertClause(cols, table.primaryKey) : "";
-    const out: string[] = [];
-    for (let i = 0; i < rows.length; i += INSERT_BATCH) {
-      const slice = rows.slice(i, i + INSERT_BATCH);
-      const tuples = slice
-        .map((row) => `(${cols.map((col) => sqlLiteral(row[col])).join(", ")})`)
-        .join(",\n  ");
-      out.push(`INSERT INTO ${qualified} (${colList}) VALUES\n  ${tuples}${upsert};`);
-    }
-    return out.join("\n");
-  };
-
-  const buildUpsertClause = (cols: string[], primaryKey: string[]) => {
-    const updateCols =
-      primaryKey.length > 0
-        ? cols.filter((col) => !primaryKey.includes(col))
-        : cols;
-    if (updateCols.length === 0) return "";
-
-    switch (dialect) {
-      case "mysql":
-        return ` ON DUPLICATE KEY UPDATE ${updateCols
-          .map((col) => `${qi(col)} = VALUES(${qi(col)})`)
-          .join(", ")}`;
-      case "postgres":
-        if (primaryKey.length === 0) return "";
-        return ` ON CONFLICT (${primaryKey.map(qi).join(", ")}) DO UPDATE SET ${updateCols
-          .map((col) => `${qi(col)} = EXCLUDED.${qi(col)}`)
-          .join(", ")}`;
-      case "sqlite":
-        if (primaryKey.length === 0) return "";
-        return ` ON CONFLICT (${primaryKey.map(qi).join(", ")}) DO UPDATE SET ${updateCols
-          .map((col) => `${qi(col)} = excluded.${qi(col)}`)
-          .join(", ")}`;
-      default:
-        return "";
-    }
-  };
-
-  const sqlLiteral = (value: unknown): string => {
-    if (value === null || value === undefined) return "NULL";
-    if (typeof value === "number") return Number.isFinite(value) ? String(value) : "NULL";
-    if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
-    const raw = typeof value === "object" ? JSON.stringify(value) : String(value);
-    return `'${raw.replace(/'/g, "''")}'`;
-  };
-
-  // Streams a table page-by-page, invoking `onPage` for each batch instead of
-  // accumulating every row in memory. Updates the progress toast and stops
-  // early if the user cancels. `onPage(cols, rows, isFirstPage)`.
-  const streamRowsForExport = async (
-    targetSchema: string,
-    targetTable: string,
-    onPage: (
-      cols: string[],
-      rows: Record<string, unknown>[],
-      isFirstPage: boolean,
-    ) => Promise<void>,
-  ) => {
-    const pageSize = 1000;
-    let pageNumber = 1;
-    let cols: string[] = [];
-    let total: number | null = null;
-    let fetched = 0;
-
-    for (;;) {
-      if (exportCancelRef.current) return;
-      const res = await db.browse(connectionId, {
-        schema: targetSchema,
-        table: targetTable,
-        page: { number: pageNumber, size: pageSize },
-        includeTotal: pageNumber === 1,
-      });
-      if (cols.length === 0) cols = res.columns.map((c) => c.name);
-      total = total ?? res.totalRecords;
-      const batch = res.rows.map((row) => {
-        const out: Record<string, unknown> = {};
-        cols.forEach((col, index) => {
-          out[col] = row[index] ?? null;
-        });
-        return out;
-      });
-      await onPage(cols, batch, pageNumber === 1);
-      fetched += batch.length;
-      setExportProgress({ rows: fetched, total, table: targetTable });
-      if (batch.length < pageSize) break;
-      if (total !== null && fetched >= total) break;
-      pageNumber += 1;
-    }
-  };
 
   // Keep rendered rows in a ref so the stable selection callback can read the
   // current list without changing identity on every render.
@@ -3701,12 +3562,21 @@ export default function DataGrid({
       <ExportModal
         isOpen={isExportModalOpen}
         onClose={handleExportModalClose}
+        connectionId={connectionId}
         schemas={exportSchemas}
         initialSchema={schema}
         initialTable={tableName}
         supportsUpdateIfExists={["mysql", "postgres", "sqlite"].includes(dialect)}
         supportsSql={!isDocumentStore}
         onExport={handleExport}
+      />
+
+      <ProgressDialog
+        open={exportProgress !== null}
+        title="Export Data"
+        state={exportProgress}
+        onCancel={handleExportCancel}
+        onClose={handleExportProgressClose}
       />
 
       <Dialog open={confirmDiscardOpen} onOpenChange={setConfirmDiscardOpen}>

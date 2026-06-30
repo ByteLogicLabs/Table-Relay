@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use adapter_api::{
     Adapter, AdapterError, BrowseRequest, BrowseResult, CountRequest, KillResult, MutateRequest,
-    Mutation, ProcessInfo, QueryResult, SchemaInfo, ServerInfo, SubscribeEvent, SubscribeRequest,
-    SubscriptionHandle, TableStructure,
+    Mutation, ProcessInfo, QueryResult, SchemaInfo, ServerDetail, ServerInfo, SubscribeEvent,
+    SubscribeRequest, SubscriptionHandle, TableStructure,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -46,6 +46,13 @@ impl RedisAdapter {
 impl Adapter for RedisAdapter {
     async fn ping(&self) -> Result<ServerInfo, AdapterError> {
         self.driver.ping().await
+    }
+
+    async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        self.driver.server_details(schema).await
     }
 
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
