@@ -10,7 +10,7 @@ use std::time::Instant;
 use adapter_api::log_line;
 use adapter_api::{
     AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, QueryResult, SaveTriggerRequest,
-    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
+    SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
     TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -122,6 +122,71 @@ impl SqliteDriver {
             flavor: Some("SQLite".into()),
             default_schema: Some(MAIN_SCHEMA.into()),
         })
+    }
+
+    /// Live stats for the connection "Information" dialog. Best-effort — a
+    /// failed probe is skipped. `schema` is unused (SQLite has only `main`).
+    pub async fn server_details(
+        &self,
+        _schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        let mut out: Vec<ServerDetail> = Vec::new();
+        let push = |out: &mut Vec<ServerDetail>, label: &str, value: String| {
+            if !value.is_empty() {
+                out.push(ServerDetail { label: label.into(), value });
+            }
+        };
+
+        if let Ok(v) = sqlx::query_scalar::<_, String>("SELECT sqlite_version()")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "SQLite version", v);
+        }
+        push(&mut out, "File", self.path.clone());
+        if let Ok(enc) = sqlx::query_scalar::<_, String>("PRAGMA encoding")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "Encoding", enc);
+        }
+        // On-disk size = page_count * page_size.
+        let page_count = sqlx::query_scalar::<_, i64>("PRAGMA page_count")
+            .fetch_one(&self.pool)
+            .await
+            .ok();
+        let page_size = sqlx::query_scalar::<_, i64>("PRAGMA page_size")
+            .fetch_one(&self.pool)
+            .await
+            .ok();
+        if let (Some(pc), Some(ps)) = (page_count, page_size) {
+            push(&mut out, "Database size", human_bytes((pc.max(0) * ps.max(0)) as u64));
+        }
+        if let Ok(jm) = sqlx::query_scalar::<_, String>("PRAGMA journal_mode")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "Journal mode", jm.to_uppercase());
+        }
+        // Object counts.
+        if let Ok(n) = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        {
+            push(&mut out, "Tables", n.to_string());
+        }
+        if let Ok(n) = sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM sqlite_schema WHERE type='index'",
+        )
+        .fetch_one(&self.pool)
+        .await
+        {
+            push(&mut out, "Indexes", n.to_string());
+        }
+
+        Ok(out)
     }
 
     pub async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
@@ -442,6 +507,23 @@ impl SqliteDriver {
             .collect())
     }
 
+    /// `CREATE VIEW` DDL for one view, for SQL export. SQLite stores the
+    /// original statement verbatim in `sqlite_schema.sql`.
+    pub async fn view_definition(&self, schema: &str, name: &str) -> Result<String, AdapterError> {
+        ensure_main_schema(schema)?;
+        let sql: Option<String> = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = ?",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten();
+        match sql {
+            Some(s) if !s.trim().is_empty() => Ok(format!("{};", s.trim_end().trim_end_matches(';'))),
+            _ => Err(AdapterError::NotFound(format!("view {name} not found"))),
+        }
+    }
+
     pub async fn list_triggers(&self, schema: &str) -> Result<Vec<TriggerInfo>, AdapterError> {
         ensure_main_schema(schema)?;
         // SQLite keeps the full CREATE TRIGGER text in sqlite_schema.sql and the
@@ -676,6 +758,21 @@ impl SqliteDriver {
     pub async fn shutdown(&self) {
         self.pool.close().await;
     }
+}
+
+/// Format a byte count as a human-readable size (e.g. `1.5 GB`).
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
 }
 
 fn parse_semver(raw: &str) -> (Option<u32>, Option<u32>) {

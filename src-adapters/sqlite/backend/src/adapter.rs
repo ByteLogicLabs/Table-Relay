@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use adapter_api::{
     Adapter, AdapterError, BrowseRequest, BrowseResult, CountRequest, ForeignKey, MutateRequest,
-    Mutation, QueryResult, SaveTriggerRequest, SchemaInfo, ServerInfo, TableStructure,
+    Mutation, QueryResult, SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, TableStructure,
     TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use async_trait::async_trait;
@@ -31,6 +31,13 @@ impl SqliteAdapter {
 impl Adapter for SqliteAdapter {
     async fn ping(&self) -> Result<ServerInfo, AdapterError> {
         self.driver.ping().await
+    }
+
+    async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        self.driver.server_details(schema).await
     }
 
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
@@ -61,6 +68,10 @@ impl Adapter for SqliteAdapter {
 
     async fn list_views(&self, schema: &str) -> Result<Vec<ViewInfo>, AdapterError> {
         self.driver.list_views(schema).await
+    }
+
+    async fn view_definition(&self, schema: &str, name: &str) -> Result<String, AdapterError> {
+        self.driver.view_definition(schema, name).await
     }
 
     // Stored routines: SQLite has none. Fall back to the default

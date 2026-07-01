@@ -135,6 +135,9 @@ export default function ImportSqlDialog({
   // Rich progress popup (bar + step + log + cancel) for the actual run.
   const [progress, setProgress] = useState<ProgressState | null>(null);
   const cancelRef = useRef(false);
+  // Active SQL-import query id, so the Cancel button can abort the server-side
+  // streaming run mid-flight. Null when no SQL import is running.
+  const sqlImportTabIdRef = useRef<string | null>(null);
   // Per-statement / per-row outcome tally after a run.
   const [report, setReport] = useState<{
     ok: number;
@@ -284,26 +287,90 @@ export default function ImportSqlDialog({
     }
     setExecuting(true);
     setReport(null);
-    // SQL runs as a single adapter call (the splitter lives server-side), so we
-    // can't show per-statement progress or cancel mid-run — use an indeterminate
-    // bar and disable cancel while it executes.
-    const log: ProgressLogLine[] = [{ text: `→ Executing ${fileName || 'SQL file'}…` }];
-    setProgress({ step: 'Running SQL import…', fraction: null, phase: 'running', log: [...log] });
+    cancelRef.current = false;
+    // Stream per-statement results so the bar advances 0→100% instead of
+    // spinning indefinitely. The server-side splitter is the source of truth
+    // for how many statements there really are; we don't know that up front, so
+    // we use the file's approximate `;`-terminated count as the denominator and
+    // cap the bar at 99% until the run truly finishes (the estimate can be off
+    // either way — multi-line statements undercount, semicolons in strings
+    // overcount — so it must never claim completion early).
+    const approxTotal = Math.max(
+      1,
+      (contents.match(/;\s*(\n|$)/g) ?? []).length,
+    );
+    // A synthetic tab id lets the user cancel mid-import via db.cancelQuery.
+    const tabId = `import:${connectionId}:${Date.now()}`;
+    sqlImportTabIdRef.current = tabId;
+    const log: ProgressLogLine[] = [{ text: `Importing ${fileName || 'SQL file'}…` }];
+    let executed = 0;
+    let ok = 0;
+    let failed = 0;
+    let firstError: string | null = null;
+    // Per-object log lines (like export): track the last label so we only push
+    // one line per table/view/routine, and cap error lines so a dump full of
+    // failures can't flood the box (the report still counts every failure).
+    let lastLabel = '';
+    let loggedErrors = 0;
+    const MAX_ERROR_LINES = 100;
+    const renderProgress = () =>
+      setProgress({
+        step: cancelRef.current ? 'Cancelling…' : 'Running SQL import…',
+        fraction: Math.min(0.99, executed / approxTotal),
+        detail: `${executed.toLocaleString()} / ~${approxTotal.toLocaleString()} statements${
+          failed ? ` · ${failed.toLocaleString()} failed` : ''
+        }`,
+        phase: 'running',
+        log: [...log],
+      });
+    setProgress({
+      step: 'Running SQL import…',
+      fraction: 0,
+      detail: `0 / ~${approxTotal.toLocaleString()} statements`,
+      phase: 'running',
+      log: [...log],
+    });
     try {
       const sqlToRun = buildPayload(contents, targetDatabase, dialect ?? null);
-      const result = await db.runQuery(connectionId, sqlToRun);
-      const statements = result.statements ?? [];
-      let ok = 0;
-      let failed = 0;
-      let firstError: string | null = null;
-      for (const s of statements) {
-        if (s.error) {
-          failed += 1;
-          if (!firstError) firstError = s.error;
-        } else {
-          ok += 1;
-        }
-      }
+      await db.runQueryStream(
+        connectionId,
+        sqlToRun,
+        (s) => {
+          executed += 1;
+          if (s.error) {
+            failed += 1;
+            if (!firstError) firstError = s.error;
+            if (loggedErrors < MAX_ERROR_LINES) {
+              loggedErrors += 1;
+              const where = statementLabel(s.sql);
+              log.push({
+                text: `✗ ${where ? `${where}: ` : ''}${oneLineError(s.error)}`,
+                kind: 'error',
+              });
+              if (loggedErrors === MAX_ERROR_LINES) {
+                log.push({ text: '… (further errors hidden — see report below)', kind: 'error' });
+              }
+            }
+            renderProgress();
+          } else {
+            ok += 1;
+            // Log one line per object as it's applied — gives the same
+            // step-by-step feel as the export log.
+            const label = statementLabel(s.sql);
+            if (label && label !== lastLabel) {
+              lastLabel = label;
+              log.push({ text: `→ ${label}`, kind: 'success' });
+              renderProgress();
+            } else if (executed % 25 === 0) {
+              // Throttled tick so the bar still moves through long INSERT runs.
+              renderProgress();
+            }
+          }
+        },
+        undefined,
+        undefined,
+        tabId,
+      );
       setReport({ ok, failed, firstError });
       void refreshSchemas(connectionId);
       window.dispatchEvent(
@@ -313,7 +380,7 @@ export default function ImportSqlDialog({
         log.push({ text: `Done — ${ok.toLocaleString()} statement${ok === 1 ? '' : 's'} executed`, kind: 'success' });
         setProgress({ step: 'Import complete', fraction: 1, phase: 'done', log: [...log] });
         toast.success(
-          statements.length === 1 ? 'Import complete (1 statement)' : `Import complete (${ok} statements)`,
+          executed === 1 ? 'Import complete (1 statement)' : `Import complete (${ok} statements)`,
         );
       } else {
         log.push({ text: `${failed} statement${failed === 1 ? '' : 's'} failed`, kind: 'error' });
@@ -323,11 +390,25 @@ export default function ImportSqlDialog({
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      setReport({ ok: 0, failed: 1, firstError: msg });
-      log.push({ text: `Error: ${msg}`, kind: 'error' });
-      setProgress({ step: 'Import failed', fraction: null, phase: 'error', log: [...log] });
-      toast.error(`Import failed: ${msg}`);
+      // A user cancel surfaces as a rejected stream — report it as cancelled,
+      // not a hard failure, and keep the partial tally.
+      if (cancelRef.current || /cancel/i.test(msg)) {
+        setReport({ ok, failed, firstError });
+        log.push({ text: `Cancelled — ${ok.toLocaleString()} statement${ok === 1 ? '' : 's'} executed`, kind: 'error' });
+        setProgress({ step: 'Cancelled', fraction: null, phase: 'cancelled', log: [...log] });
+        void refreshSchemas(connectionId);
+        window.dispatchEvent(
+          new CustomEvent('tablerelay:reload', { detail: { connectionId } }),
+        );
+        toast.message(`Import cancelled — ${ok.toLocaleString()} statement${ok === 1 ? '' : 's'} executed`);
+      } else {
+        setReport({ ok, failed: failed + 1, firstError: firstError ?? msg });
+        log.push({ text: `Error: ${msg}`, kind: 'error' });
+        setProgress({ step: 'Import failed', fraction: null, phase: 'error', log: [...log] });
+        toast.error(`Import failed: ${msg}`);
+      }
     } finally {
+      sqlImportTabIdRef.current = null;
       setExecuting(false);
     }
   };
@@ -438,7 +519,19 @@ export default function ImportSqlDialog({
 
   const handleProgressCancel = useCallback(() => {
     cancelRef.current = true;
-  }, []);
+    // Immediate feedback — the actual stop happens at the next statement/row
+    // boundary, which can lag a beat behind a slow in-flight statement.
+    setProgress((p) =>
+      p && p.phase === 'running'
+        ? { ...p, step: 'Cancelling… (finishing current statement)' }
+        : p,
+    );
+    // SQL import streams from the server; tell the backend to abort the run.
+    // Row import is a client-side loop and stops on the cancelRef flag alone.
+    if (sqlImportTabIdRef.current && connectionId) {
+      void db.cancelQuery(connectionId, sqlImportTabIdRef.current);
+    }
+  }, [connectionId]);
 
   const handleProgressClose = useCallback(() => {
     if (progress?.phase === 'running') return;
@@ -622,12 +715,21 @@ export default function ImportSqlDialog({
           )}
 
           {/* Target-database hint (MySQL SQL only). */}
-          {format === 'sql' && mode === 'execute' && targetDatabase && (
+          {format === 'sql' && mode === 'execute' && targetDatabase && dialect === 'mysql' && (
             <div className="text-xs text-muted-foreground">
               Runs inside{' '}
               <span className="font-mono text-foreground">{targetDatabase}</span>.
-              Dumps that declare their own <span className="font-mono">USE</span>{' '}
-              or <span className="font-mono">CREATE DATABASE</span> are left untouched.
+              A dump that targets a different database (its own{' '}
+              <span className="font-mono">USE</span>,{' '}
+              <span className="font-mono">CREATE DATABASE</span>, or{' '}
+              <span className="font-mono">db.table</span> prefixes) is redirected
+              here automatically.
+            </div>
+          )}
+          {format === 'sql' && mode === 'execute' && targetDatabase && dialect !== 'mysql' && (
+            <div className="text-xs text-muted-foreground">
+              Runs inside{' '}
+              <span className="font-mono text-foreground">{targetDatabase}</span>.
             </div>
           )}
 
@@ -722,9 +824,9 @@ export default function ImportSqlDialog({
       open={progress !== null}
       title="Import Data"
       state={progress}
-      // SQL runs as a single server-side call — there's nothing to interrupt, so
-      // don't show a Cancel that would do nothing. Row imports cancel cleanly.
-      cancellable={isRowImport}
+      // Both paths cancel cleanly now: row import stops its client-side loop,
+      // SQL import aborts the server-side streaming run via db.cancelQuery.
+      cancellable
       onCancel={handleProgressCancel}
       onClose={handleProgressClose}
     />
@@ -910,14 +1012,25 @@ function parseJsonRows(text: string): Record<string, unknown>[] {
   return out;
 }
 
-/** Build the final SQL payload sent to the adapter. Two transforms:
+/** Build the final SQL payload sent to the adapter. Three transforms:
  *
- *  1. **`USE <db>;` prefix** — MySQL dumps often omit this and the
- *     adapter's connection has no default schema set, so statements
- *     land in limbo. We prepend it when `targetDatabase` is supplied
- *     AND the dump doesn't already declare its own.
+ *  1. **Redirect the dump to the target database** — a dump may hard-bind
+ *     itself to its SOURCE database via `USE <src>;`, `CREATE DATABASE <src>`,
+ *     or `<src>.table` qualifiers. Importing it into a differently-named
+ *     database then fails with "Unknown database '<src>'". When a
+ *     `targetDatabase` is supplied we rewrite the dump's own `USE` to point at
+ *     the target and drop its `CREATE DATABASE` / `USE`-of-other lines, so the
+ *     data lands where the user actually connected. (Newer Table Relay exports
+ *     avoid this by not qualifying at all — see the export "Prefix tables with
+ *     database name" option — but older dumps and third-party dumps still need
+ *     this redirect.)
  *
- *  2. **Import-safety wrapper** — foreign-key checks, unique checks,
+ *  2. **`USE <db>;` prefix** — MySQL dumps often omit any `USE` and the
+ *     adapter's connection has no default schema set, so statements land in
+ *     limbo. We prepend it when `targetDatabase` is supplied and the dump
+ *     didn't already get one from transform 1.
+ *
+ *  3. **Import-safety wrapper** — foreign-key checks, unique checks,
  *     and strict SQL modes routinely trip on legitimate dumps that
  *     forward-reference tables or rely on implicit conversions.
  *     Standard mysqldump output already carries its own prologue /
@@ -926,6 +1039,68 @@ function parseJsonRows(text: string): Record<string, unknown>[] {
  *     checks itself, and the per-statement error loop in the adapter
  *     means the closing block ALWAYS runs, even if the middle failed.
  */
+/**
+ * Repoint a MySQL dump's own database targeting at `quotedTarget` (already
+ * backtick-quoted + escaped). Returns the rewritten SQL and whether anything
+ * changed (so the caller knows if a `USE` still needs prepending).
+ *
+ * Handles the three ways a dump binds itself to its source database:
+ *   - `USE `src`;`        → `USE <target>;`
+ *   - `CREATE DATABASE …` → dropped (and a matching trailing `;` cleaned up);
+ *                           the target DB already exists (we're connected to it)
+ *   - `` `src`.`tbl` ``   → `` <target>.`tbl` `` (only the FIRST detected source
+ *                           db name is rewritten, to avoid clobbering legitimate
+ *                           cross-db references the user may have intended)
+ *
+ * Comments and string literals are left alone for the qualifier rewrite by
+ * only matching the backtick-qualified `db`.`tbl` form, which can't appear
+ * inside a normal string literal.
+ */
+function redirectMysqlDatabase(
+  sql: string,
+  quotedTarget: string,
+): { sql: string; changed: boolean } {
+  let changed = false;
+  let sourceDb: string | null = null;
+
+  // Capture the source db from the first USE / CREATE DATABASE we see.
+  const detect = sql.match(
+    /\b(?:USE|CREATE\s+DATABASE(?:\s+IF\s+NOT\s+EXISTS)?)\s+`?([A-Za-z0-9_$]+)`?/i,
+  );
+  if (detect) sourceDb = detect[1];
+
+  // Rewrite every `USE <x>;` to the target.
+  let out = sql.replace(
+    /^([ \t]*)USE\s+`?[A-Za-z0-9_$]+`?\s*;/gim,
+    (_m, indent: string) => {
+      changed = true;
+      return `${indent}USE ${quotedTarget};`;
+    },
+  );
+
+  // Drop CREATE DATABASE lines — the destination database already exists.
+  out = out.replace(
+    /^[ \t]*CREATE\s+DATABASE(?:\s+IF\s+NOT\s+EXISTS)?\s+`?[A-Za-z0-9_$]+`?[^;]*;[ \t]*$/gim,
+    () => {
+      changed = true;
+      return '-- (CREATE DATABASE removed by Table Relay import: target already exists)';
+    },
+  );
+
+  // Rewrite `src`.`tbl` qualifiers to the target db. Only the detected source
+  // db is touched, so unrelated cross-database references stay intact.
+  if (sourceDb) {
+    const esc = sourceDb.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const qualifierRe = new RegExp('`' + esc + '`\\s*\\.', 'g');
+    out = out.replace(qualifierRe, () => {
+      changed = true;
+      return `${quotedTarget}.`;
+    });
+  }
+
+  return { sql: out, changed };
+}
+
 function buildPayload(
   sql: string,
   targetDatabase: string | null | undefined,
@@ -933,13 +1108,12 @@ function buildPayload(
 ): string {
   let out = sql;
   if (dialect === 'mysql' && targetDatabase) {
-    const head = out
-      .split('\n')
-      .filter((l) => !/^\s*(--|#|$)/.test(l))
-      .slice(0, 5)
-      .join('\n');
-    if (!/^\s*(USE\s+|CREATE\s+DATABASE\b)/i.test(head)) {
-      const quoted = '`' + targetDatabase.replace(/`/g, '``') + '`';
+    const quoted = '`' + targetDatabase.replace(/`/g, '``') + '`';
+    const { sql: redirected, changed } = redirectMysqlDatabase(out, quoted);
+    out = redirected;
+    if (!changed) {
+      // The dump declared no database targeting of its own — make sure
+      // statements run inside the chosen database.
       out = `USE ${quoted};\n${out}`;
     }
   }
@@ -981,4 +1155,37 @@ function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Best-effort: pull a human label from a statement so the import log can show
+ * "→ CREATE TABLE users", "→ INSERT users", etc. — the same per-object feel as
+ * the export log — instead of one opaque "Executing…" line. Returns null for
+ * statements we don't want to surface (SET, the safety wrapper, comments).
+ */
+function statementLabel(sql: string): string | null {
+  const s = sql.trim().replace(/^\/\*.*?\*\/\s*/s, "");
+  const m = s.match(
+    /^\s*(INSERT\s+INTO|REPLACE\s+INTO|CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?|DROP\s+TABLE(?:\s+IF\s+EXISTS)?|ALTER\s+TABLE|TRUNCATE(?:\s+TABLE)?|CREATE(?:\s+OR\s+REPLACE)?(?:\s+ALGORITHM\s*=\s*\S+)?\s+VIEW|CREATE\s+(?:DEFINER\s*=\s*\S+\s+)?(?:PROCEDURE|FUNCTION|TRIGGER))\s+`?([A-Za-z0-9_$.]+)`?/i,
+  );
+  if (!m) return null;
+  const verb = m[1].replace(/\s+/g, " ").toUpperCase();
+  const name = m[2].replace(/`/g, "");
+  // Compact the common verbs.
+  if (verb.startsWith("INSERT") || verb.startsWith("REPLACE")) return `INSERT ${name}`;
+  if (verb.startsWith("CREATE TABLE")) return `CREATE TABLE ${name}`;
+  if (verb.startsWith("DROP TABLE")) return `DROP TABLE ${name}`;
+  if (verb.startsWith("ALTER TABLE")) return `ALTER TABLE ${name}`;
+  if (verb.startsWith("TRUNCATE")) return `TRUNCATE ${name}`;
+  if (verb.includes("VIEW")) return `CREATE VIEW ${name}`;
+  if (verb.includes("PROCEDURE")) return `CREATE PROCEDURE ${name}`;
+  if (verb.includes("FUNCTION")) return `CREATE FUNCTION ${name}`;
+  if (verb.includes("TRIGGER")) return `CREATE TRIGGER ${name}`;
+  return `${verb} ${name}`;
+}
+
+/** Collapse an error to a single trimmed line for the log box. */
+function oneLineError(msg: string): string {
+  const line = msg.replace(/\s+/g, " ").trim();
+  return line.length > 160 ? line.slice(0, 160) + "…" : line;
 }

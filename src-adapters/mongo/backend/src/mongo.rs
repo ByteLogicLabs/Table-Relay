@@ -5,7 +5,7 @@ use std::time::Instant;
 use adapter_api::{
     log_line,
     AdapterError, BrowseRequest, BrowseResult, ColumnInfo, ColumnMeta, CountRequest, Filter,
-    FilterOp, IndexInfo, SchemaInfo, ServerInfo, SortDirection, TableInfo, TableKind,
+    FilterOp, IndexInfo, SchemaInfo, ServerDetail, ServerInfo, SortDirection, TableInfo, TableKind,
     TableStructure,
 };
 use futures::TryStreamExt;
@@ -319,6 +319,18 @@ impl MongoDriver {
         let mut opts = FindOptions::default();
         opts.skip = Some(skip);
         opts.limit = Some(size as i64);
+        // Honor the column projection: when the grid only displays a subset of
+        // fields (e.g. the user hid the huge ones), fetch ONLY those over the
+        // wire instead of pulling every field of every document. `_id` is
+        // always included so row identity / edit / lazy full-doc fetch work.
+        if !req.columns.is_empty() {
+            let mut proj = Document::new();
+            for c in &req.columns {
+                proj.insert(c.clone(), Bson::Int32(1));
+            }
+            proj.insert("_id", Bson::Int32(1));
+            opts.projection = Some(proj);
+        }
         if !req.sort.is_empty() {
             let mut sort_doc = Document::new();
             for s in &req.sort {
@@ -338,12 +350,15 @@ impl MongoDriver {
         }
 
         let columns = columns_from_docs(&docs);
+        // Preview conversion: oversized field values are collapsed to a marker
+        // so a page of huge documents stays small. The full value comes back
+        // via `get_document` when the user opens the row.
         let rows = docs
             .iter()
             .map(|d| {
                 columns
                     .iter()
-                    .map(|c| bson_to_json(d.get(c).unwrap_or(&Bson::Null)))
+                    .map(|c| bson_to_preview_json(d.get(c).unwrap_or(&Bson::Null)))
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
@@ -380,6 +395,23 @@ impl MongoDriver {
         })
     }
 
+    /// Fetch ONE full document by its `_id`, untruncated. Backs the grid's
+    /// "open row" / JSON-edit view: `browse` returns size-capped previews for
+    /// huge documents, so when the user actually opens a row we fetch the
+    /// complete document on demand. `id` is the JSON form of the `_id` the
+    /// frontend already holds (a hex string for ObjectId, or a scalar).
+    pub async fn get_document(
+        &self,
+        schema: &str,
+        table: &str,
+        id: &JsonValue,
+    ) -> Result<Option<JsonValue>, AdapterError> {
+        let coll = self.collection(schema, table);
+        let filter = doc! { "_id": json_to_bson(id) };
+        let found = coll.find_one(filter, None).await.map_err(map_err)?;
+        Ok(found.map(|d| bson_to_json(&Bson::Document(d))))
+    }
+
     pub async fn count_records(&self, req: CountRequest) -> Result<Option<u64>, AdapterError> {
         let coll = self.collection(&req.schema, &req.table);
         let filter = filters_to_doc(&req.filters)?;
@@ -391,6 +423,81 @@ impl MongoDriver {
             coll.count_documents(filter, None).await.map_err(map_err)?
         };
         Ok(Some(n))
+    }
+
+    /// Live server + database stats for the connection "Information" dialog.
+    /// Best-effort: a failed probe is skipped, not fatal. `schema` scopes the
+    /// `dbStats` to the focused database.
+    pub async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        use mongodb::bson::doc;
+        let mut out: Vec<ServerDetail> = Vec::new();
+        let push = |out: &mut Vec<ServerDetail>, label: &str, value: String| {
+            if !value.is_empty() {
+                out.push(ServerDetail { label: label.into(), value });
+            }
+        };
+        let as_f64 = |b: &Bson| -> Option<f64> {
+            match b {
+                Bson::Double(d) => Some(*d),
+                Bson::Int32(i) => Some(*i as f64),
+                Bson::Int64(i) => Some(*i as f64),
+                _ => None,
+            }
+        };
+
+        // Server version + uptime from buildInfo / serverStatus on admin.
+        let admin = self.client.database("admin");
+        if let Ok(bi) = admin.run_command(doc! { "buildInfo": 1 }, None).await {
+            if let Ok(v) = bi.get_str("version") {
+                push(&mut out, "Server version", v.to_string());
+            }
+        }
+        if let Ok(ss) = admin.run_command(doc! { "serverStatus": 1 }, None).await {
+            if let Some(secs) = ss.get("uptime").and_then(as_f64) {
+                push(&mut out, "Uptime", human_duration(secs.max(0.0) as u64));
+            }
+            if let Ok(conns) = ss.get_document("connections") {
+                if let Some(cur) = conns.get("current").and_then(as_f64) {
+                    push(&mut out, "Active connections", (cur as i64).to_string());
+                }
+            }
+            if let Ok(st) = ss.get_str("storageEngine").or_else(|_| {
+                ss.get_document("storageEngine").and_then(|d| d.get_str("name"))
+            }) {
+                push(&mut out, "Storage engine", st.to_string());
+            }
+        }
+
+        // Database-scoped stats via dbStats.
+        if let Ok(db) = self.query_db(schema) {
+            let name = db.name().to_string();
+            if let Ok(stats) = db.run_command(doc! { "dbStats": 1 }, None).await {
+                push(&mut out, "Database", name);
+                if let Some(n) = stats.get("collections").and_then(as_f64) {
+                    push(&mut out, "Collections", (n as i64).to_string());
+                }
+                if let Some(n) = stats.get("objects").and_then(as_f64) {
+                    push(&mut out, "Documents", (n as i64).to_string());
+                }
+                if let Some(n) = stats.get("dataSize").and_then(as_f64) {
+                    push(&mut out, "Data size", human_bytes(n.max(0.0) as u64));
+                }
+                if let Some(n) = stats.get("storageSize").and_then(as_f64) {
+                    push(&mut out, "Storage size", human_bytes(n.max(0.0) as u64));
+                }
+                if let Some(n) = stats.get("indexes").and_then(as_f64) {
+                    push(&mut out, "Indexes", (n as i64).to_string());
+                }
+                if let Some(n) = stats.get("indexSize").and_then(as_f64) {
+                    push(&mut out, "Index size", human_bytes(n.max(0.0) as u64));
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     pub fn collection(&self, schema: &str, table: &str) -> Collection<Document> {
@@ -773,6 +880,130 @@ pub(crate) fn bson_to_json(b: &Bson) -> JsonValue {
     }
 }
 
+/// Max serialized size (bytes) of a single top-level field value before the
+/// browse preview replaces it with a lightweight placeholder. Huge Mongo
+/// documents (MBs of nested arrays/blobs per doc) otherwise make a 50-row grid
+/// page transfer hundreds of MB and serialize for seconds — even though the
+/// grid only renders a collapsed cell. The full value is fetched on demand via
+/// `get_document` when the user opens that row's JSON view. Compass does the
+/// same trick (truncated cells, full doc on click).
+const PREVIEW_FIELD_MAX_BYTES: usize = 16 * 1024;
+
+/// BSON → JSON for a browse PREVIEW cell. Identical to `bson_to_json` for small
+/// values, but any single field whose value serializes larger than
+/// `PREVIEW_FIELD_MAX_BYTES` is collapsed to a marker object the frontend
+/// recognizes (`{ __tableRelayPreview: true, … }`) and renders as a "open to
+/// view" stub. Scalars are never truncated (they're cheap and the grid shows
+/// them inline); only arrays/documents/binary — the things that get huge — are.
+pub(crate) fn bson_to_preview_json(b: &Bson) -> JsonValue {
+    match b {
+        // Containers + binary are the only values that grow unbounded. Measure
+        // their encoded size and stub them out past the cap.
+        Bson::Array(_) | Bson::Document(_) | Bson::Binary(_) => {
+            let full = bson_to_json(b);
+            let approx = approx_json_bytes(&full);
+            if approx > PREVIEW_FIELD_MAX_BYTES {
+                preview_stub(b, approx)
+            } else {
+                full
+            }
+        }
+        // Scalars: cheap, render inline, never truncated.
+        _ => bson_to_json(b),
+    }
+}
+
+/// A compact placeholder for an oversized field value. The frontend keys off
+/// `__tableRelayPreview` to show a stub cell and lazy-load the full document.
+fn preview_stub(b: &Bson, approx_bytes: usize) -> JsonValue {
+    let (kind, extra): (&str, Option<usize>) = match b {
+        Bson::Array(a) => ("array", Some(a.len())),
+        Bson::Document(d) => ("object", Some(d.len())),
+        Bson::Binary(bin) => ("binData", Some(bin.bytes.len())),
+        _ => ("value", None),
+    };
+    let mut m = serde_json::Map::new();
+    m.insert("__tableRelayPreview".to_string(), JsonValue::Bool(true));
+    m.insert("kind".to_string(), JsonValue::from(kind));
+    m.insert("approxBytes".to_string(), JsonValue::from(approx_bytes));
+    if let Some(n) = extra {
+        m.insert("count".to_string(), JsonValue::from(n));
+    }
+    JsonValue::Object(m)
+}
+
+/// Format a byte count as a human-readable size (e.g. `1.5 GB`).
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
+}
+
+/// Format a duration in seconds as `Xd Yh Zm` (or smaller units when short).
+fn human_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let mins = (secs % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {}s", secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
+/// Cheap upper-bound estimate of a JSON value's serialized byte length.
+/// Avoids a full `serde_json::to_string` allocation just to measure size —
+/// we only need to know whether it crosses the cap, and we short-circuit as
+/// soon as it does so genuinely huge values cost O(cap), not O(value).
+fn approx_json_bytes(v: &JsonValue) -> usize {
+    fn walk(v: &JsonValue, acc: &mut usize, cap: usize) {
+        if *acc > cap {
+            return; // already over the threshold; stop measuring
+        }
+        match v {
+            JsonValue::Null => *acc += 4,
+            JsonValue::Bool(_) => *acc += 5,
+            JsonValue::Number(_) => *acc += 8,
+            JsonValue::String(s) => *acc += s.len() + 2,
+            JsonValue::Array(a) => {
+                *acc += 2;
+                for item in a {
+                    *acc += 1;
+                    walk(item, acc, cap);
+                    if *acc > cap {
+                        return;
+                    }
+                }
+            }
+            JsonValue::Object(m) => {
+                *acc += 2;
+                for (k, val) in m {
+                    *acc += k.len() + 4;
+                    walk(val, acc, cap);
+                    if *acc > cap {
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    let mut acc = 0usize;
+    walk(v, &mut acc, PREVIEW_FIELD_MAX_BYTES);
+    acc
+}
+
 pub(crate) fn json_to_bson(v: &JsonValue) -> Bson {
     match v {
         JsonValue::Null => Bson::Null,
@@ -1150,5 +1381,73 @@ mod index_key_tests {
     #[test]
     fn unknown_string_kind_is_surfaced_not_dropped() {
         assert_eq!(index_key_with_type("g", &Bson::String("geoHaystack".into())), "g:geoHaystack");
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::{bson_to_preview_json, PREVIEW_FIELD_MAX_BYTES};
+    use mongodb::bson::{Bson, Document};
+    use serde_json::Value as JsonValue;
+
+    fn is_stub(v: &JsonValue) -> bool {
+        v.get("__tableRelayPreview")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn small_values_pass_through_untruncated() {
+        // Scalars and small containers are returned verbatim.
+        assert_eq!(bson_to_preview_json(&Bson::Int32(7)), JsonValue::from(7));
+        assert_eq!(
+            bson_to_preview_json(&Bson::String("hi".into())),
+            JsonValue::from("hi")
+        );
+        let small = Bson::Array(vec![Bson::Int32(1), Bson::Int32(2), Bson::Int32(3)]);
+        let out = bson_to_preview_json(&small);
+        assert!(!is_stub(&out));
+        assert_eq!(out.as_array().map(|a| a.len()), Some(3));
+    }
+
+    #[test]
+    fn oversized_array_is_collapsed_to_stub() {
+        // A big string array easily clears the 16KB cap.
+        let big: Vec<Bson> = (0..5000)
+            .map(|i| Bson::String(format!("element-number-{i}-with-some-padding")))
+            .collect();
+        let count = big.len();
+        let out = bson_to_preview_json(&Bson::Array(big));
+        assert!(is_stub(&out), "huge array should become a stub");
+        assert_eq!(out.get("kind").and_then(|k| k.as_str()), Some("array"));
+        assert_eq!(
+            out.get("count").and_then(|c| c.as_u64()),
+            Some(count as u64)
+        );
+        assert!(
+            out.get("approxBytes").and_then(|b| b.as_u64()).unwrap_or(0)
+                > PREVIEW_FIELD_MAX_BYTES as u64
+        );
+    }
+
+    #[test]
+    fn oversized_document_is_collapsed_to_stub() {
+        let mut d = Document::new();
+        for i in 0..2000 {
+            d.insert(format!("field_{i}"), Bson::String("x".repeat(20)));
+        }
+        let out = bson_to_preview_json(&Bson::Document(d));
+        assert!(is_stub(&out));
+        assert_eq!(out.get("kind").and_then(|k| k.as_str()), Some("object"));
+    }
+
+    #[test]
+    fn scalar_string_never_truncated_even_if_long() {
+        // A long top-level scalar string is cheap to render inline; only the
+        // unbounded container/binary kinds get collapsed.
+        let long = Bson::String("a".repeat(PREVIEW_FIELD_MAX_BYTES * 2));
+        let out = bson_to_preview_json(&long);
+        assert!(!is_stub(&out));
+        assert!(out.is_string());
     }
 }

@@ -13,6 +13,17 @@ import type { ExportConfig } from "./export-modal";
  */
 export type ExportDialect = "mysql" | "postgres" | "sqlite" | null;
 
+/** Overall export progress, 0..1 across ALL units (tables + views + routines
+ *  + triggers), so the UI can show one determinate bar for the whole job. */
+export interface ExportProgress {
+  /** Overall completion, 0..1. */
+  fraction: number;
+  /** Current step, e.g. "users (3/12)". */
+  label: string;
+  /** Optional numeric detail, e.g. "1,200 / 5,000 rows". */
+  detail?: string;
+}
+
 export interface RunExportArgs {
   connectionId: string;
   dialect: ExportDialect;
@@ -20,8 +31,8 @@ export interface RunExportArgs {
   path: string;
   /** Split output into multiple part files past this many bytes (null = single). */
   splitBytes: number | null;
-  /** Progress callback as rows stream out. */
-  onProgress?: (p: { rows: number; total: number | null; table: string }) => void;
+  /** Total-progress callback (0..1 across every table + object). */
+  onProgress?: (p: ExportProgress) => void;
   /** Cooperative cancel — checked between pages/rows. */
   cancelRef: { current: boolean };
 }
@@ -37,8 +48,62 @@ export async function runExport(args: RunExportArgs): Promise<number> {
   const { connectionId, dialect, config, path, splitBytes, onProgress, cancelRef } = args;
   const qi = makeQuoteIdent(dialect);
 
+  // Database-qualify table references only when the user opts in. Off by
+  // default so the dump is portable: an unqualified `table` lands in whatever
+  // database the import connection targets, instead of hard-binding the dump to
+  // the source database name (which fails with "Unknown database" when the
+  // destination is named differently).
   const qualifiedTableName = (schema: string, table: string) =>
-    schema ? `${qi(schema)}.${qi(table)}` : qi(table);
+    config.qualifyDatabase && schema ? `${qi(schema)}.${qi(table)}` : qi(table);
+
+  // Make view/routine/trigger DDL portable. Unlike tables (which we build
+  // ourselves), these come back from the server pre-rendered — and MySQL
+  // hard-codes the SOURCE database into them: a view body reads
+  // `FROM `grabo_location`.`locations``, and SHOW CREATE adds a
+  // `DEFINER=`user`@`host`` clause. Importing that into a differently-named
+  // database fails with "Unknown database 'grabo_location'". In portable mode
+  // (the default — "Prefix tables with database name" off) we strip the source
+  // schema qualifier and the DEFINER so the object binds to wherever it's
+  // imported. When the user opts INTO qualifying, we leave the DDL untouched.
+  const objSchemaName = config.schema;
+  const makePortableDdl = (ddl: string): string => {
+    if (config.qualifyDatabase) return ddl;
+    let out = ddl;
+    // Drop `DEFINER=...` clauses (MySQL backtick form + bare user@host).
+    out = out
+      .replace(/\s*DEFINER\s*=\s*`(?:[^`]|``)*`@`(?:[^`]|``)*`/gi, "")
+      .replace(/\s*DEFINER\s*=\s*\S+@\S+/gi, "");
+    // Strip the source-schema qualifier (`grabo_location`.) so references
+    // resolve against the target database. MySQL only — Postgres "schema."
+    // qualifiers are real namespaces within the one connected DB and must stay.
+    if (dialect === "mysql" && objSchemaName) {
+      const esc = objSchemaName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      out = out.replace(new RegExp("`" + esc + "`\\s*\\.\\s*", "g"), "");
+    }
+    return out;
+  };
+
+  // ── Total-progress tracking ──────────────────────────────────────────────
+  // Every table and every object counts as one unit; within a table we
+  // interpolate by row fraction so the single bar advances smoothly across the
+  // whole job (tables → views → routines → triggers).
+  const totalUnits =
+    config.targets.length +
+    config.views.length +
+    config.routines.length +
+    config.triggers.length;
+  let completedUnits = 0;
+  const emitProgress = (label: string, withinFrac: number, detail?: string) => {
+    const fraction = totalUnits > 0 ? Math.min(1, (completedUnits + withinFrac) / totalUnits) : 0;
+    onProgress?.({ fraction, label, detail });
+  };
+  const rowsDetail = (fetched: number, total: number | null) =>
+    total != null
+      ? `${fetched.toLocaleString()} / ${total.toLocaleString()} rows`
+      : `${fetched.toLocaleString()} rows`;
+  // "name (3/12)" while there's more than one unit overall.
+  const unitLabel = (name: string) =>
+    totalUnits > 1 ? `${name} (${completedUnits + 1}/${totalUnits})` : name;
 
   const buildCreateTableSql = (table: TableStructure) => {
     const defs = table.columns.map((col) => {
@@ -87,7 +152,15 @@ export async function runExport(args: RunExportArgs): Promise<number> {
     return `'${raw.replace(/'/g, "''")}'`;
   };
 
-  const INSERT_BATCH = 500;
+  // Cap each multi-row INSERT so it can't exceed the destination server's
+  // packet limit. MySQL 5.7's default `max_allowed_packet` is 4 MB, and a
+  // single statement over that makes the server drop the connection mid-import
+  // ("got 0 bytes at EOF"). We bound by characters (cheap to measure) with a
+  // wide safety margin: even at a worst-case ~3 bytes/char for non-ASCII text,
+  // 800k chars stays comfortably under 4 MB. A row count cap still applies so
+  // tiny rows don't produce one gigantic statement either.
+  const MAX_INSERT_CHARS = 800_000;
+  const MAX_INSERT_ROWS = 500;
   const buildInsertSql = (
     qualified: string,
     cols: string[],
@@ -97,14 +170,32 @@ export async function runExport(args: RunExportArgs): Promise<number> {
     if (rows.length === 0 || cols.length === 0) return "";
     const colList = cols.map(qi).join(", ");
     const upsert = table ? buildUpsertClause(cols, table.primaryKey) : "";
+    const prefix = `INSERT INTO ${qualified} (${colList}) VALUES\n  `;
     const out: string[] = [];
-    for (let i = 0; i < rows.length; i += INSERT_BATCH) {
-      const slice = rows.slice(i, i + INSERT_BATCH);
-      const tuples = slice
-        .map((row) => `(${cols.map((col) => sqlLiteral(row[col])).join(", ")})`)
-        .join(",\n  ");
-      out.push(`INSERT INTO ${qualified} (${colList}) VALUES\n  ${tuples}${upsert};`);
+    let batch: string[] = [];
+    let batchChars = 0;
+    const flush = () => {
+      if (batch.length === 0) return;
+      out.push(`${prefix}${batch.join(",\n  ")}${upsert};`);
+      batch = [];
+      batchChars = 0;
+    };
+    for (const row of rows) {
+      const tuple = `(${cols.map((col) => sqlLiteral(row[col])).join(", ")})`;
+      // Flush BEFORE adding when this tuple would push the statement over a
+      // cap — but never flush an empty batch, so a single oversized row still
+      // goes out on its own (can't be split further).
+      if (
+        batch.length > 0 &&
+        (batchChars + tuple.length > MAX_INSERT_CHARS ||
+          batch.length >= MAX_INSERT_ROWS)
+      ) {
+        flush();
+      }
+      batch.push(tuple);
+      batchChars += tuple.length + 4; // ",\n  " separator overhead
     }
+    flush();
     return out.join("\n");
   };
 
@@ -112,6 +203,7 @@ export async function runExport(args: RunExportArgs): Promise<number> {
     targetSchema: string,
     targetTable: string,
     onPage: (cols: string[], rows: Record<string, unknown>[], isFirstPage: boolean) => Promise<void>,
+    onRows?: (fetched: number, total: number | null) => void,
   ) => {
     const pageSize = 1000;
     let pageNumber = 1;
@@ -137,7 +229,7 @@ export async function runExport(args: RunExportArgs): Promise<number> {
       });
       await onPage(cols, batch, pageNumber === 1);
       fetched += batch.length;
-      onProgress?.({ rows: fetched, total, table: targetTable });
+      onRows?.(fetched, total);
       if (cancelRef.current) return; // stop before fetching the next page
       if (batch.length < pageSize) break;
       if (total !== null && fetched >= total) break;
@@ -155,17 +247,23 @@ export async function runExport(args: RunExportArgs): Promise<number> {
       },
     });
     try {
-      await streamRowsForExport(target.schema, target.table, async (cols, rows, isFirstPage) => {
-        if (isFirstPage) {
-          header = cols.map(csvCell).join(",");
-          if (config.includeHeader) await writer.write(header + "\n");
-        }
-        for (const row of rows) {
-          if (cancelRef.current) return;
-          await writer.write(cols.map((c) => csvCell(row[c])).join(",") + "\n");
-          await writer.maybeRollover();
-        }
-      });
+      await streamRowsForExport(
+        target.schema,
+        target.table,
+        async (cols, rows, isFirstPage) => {
+          if (isFirstPage) {
+            header = cols.map(csvCell).join(",");
+            if (config.includeHeader) await writer.write(header + "\n");
+          }
+          for (const row of rows) {
+            if (cancelRef.current) return;
+            await writer.write(cols.map((c) => csvCell(row[c])).join(",") + "\n");
+            await writer.maybeRollover();
+          }
+        },
+        (fetched, total) => emitProgress(target.table, total ? fetched / total : 0, rowsDetail(fetched, total)),
+      );
+      completedUnits++;
       return writer.parts;
     } finally {
       await writer.close();
@@ -196,18 +294,24 @@ export async function runExport(args: RunExportArgs): Promise<number> {
         await closeArray();
         await writer.maybeRollover();
         await openArray();
-        await streamRowsForExport(target.schema, target.table, async (cols, rows) => {
-          for (const row of rows) {
-            if (cancelRef.current) return;
-            const obj: Record<string, unknown> = {};
-            cols.forEach((c) => {
-              obj[c] = row[c] ?? null;
-            });
-            await writer.write((arrayHasItems ? "," : "") + "\n  " + JSON.stringify(obj));
-            arrayHasItems = true;
-            await writer.maybeRollover();
-          }
-        });
+        await streamRowsForExport(
+          target.schema,
+          target.table,
+          async (cols, rows) => {
+            for (const row of rows) {
+              if (cancelRef.current) return;
+              const obj: Record<string, unknown> = {};
+              cols.forEach((c) => {
+                obj[c] = row[c] ?? null;
+              });
+              await writer.write((arrayHasItems ? "," : "") + "\n  " + JSON.stringify(obj));
+              arrayHasItems = true;
+              await writer.maybeRollover();
+            }
+          },
+          (fetched, total) => emitProgress(unitLabel(target.table), total ? fetched / total : 0, rowsDetail(fetched, total)),
+        );
+        completedUnits++;
       }
       await closeArray();
       return writer.parts;
@@ -245,15 +349,85 @@ export async function runExport(args: RunExportArgs): Promise<number> {
         const structure = target.updateIfExists
           ? await ensureTableStructure(connectionId, target.schema, target.table)
           : null;
-        await streamRowsForExport(target.schema, target.table, async (cols, rows) => {
-          if (cancelRef.current) return;
-          const sql = buildInsertSql(qualified, cols, rows, target.updateIfExists ? structure : null);
-          if (sql) await writer.write(sql + "\n");
-          await writer.maybeRollover();
-        });
+        await streamRowsForExport(
+          target.schema,
+          target.table,
+          async (cols, rows) => {
+            if (cancelRef.current) return;
+            const sql = buildInsertSql(qualified, cols, rows, target.updateIfExists ? structure : null);
+            if (sql) await writer.write(sql + "\n");
+            await writer.maybeRollover();
+          },
+          (fetched, total) => emitProgress(unitLabel(target.table), total ? fetched / total : 0, rowsDetail(fetched, total)),
+        );
+      } else {
+        // Schema-only table: still announce it so the bar moves.
+        emitProgress(unitLabel(target.table), 1);
       }
+      completedUnits++;
       await writer.write("\n");
     }
+
+    // ── Views / routines / triggers ──────────────────────────────────────
+    // Schema-level objects (not per-table). Each is fetched as ready-to-run
+    // DDL from the adapter. Best-effort: a single object that fails to fetch
+    // is noted as a comment and skipped rather than aborting the whole export.
+    // Reset the rollover preamble so a part-file split here doesn't re-emit the
+    // last table's CREATE.
+    currentPreamble = "";
+    const objSchema = config.schema;
+
+    if (objSchema && config.views.length > 0) {
+      await writer.write(`\n-- Views\n`);
+      for (const name of config.views) {
+        if (cancelRef.current) break;
+        emitProgress(unitLabel(name), 0, "view");
+        try {
+          const ddl = await db.viewDefinition(connectionId, objSchema, name);
+          await writer.write(`${makePortableDdl(ddl).trimEnd()}\n`);
+        } catch (e) {
+          await writer.write(`-- (skipped view ${name}: ${String(e)})\n`);
+        }
+        completedUnits++;
+        await writer.maybeRollover();
+      }
+    }
+
+    if (objSchema && config.routines.length > 0) {
+      await writer.write(`\n-- Routines\n`);
+      for (const r of config.routines) {
+        if (cancelRef.current) break;
+        emitProgress(unitLabel(r.name), 0, r.kind);
+        try {
+          const def = await db.describeRoutine(connectionId, objSchema, r.name, r.kind);
+          if (def.createSql) await writer.write(`${makePortableDdl(def.createSql).trimEnd()}\n`);
+        } catch (e) {
+          await writer.write(`-- (skipped routine ${r.name}: ${String(e)})\n`);
+        }
+        completedUnits++;
+        await writer.maybeRollover();
+      }
+    }
+
+    if (objSchema && config.triggers.length > 0) {
+      await writer.write(`\n-- Triggers\n`);
+      for (const name of config.triggers) {
+        if (cancelRef.current) break;
+        emitProgress(unitLabel(name), 0, "trigger");
+        try {
+          const def = await db.describeTrigger(connectionId, objSchema, name);
+          if (def.createSql) await writer.write(`${makePortableDdl(def.createSql).trimEnd()}\n`);
+        } catch (e) {
+          await writer.write(`-- (skipped trigger ${name}: ${String(e)})\n`);
+        }
+        completedUnits++;
+        await writer.maybeRollover();
+      }
+    }
+
+    // Final tick to 100%.
+    emitProgress("Finalizing", 0);
+
     return writer.parts;
   } finally {
     await writer.close();

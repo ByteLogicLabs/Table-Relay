@@ -10,8 +10,8 @@ use std::time::Instant;
 use adapter_api::{
     AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
     ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest,
-    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, TriggerDefinition,
-    TriggerInfo, ViewInfo,
+    SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
+    TriggerDefinition, TriggerInfo, ViewInfo,
 };
 use adapter_api::log_line;
 use bigdecimal::BigDecimal;
@@ -147,6 +147,37 @@ fn parse_mysql_version(raw: &str) -> (Option<u32>, Option<u32>, Option<String>) 
     (major, minor, flavor)
 }
 
+/// Format a byte count as a human-readable size (e.g. `1.5 GB`).
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{size:.1} {}", UNITS[unit])
+}
+
+/// Format a duration in seconds as `Xd Yh Zm` (or smaller units when short).
+fn human_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let mins = (secs % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {}s", secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn map_ssl_mode(s: Option<&str>) -> MySqlSslMode {
     match s.unwrap_or("Disable") {
         "Require" | "REQUIRED" => MySqlSslMode::Required,
@@ -179,6 +210,114 @@ impl MysqlDriver {
             flavor,
             default_schema: self.default_db.clone(),
         })
+    }
+
+    /// Live server + database stats for the connection "Information" dialog.
+    /// Best-effort: any individual probe that fails is simply omitted rather
+    /// than failing the whole call, so a restricted user still gets what they
+    /// can see.
+    pub async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        let mut out: Vec<ServerDetail> = Vec::new();
+        let push = |out: &mut Vec<ServerDetail>, label: &str, value: String| {
+            if !value.is_empty() {
+                out.push(ServerDetail { label: label.into(), value });
+            }
+        };
+
+        if let Ok(v) = sqlx::query_scalar::<_, String>("SELECT VERSION()")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "Server version", v);
+        }
+        if let Ok((cs, coll)) = sqlx::query_as::<_, (String, String)>(
+            "SELECT @@character_set_server, @@collation_server",
+        )
+        .fetch_one(&self.pool)
+        .await
+        {
+            push(&mut out, "Default charset", cs);
+            push(&mut out, "Default collation", coll);
+        }
+        // Server-wide knobs users often want to confirm.
+        if let Ok(tz) = sqlx::query_scalar::<_, String>("SELECT @@system_time_zone")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "Time zone", tz);
+        }
+        if let Ok(max) = sqlx::query_scalar::<_, i64>("SELECT @@max_connections")
+            .fetch_one(&self.pool)
+            .await
+        {
+            push(&mut out, "Max connections", max.to_string());
+        }
+
+        // Database-scoped stats for the focused schema.
+        if let Some(db) = schema.filter(|s| !s.is_empty()) {
+            if let Ok((cs, coll)) = sqlx::query_as::<_, (String, String)>(
+                "SELECT DEFAULT_CHARACTER_SET_NAME, DEFAULT_COLLATION_NAME \
+                 FROM information_schema.SCHEMATA WHERE SCHEMA_NAME = ?",
+            )
+            .bind(db)
+            .fetch_one(&self.pool)
+            .await
+            {
+                push(&mut out, "Database charset", cs);
+                push(&mut out, "Database collation", coll);
+            }
+            // Size + object counts from information_schema.TABLES.
+            if let Ok((tables, data, index, rows)) = sqlx::query_as::<
+                _,
+                (i64, Option<BigDecimal>, Option<BigDecimal>, Option<BigDecimal>),
+            >(
+                "SELECT COUNT(*), \
+                        SUM(DATA_LENGTH), SUM(INDEX_LENGTH), SUM(TABLE_ROWS) \
+                 FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?",
+            )
+            .bind(db)
+            .fetch_one(&self.pool)
+            .await
+            {
+                let to_u64 = |b: Option<BigDecimal>| -> u64 {
+                    b.and_then(|d| d.to_string().split('.').next().and_then(|s| s.parse().ok()))
+                        .unwrap_or(0)
+                };
+                let data_b = to_u64(data);
+                let index_b = to_u64(index);
+                push(&mut out, "Tables", tables.to_string());
+                push(&mut out, "Data size", human_bytes(data_b));
+                push(&mut out, "Index size", human_bytes(index_b));
+                push(&mut out, "Total size", human_bytes(data_b + index_b));
+                let est_rows = to_u64(rows);
+                if est_rows > 0 {
+                    push(&mut out, "Rows (estimated)", est_rows.to_string());
+                }
+            }
+        }
+
+        // Uptime + live thread count from global status.
+        if let Ok((_n, uptime)) =
+            sqlx::query_as::<_, (String, String)>("SHOW GLOBAL STATUS LIKE 'Uptime'")
+                .fetch_one(&self.pool)
+                .await
+        {
+            if let Ok(secs) = uptime.parse::<u64>() {
+                push(&mut out, "Uptime", human_duration(secs));
+            }
+        }
+        if let Ok((_n, threads)) =
+            sqlx::query_as::<_, (String, String)>("SHOW GLOBAL STATUS LIKE 'Threads_connected'")
+                .fetch_one(&self.pool)
+                .await
+        {
+            push(&mut out, "Active connections", threads);
+        }
+
+        Ok(out)
     }
 
     pub async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
@@ -935,6 +1074,24 @@ impl MysqlDriver {
                 is_updatable: updatable.eq_ignore_ascii_case("YES"),
             })
             .collect())
+    }
+
+    /// `CREATE OR REPLACE VIEW` DDL for one view, for SQL export. Built from
+    /// `information_schema.VIEWS.VIEW_DEFINITION` rather than `SHOW CREATE VIEW`
+    /// so the output carries no `DEFINER=` clause — that user rarely exists on
+    /// the destination server and would make the import fail.
+    pub async fn view_definition(&self, schema: &str, name: &str) -> Result<String, AdapterError> {
+        let def: String = sqlx::query_scalar(
+            r#"SELECT CAST(VIEW_DEFINITION AS CHAR CHARACTER SET utf8mb4)
+               FROM information_schema.VIEWS
+               WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?"#,
+        )
+        .bind(schema)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await?;
+        let qn = format!("`{}`", name.replace('`', "``"));
+        Ok(format!("CREATE OR REPLACE VIEW {qn} AS {def};"))
     }
 
     pub async fn list_routines(&self, schema: &str) -> Result<Vec<RoutineInfo>, AdapterError> {

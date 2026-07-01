@@ -7,8 +7,8 @@ use std::sync::Arc;
 use adapter_api::{
     Adapter, AdapterError, BrowseRequest, BrowseResult, CommandWarning, CountRequest, ForeignKey,
     KillResult, MutateRequest, Mutation, ProcessInfo, QueryResult, RoutineDefinition, RoutineInfo,
-    SaveTriggerRequest, SchemaInfo, ServerInfo, TableStructure, TriggerDefinition, TriggerInfo,
-    ViewInfo,
+    SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, TableStructure, TriggerDefinition,
+    TriggerInfo, ViewInfo,
 };
 use async_trait::async_trait;
 use tokio::sync::Mutex;
@@ -40,6 +40,13 @@ impl Adapter for MysqlAdapter {
         self.driver.ping().await
     }
 
+    async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        self.driver.server_details(schema).await
+    }
+
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
         self.driver.list_schemas().await
     }
@@ -68,6 +75,10 @@ impl Adapter for MysqlAdapter {
 
     async fn list_views(&self, schema: &str) -> Result<Vec<ViewInfo>, AdapterError> {
         self.driver.list_views(schema).await
+    }
+
+    async fn view_definition(&self, schema: &str, name: &str) -> Result<String, AdapterError> {
+        self.driver.view_definition(schema, name).await
     }
 
     async fn list_routines(

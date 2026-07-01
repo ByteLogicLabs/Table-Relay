@@ -20,6 +20,13 @@ export interface ConnectionMeta {
   server: ServerInfo;
 }
 
+/** One labeled server/database statistic for the connection "Information"
+ *  dialog (default collation, on-disk size, table count, uptime, …). */
+export interface ServerDetail {
+  label: string;
+  value: string;
+}
+
 export interface TableInfo {
   name: string;
   kind: TableKind;
@@ -580,6 +587,9 @@ export const db = {
     invoke<DeleteRowsResult>('db_delete_rows', { connectionId, request }),
   listViews: (connectionId: string, schema: string) =>
     invoke<ViewInfo[]>('db_list_views', { connectionId, schema }),
+  /** `CREATE VIEW` DDL for one view (used by SQL export). */
+  viewDefinition: (connectionId: string, schema: string, name: string) =>
+    invoke<string>('db_view_definition', { connectionId, schema, name }),
   listRoutines: (connectionId: string, schema: string) =>
     invoke<RoutineInfo[]>('db_list_routines', { connectionId, schema }),
   describeRoutine: (connectionId: string, schema: string, name: string, kind: string) =>
@@ -647,6 +657,35 @@ export const db = {
   browse: (connectionId: string, request: BrowseRequest) =>
     withDataGate(connectionId, () =>
       invoke<BrowseResult>('db_browse', { connectionId, request })),
+  /**
+   * Fetch one full record by primary-key value, untruncated. For adapters
+   * (Mongo) whose `browse` returns size-capped previews of huge values, the
+   * grid calls this to lazy-load the complete record when a row is opened.
+   * Returns `null` if no record matches.
+   */
+  getRecord: (
+    connectionId: string,
+    schema: string,
+    table: string,
+    id: unknown,
+  ) =>
+    invoke<unknown | null>('db_get_record', {
+      connectionId,
+      schema,
+      table,
+      id,
+    }),
+  /**
+   * Live server/database statistics for the connection "Information" dialog
+   * (collation, on-disk size, table count, uptime, …). `schema` scopes the
+   * database-specific stats to the focused database. Empty for adapters that
+   * don't implement it.
+   */
+  serverDetails: (connectionId: string, schema?: string | null) =>
+    invoke<ServerDetail[]>('db_server_details', {
+      connectionId,
+      schema: schema ?? null,
+    }),
   // Process list / kill
   processList: (connectionId: string) =>
     invoke<ProcessInfo[]>('db_process_list', { connectionId }),

@@ -10,7 +10,7 @@ use std::time::Instant;
 use adapter_api::log_line;
 use adapter_api::{
     AdapterError, ColumnInfo, ColumnMeta, KillResult, ProcessInfo, ProcessKind, QueryResult,
-    SchemaInfo, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
+    SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
 };
 use redis::aio::MultiplexedConnection;
 use redis::{Cmd, RedisError, Value};
@@ -158,6 +158,75 @@ impl RedisDriver {
             flavor: flavor.or_else(|| Some("Redis".into())),
             default_schema: Some(format!("db{}", self.default_db)),
         })
+    }
+
+    /// Live server stats for the connection "Information" dialog, parsed from
+    /// `INFO`. Best-effort: missing fields are simply omitted. `schema` selects
+    /// the logical DB (`db0`…) whose key count to report.
+    pub async fn server_details(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Vec<ServerDetail>, AdapterError> {
+        let mut conn = self.conn.lock().await;
+        let info: String = redis::cmd("INFO")
+            .query_async(&mut *conn)
+            .await
+            .map_err(map_err)?;
+        drop(conn);
+
+        // Parse the flat `key:value` lines INFO returns (section headers start
+        // with `#` and are ignored).
+        let field = |name: &str| -> Option<String> {
+            info.lines()
+                .find_map(|l| l.strip_prefix(&format!("{name}:")))
+                .map(|s| s.trim().to_string())
+        };
+
+        let mut out: Vec<ServerDetail> = Vec::new();
+        let push = |out: &mut Vec<ServerDetail>, label: &str, value: Option<String>| {
+            if let Some(v) = value {
+                if !v.is_empty() {
+                    out.push(ServerDetail { label: label.into(), value: v });
+                }
+            }
+        };
+
+        push(&mut out, "Server version", field("redis_version"));
+        push(&mut out, "Mode", field("redis_mode"));
+        push(&mut out, "Role", field("role"));
+        push(&mut out, "OS", field("os"));
+        if let Some(secs) = field("uptime_in_seconds").and_then(|s| s.parse::<u64>().ok()) {
+            push(&mut out, "Uptime", Some(human_duration(secs)));
+        }
+        push(&mut out, "Connected clients", field("connected_clients"));
+        push(&mut out, "Memory used", field("used_memory_human"));
+        push(&mut out, "Memory peak", field("used_memory_peak_human"));
+        let maxmem = field("maxmemory_human");
+        push(
+            &mut out,
+            "Max memory",
+            maxmem.map(|m| if m == "0B" { "unlimited".to_string() } else { m }),
+        );
+        push(&mut out, "Eviction policy", field("maxmemory_policy"));
+
+        // Key count for the focused logical DB (schema looks like "db0").
+        let db_index = schema
+            .and_then(|s| s.strip_prefix("db"))
+            .and_then(|n| n.parse::<u32>().ok())
+            .unwrap_or(self.default_db);
+        // `db0:keys=12,expires=…` line in the Keyspace section.
+        if let Some(line) = field(&format!("db{db_index}")) {
+            if let Some(keys) = line
+                .split(',')
+                .find_map(|p| p.trim().strip_prefix("keys="))
+            {
+                push(&mut out, &format!("Keys in db{db_index}"), Some(keys.to_string()));
+            }
+        } else {
+            push(&mut out, &format!("Keys in db{db_index}"), Some("0".to_string()));
+        }
+
+        Ok(out)
     }
 
     pub async fn list_schemas(&self) -> Result<Vec<SchemaInfo>, AdapterError> {
@@ -396,6 +465,22 @@ fn parse_client_list_line(line: &str) -> std::collections::HashMap<String, Strin
 /// Parse the `version` field returned by `INFO server`. Handles the
 /// standard `<major>.<minor>.<patch>` shape plus anything a fork might
 /// prefix (we take whatever digits lead the string).
+/// Format a duration in seconds as `Xd Yh Zm` (or smaller units when short).
+fn human_duration(secs: u64) -> String {
+    let days = secs / 86_400;
+    let hours = (secs % 86_400) / 3_600;
+    let mins = (secs % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h {mins}m")
+    } else if hours > 0 {
+        format!("{hours}h {mins}m")
+    } else if mins > 0 {
+        format!("{mins}m {}s", secs % 60)
+    } else {
+        format!("{secs}s")
+    }
+}
+
 fn parse_semver(raw: &str) -> (Option<u32>, Option<u32>) {
     let prefix: String = raw
         .chars()

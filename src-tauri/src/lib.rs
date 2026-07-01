@@ -452,6 +452,7 @@ pub fn run() {
             commands::db::db_modify_indexes,
             commands::db::db_delete_rows,
             commands::db::db_list_views,
+            commands::db::db_view_definition,
             commands::db::db_list_routines,
             commands::db::db_describe_routine,
             commands::db::db_list_triggers,
@@ -465,6 +466,8 @@ pub fn run() {
             // Multi-adapter surface (P4)
             commands::db::db_list_adapters,
             commands::db::db_browse,
+            commands::db::db_get_record,
+            commands::db::db_server_details,
             // Realtime (pub/sub, LISTEN/NOTIFY, change streams)
             commands::db::db_subscribe,
             commands::db::db_unsubscribe,
