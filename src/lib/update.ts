@@ -9,6 +9,9 @@ export interface UpdateInfo {
   current: string;
   latest: string;
   hasUpdate: boolean;
+  /** Release page URL, when detected via the GitHub Releases fallback. Lets the
+   *  notice link straight to the specific release (notes + assets). */
+  url?: string;
 }
 
 function parts(v: string): number[] {
@@ -55,13 +58,20 @@ export async function checkForUpdate(): Promise<UpdateInfo | null> {
 
 async function checkViaReleases(): Promise<UpdateInfo | null> {
   try {
-    const latest = await invoke<{ version: string } | null>('check_latest_version');
+    const latest = await invoke<{ version: string; url?: string } | null>(
+      'check_latest_version',
+    );
     const current = CURRENT_VERSION;
     if (!latest?.version) {
       flog('update', 'release check returned no version');
       return null;
     }
-    return { current, latest: latest.version, hasUpdate: isNewer(latest.version, current) };
+    return {
+      current,
+      latest: latest.version,
+      hasUpdate: isNewer(latest.version, current),
+      url: latest.url ?? undefined,
+    };
   } catch (e) {
     flog('update', 'release check failed:', String(e));
     return null;

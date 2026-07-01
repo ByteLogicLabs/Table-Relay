@@ -15,7 +15,7 @@ const POLL_MS = 30 * 60 * 1000;
 type Phase = 'idle' | 'installing' | 'done';
 
 export function UpdateNotice() {
-  const [info, setInfo] = useState<{ current: string; latest: string } | null>(null);
+  const [info, setInfo] = useState<{ current: string; latest: string; url?: string } | null>(null);
   const [phase, setPhase] = useState<Phase>('idle');
   const [pct, setPct] = useState<number | null>(null);
   const dismissedRef = useRef(false);
@@ -26,7 +26,7 @@ export function UpdateNotice() {
       if (dismissedRef.current) return;
       const res = await checkForUpdate();
       if (cancelled || dismissedRef.current) return;
-      if (res?.hasUpdate) setInfo({ current: res.current, latest: res.latest });
+      if (res?.hasUpdate) setInfo({ current: res.current, latest: res.latest, url: res.url });
     };
     void run();
     const id = window.setInterval(() => void run(), POLL_MS);
@@ -46,7 +46,10 @@ export function UpdateNotice() {
 
   const openReleases = () => {
     const base = process.env.GIT_URL || 'https://github.com/ByteLogicLabs/Table-Relay';
-    void openUrl(`${base}/releases/latest`).catch(() => {});
+    // Prefer the exact release page (from the Releases API) so the user lands on
+    // the version's notes + assets; fall back to the latest-release redirect.
+    const target = info.url || `${base}/releases/latest`;
+    void openUrl(target).catch(() => {});
     dismiss();
   };
 

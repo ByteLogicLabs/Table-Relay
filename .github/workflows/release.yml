@@ -7,8 +7,19 @@ name: Release
 #   1. Bump the version in package.json AND src-tauri/tauri.conf.json (keep them
 #      in sync), commit, and push to main.
 #   2. On GitHub: Releases -> Draft a new release -> create a tag like `v0.2.0`
-#      -> Publish (or save as draft — either fires this workflow).
-#   3. The matrix builds run; each uploads its installer(s) to that release.
+#      -> "Save draft" (do NOT click Publish). Saving the draft fires this
+#      workflow.
+#   3. The matrix builds run; each uploads its installer(s) to the draft. Drafts
+#      are hidden from `/releases/latest`, so the in-app update check and
+#      Homebrew can't see the release yet.
+#   4. When ALL builds finish, the `publish-release` job flips the draft to
+#      published — so the release (and the "update available" notice) only
+#      appears once every installer + the updater `latest.json` are uploaded.
+#
+# IMPORTANT: create the release as a DRAFT. If you Publish it yourself up front,
+# it's already visible at `/releases/latest` and users get an "update available"
+# notice pointing at a release whose installers are still building. The
+# publish-release job is then a harmless no-op and the race is NOT avoided.
 #
 # Builds are UNSIGNED:
 #   - macOS: users right-click the .app inside the .dmg and choose "Open" the
@@ -282,3 +293,31 @@ jobs:
             git commit -m "table-relay ${TAG}"
             git push -u origin HEAD
           fi
+
+  # Publish the draft release once EVERY matrix build has uploaded its
+  # installers. This closes the race where `/releases/latest` — read by the
+  # in-app update check and the Homebrew cask — would otherwise expose the
+  # release (and announce an update) before the installers finished uploading.
+  #
+  # `needs: build` waits for all matrix jobs (each of which also uploads its
+  # macOS DMG in-job), so by the time this runs every asset is attached. We flip
+  # `draft` to false via the API; this fires a `release: released` event, but our
+  # trigger is `types: [created]` only, so it does NOT re-run the build.
+  #
+  # If the release was already published (created not-as-draft), PATCHing
+  # draft=false is a harmless no-op — but then the race was never avoided, so
+  # always create the release as a DRAFT (see the how-to at the top).
+  publish-release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish the draft now that all installers are uploaded
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api -X PATCH \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${{ github.repository }}/releases/${{ github.event.release.id }}" \
+            -F draft=false
