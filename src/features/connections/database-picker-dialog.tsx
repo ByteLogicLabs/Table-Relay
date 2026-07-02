@@ -6,12 +6,9 @@ import { Button } from '../../components/ui/button';
 import { Input } from '../../components/ui/input';
 import { Label } from '../../components/ui/label';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '../../components/ui/select';
+  SearchableSelect,
+  type SearchableSelectOption,
+} from '../../components/ui/searchable-select';
 import { ConnectionProfile } from '../../types';
 import { useConnections, refreshSchemas, switchConnectionDatabase } from '../../state/connections';
 import { db, isDbError } from '../../lib/db';
@@ -126,6 +123,22 @@ export default function DatabasePickerDialog({
   const [collations, setCollations] = useState<string[]>([]);
   const showEncoding = encodings.length > 0;
   const showCollation = newCharset !== DEFAULT_OPT && collations.length > 0;
+  // Options for the searchable encoding / collation pickers: the "let the
+  // server pick" sentinel first, then the live server list.
+  const encodingOptions = useMemo<SearchableSelectOption[]>(
+    () => [
+      { value: DEFAULT_OPT, label: DEFAULT_LABEL },
+      ...encodings.map((name) => ({ value: name, label: name })),
+    ],
+    [encodings],
+  );
+  const collationOptions = useMemo<SearchableSelectOption[]>(
+    () => [
+      { value: DEFAULT_OPT, label: DEFAULT_LABEL },
+      ...collations.map((name) => ({ value: name, label: name })),
+    ],
+    [collations],
+  );
 
   useEffect(() => {
     if (!open) {
@@ -373,46 +386,27 @@ export default function DatabasePickerDialog({
                 )}
               </div>
 
-              {/* base-ui's <Select.Value /> renders the raw value when
-                  not given children. We want "Default (Server Pick)"
-                  instead of `__default__` on the trigger, so each
-                  Select passes a render function that maps the value
-                  to a human label. */}
               {showEncoding && (
                 <div className="space-y-1.5">
                   <Label htmlFor="db-new-charset" className="text-xs">Encoding</Label>
-                  <Select value={newCharset} onValueChange={setNewCharset}>
-                    <SelectTrigger id="db-new-charset" className="w-full">
-                      <SelectValue>
-                        {(v) => (v === DEFAULT_OPT ? DEFAULT_LABEL : String(v ?? ''))}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={DEFAULT_OPT}>{DEFAULT_LABEL}</SelectItem>
-                      {encodings.map(name => (
-                        <SelectItem key={name} value={name}>{name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <SearchableSelect
+                    value={newCharset}
+                    options={encodingOptions}
+                    onChange={setNewCharset}
+                    searchPlaceholder="Search encodings…"
+                  />
                 </div>
               )}
 
               {showCollation && (
                 <div className="space-y-1.5">
                   <Label htmlFor="db-new-collation" className="text-xs">Collation</Label>
-                  <Select value={newCollation} onValueChange={setNewCollation}>
-                    <SelectTrigger id="db-new-collation" className="w-full">
-                      <SelectValue>
-                        {(v) => (v === DEFAULT_OPT ? DEFAULT_LABEL : String(v ?? ''))}
-                      </SelectValue>
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={DEFAULT_OPT}>{DEFAULT_LABEL}</SelectItem>
-                      {collations.map(name => (
-                        <SelectItem key={name} value={name}>{name}</SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <SearchableSelect
+                    value={newCollation}
+                    options={collationOptions}
+                    onChange={setNewCollation}
+                    searchPlaceholder="Search collations…"
+                  />
                 </div>
               )}
             </div>
