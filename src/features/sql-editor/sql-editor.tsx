@@ -145,9 +145,15 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
   // changes between renders.
   const onQueryChangeRef = useRef(onQueryChange);
   onQueryChangeRef.current = onQueryChange;
+  // The last value we pushed up via `onQueryChange`. The parent stores it on
+  // the tab and feeds it straight back as `initialQuery`; without remembering
+  // it, that echo looks like an external write and the sync effect below would
+  // overwrite the model — dropping any characters typed since we persisted.
+  const lastPersistedRef = useRef(initialQuery ?? '');
   useEffect(() => {
     if (!onQueryChangeRef.current) return;
     const t = setTimeout(() => {
+      lastPersistedRef.current = query;
       onQueryChangeRef.current?.(query);
     }, 300);
     return () => clearTimeout(t);
@@ -307,11 +313,17 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
     const model = editor.getModel();
     if (!model) return;
     const next = initialQuery ?? '';
+    // This is the echo of our own debounced persist coming back — the buffer
+    // is already ahead of (or equal to) it, so re-applying would clobber live
+    // typing. Only genuine external writes (AI `write_query_tab`, tab restore)
+    // carry an `initialQuery` we didn't just send up.
+    if (next === lastPersistedRef.current) return;
     if (model.getValue() === next) return;
     const fullRange = model.getFullModelRange();
     editor.executeEdits('external-write', [
       { range: fullRange, text: next, forceMoveMarkers: true },
     ]);
+    lastPersistedRef.current = next;
     // Mirror into local React state so the toolbar (Run, Format) sees the
     // new buffer without waiting for Monaco's change event round-trip.
     setQuery(next);
@@ -1168,6 +1180,16 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
       toast.error(`Format failed: ${err}`);
       return;
     }
+    const editor = editorRef.current;
+    const model = editor?.getModel();
+    if (editor && model && model.getValue() !== formatted) {
+      // executeEdits (not setValue) keeps the undo stack, and it is now the
+      // path that updates the uncontrolled model — `setQuery` alone no longer
+      // drives Monaco.
+      editor.executeEdits('format', [
+        { range: model.getFullModelRange(), text: formatted, forceMoveMarkers: true },
+      ]);
+    }
     setQuery(formatted);
   };
 
@@ -1234,7 +1256,13 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
           </div>
         )}
         <Editor
-          value={query}
+          // Uncontrolled: Monaco owns the buffer, `onChange` mirrors it into
+          // `query` for the toolbar/lint/persist, and programmatic writes
+          // (external `initialQuery`, format, file load) go through
+          // `executeEdits`. Binding `value={query}` instead made Monaco
+          // reconcile on every render, which reverted live typing whenever the
+          // `query` state briefly lagged the model (the "text disappears" bug).
+          defaultValue={initialQuery ?? ''}
           language={language}
           theme={theme}
           onChange={handleEditorChange}

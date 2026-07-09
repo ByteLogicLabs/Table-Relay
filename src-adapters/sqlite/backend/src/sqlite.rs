@@ -291,7 +291,7 @@ impl SqliteDriver {
         let mut indexes: Vec<IndexInfo> = Vec::with_capacity(index_list.len());
         let mut indexed_cols: std::collections::BTreeSet<String> = Default::default();
         let mut unique_single: std::collections::BTreeSet<String> = Default::default();
-        for (_seq, name, unique_flag, _origin, _partial) in &index_list {
+        for (_seq, name, unique_flag, origin, _partial) in &index_list {
             let info: Vec<(i64, i64, String)> =
                 sqlx::query_as(&format!("PRAGMA index_info({})", quote_ident(name)))
                     .fetch_all(&self.pool)
@@ -311,6 +311,10 @@ impl SqliteDriver {
                 // SQLite has no exposed index method (all b-tree); leave it
                 // unset so the editor doesn't claim a specific algorithm.
                 algorithm: None,
+                // `PRAGMA index_list.origin` is `pk` for the implicit index
+                // backing a (non-rowid) PRIMARY KEY, `u` for UNIQUE, `c` for
+                // CREATE INDEX.
+                is_primary: origin == "pk",
             });
         }
 

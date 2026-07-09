@@ -113,7 +113,21 @@ import {
 } from "./data-grid-utils";
 import { copyText } from "../../lib/clipboard";
 import { DataRow, SharedContextMenu } from "./data-row";
+import { useColumnWidths, ColumnResizeHandle } from "../../components/column-resize";
 import { rowHasPreview } from "./preview-marker";
+
+/** A broken/invalid SQL view (MySQL 1356, Postgres "relation does not exist"
+ *  inside a view, etc.): the definition references dropped objects or the
+ *  view's definer lacks rights. Surfaced with a clear message so it doesn't
+ *  read as an app bug. */
+function isBrokenViewError(msg: string): boolean {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("references invalid table") ||
+    (m.includes("definer") && m.includes("view")) ||
+    m.includes("view's definer")
+  );
+}
 
 interface LogQueryOptions {
   source?: "editor" | "grid" | "system";
@@ -649,6 +663,16 @@ export default function DataGrid({
     [allDisplayCols, hiddenColumns],
   );
 
+  // Resizable columns. Seeded from the natural auto-layout widths, then driven
+  // through a <colgroup> under `table-layout: fixed` (the leading col is the #
+  // gutter). See components/column-resize.
+  const { widths: colWidths, setWidth: setColWidth, allMeasured: colsMeasured } =
+    useColumnWidths(displayCols, headerRowRef, 1);
+  const makeColResize = useCallback(
+    (col: string) => (w: number) => setColWidth(col, w),
+    [setColWidth],
+  );
+
   const queryProjectionCols = useMemo(() => {
     if (hiddenColumns.size === 0 || displayCols.length === 0) return undefined;
     const cols = new Set(displayCols);
@@ -1099,6 +1123,12 @@ export default function DataGrid({
   // still show movement without falsely claiming completion. When the work
   // finishes we snap to 100, then fade the bar out after a short delay.
   const isBusy = loading || isRefreshing || isCommitting;
+  // The row-oriented views (grid + JSON) are the only ones that should surface
+  // the data fetch's skeleton / spinner / error. Schema, definition (view DDL)
+  // and diagram render their own content and loading states, so a background
+  // `fetchData` (which still runs to keep the grid warm) must not paint the
+  // grid placeholder over them.
+  const isDataView = viewMode === "table" || viewMode === "json";
   useEffect(() => {
     if (isBusy) {
       setProgressVisible(true);
@@ -1589,11 +1619,20 @@ export default function DataGrid({
     // Explicit refresh invalidates the tab cache — next mount won't short
     // circuit. The fetch below will repopulate it with fresh rows.
     if (tabId) clearCachedGrid(tabId);
-    void fetchData({ showRefresh: true });
+    // The embedded SchemaView keeps its own copy of the structure (columns,
+    // indexes, FKs) that it only reads once on mount, so Refresh has to tell
+    // it to re-describe explicitly — otherwise the index/column list stays
+    // stale. `refetchStructure` likewise forces the grid's held structure to
+    // re-fetch so column headers/types reflect any on-disk change.
+    if (viewMode === "schema") void schemaRef.current?.reload();
+    void fetchData({ showRefresh: true, refetchStructure: true });
   };
 
   const handleRefresh = () => {
-    if (hasPending) {
+    // Refresh re-describes the table, which resets the SchemaView's draft
+    // editors — so an in-progress schema edit needs the same "you'll lose
+    // changes" confirmation that pending grid edits get.
+    if (hasPending || (viewMode === "schema" && schemaDirty)) {
       setConfirmRefreshOpen(true);
       return;
     }
@@ -3274,17 +3313,30 @@ export default function DataGrid({
             table materializing rather than a spinner on an empty page.
             Refreshes (rows already on screen) keep the lighter translucent
             spinner so the existing data stays visible underneath. */}
-        {loading && rowsForView.length === 0 && !loadError && <GridSkeleton />}
-        {loading && rowsForView.length > 0 && (
+        {isDataView && loading && rowsForView.length === 0 && !loadError && <GridSkeleton />}
+        {isDataView && loading && rowsForView.length > 0 && (
           <div className="absolute inset-0 z-20 flex items-center justify-center bg-background/70 backdrop-blur-sm text-muted-foreground text-xs gap-2">
             <Loader2 className="w-4 h-4 animate-spin" /> Loading…
           </div>
         )}
-        {loadError && !loading && (
+        {isDataView && loadError && !loading && (
           <div className="m-4 p-3 rounded-md border border-destructive/40 bg-destructive/10 text-destructive text-xs flex items-start gap-2">
             <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
             <div className="min-w-0">
-              <div className="font-medium">Query failed</div>
+              <div className="font-medium">
+                {isBrokenViewError(loadError)
+                  ? `This view is broken`
+                  : "Query failed"}
+              </div>
+              {isBrokenViewError(loadError) && (
+                <div className="mb-1 opacity-80">
+                  <span className="font-mono">{tableName}</span>'s definition
+                  references tables/columns that no longer exist, or its{" "}
+                  <code className="font-mono">DEFINER</code> user is missing or
+                  lacks rights. Fix or recreate the view in the database — this
+                  is not an app error.
+                </div>
+              )}
               <div className="opacity-80 wrap-break-word">{loadError}</div>
             </div>
           </div>
@@ -3312,8 +3364,22 @@ export default function DataGrid({
         {viewMode === "table" && (
           <table
             className="text-sm text-left border-collapse"
-            style={{ width: "max-content", minWidth: "100%" }}
+            style={
+              colsMeasured
+                ? { tableLayout: "fixed", width: "max-content" }
+                : { width: "max-content", minWidth: "100%" }
+            }
           >
+            {/* Once measured, column widths are authoritative via this colgroup
+                under table-layout: fixed, which is what makes them resizable. */}
+            {colsMeasured && (
+              <colgroup>
+                <col style={{ width: 48 }} />
+                {displayCols.map((col) => (
+                  <col key={col} style={{ width: colWidths[col] }} />
+                ))}
+              </colgroup>
+            )}
             <thead className="text-xs text-muted-foreground bg-muted sticky top-0 z-10 shadow-sm">
               <tr ref={headerRowRef}>
                 <th className="w-12 px-4 py-2 border-b border-r border-border font-medium text-center whitespace-nowrap">
@@ -3330,17 +3396,18 @@ export default function DataGrid({
                           : "descending"
                         : "none"
                     }
-                    className="px-4 py-2 border-b border-r border-border font-medium cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap min-w-40 select-none"
+                    className="relative px-4 py-2 border-b border-r border-border font-medium cursor-pointer hover:bg-accent hover:text-accent-foreground transition-colors whitespace-nowrap min-w-40 select-none"
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span>{col}</span>
+                    <div className="flex items-center justify-between gap-2 overflow-hidden">
+                      <span className="truncate">{col}</span>
                       {sortBy?.column === col &&
                         (sortBy.direction === "asc" ? (
-                          <ChevronUp className="w-3.5 h-3.5 opacity-80" />
+                          <ChevronUp className="w-3.5 h-3.5 opacity-80 shrink-0" />
                         ) : (
-                          <ChevronDown className="w-3.5 h-3.5 opacity-80" />
+                          <ChevronDown className="w-3.5 h-3.5 opacity-80 shrink-0" />
                         ))}
                     </div>
+                    <ColumnResizeHandle onWidth={makeColResize(col)} />
                   </th>
                 ))}
               </tr>
@@ -3719,9 +3786,9 @@ export default function DataGrid({
           <DialogHeader>
             <DialogTitle>Reload and lose changes?</DialogTitle>
             <DialogDescription>
-              Refreshing will reload rows from the database and drop your
-              unsaved {pendingSummary}. Commit first with ⌘S if you want to keep
-              them.
+              Refreshing will reload from the database and drop your unsaved{" "}
+              {pendingSummary || "schema changes"}. Save first if you want to
+              keep them.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>

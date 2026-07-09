@@ -64,6 +64,10 @@ export interface IndexInfo {
    *  SPATIAL, Postgres BTREE/HASH/GIN/GIST/… (uppercased). Undefined for
    *  adapters that don't expose it (SQLite, Mongo). */
   algorithm?: string;
+  /** This index physically backs the PRIMARY KEY (MySQL `PRIMARY`, Postgres
+   *  `<table>_pkey`, SQLite `origin = pk`, Mongo `_id_`). The schema editor
+   *  shows it read-only. Set per-adapter; absent (falsy) on older payloads. */
+  isPrimary?: boolean;
 }
 
 export interface ForeignKey {

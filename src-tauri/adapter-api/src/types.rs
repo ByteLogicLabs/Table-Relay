@@ -146,6 +146,13 @@ pub struct IndexInfo {
     /// instead of always assuming BTREE.
     #[serde(default)]
     pub algorithm: Option<String>,
+    /// True when this index physically backs the table's PRIMARY KEY (MySQL
+    /// `PRIMARY`, Postgres `<table>_pkey`, SQLite `origin = pk`, Mongo `_id_`).
+    /// The schema editor shows it read-only since the PK is managed through the
+    /// column's PRIMARY flag, not the index pane — this lets the frontend tell
+    /// which index that is without dialect-specific name guessing.
+    #[serde(default)]
+    pub is_primary: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

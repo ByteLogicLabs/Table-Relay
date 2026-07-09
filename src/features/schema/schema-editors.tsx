@@ -6,6 +6,7 @@ import { Input } from '../../components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '../../components/ui/popover';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 import { ensureTableStructure } from '../../state/connections';
+import { ColumnResizeHandle } from '../../components/column-resize';
 import { type DraftColumn, type DraftForeignKey, type FkAction, FK_ACTIONS } from './schema-types';
 
 // -------- editable cell primitives --------
@@ -489,17 +490,18 @@ export function FkField({ label, children }: { label: string; children: React.Re
 
 // -------- table shell --------
 
-export function Th({ children, last, className }: { children?: React.ReactNode; last?: boolean; className?: string }) {
+export function Th({ children, last, className, onResize }: { children?: React.ReactNode; last?: boolean; className?: string; onResize?: (w: number) => void }) {
   return (
-    <th className={`px-4 py-2 border-b ${last ? '' : 'border-r'} border-border font-medium whitespace-nowrap ${className ?? ''}`}>
+    <th className={`relative px-4 py-2 border-b ${last ? '' : 'border-r'} border-border font-medium whitespace-nowrap ${className ?? ''}`}>
       {children}
+      {onResize && <ColumnResizeHandle onWidth={onResize} />}
     </th>
   );
 }
 
 export function Td({ children, last, className }: { children: React.ReactNode; last?: boolean; className?: string }) {
   return (
-    <td className={`${last ? '' : 'border-r'} border-border whitespace-nowrap ${className ?? ''}`}>
+    <td className={`${last ? '' : 'border-r'} border-border whitespace-nowrap overflow-hidden ${className ?? ''}`}>
       {children}
     </td>
   );

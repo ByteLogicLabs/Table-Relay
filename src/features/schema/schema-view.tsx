@@ -3,10 +3,11 @@ import { ConnectionProfile } from '../../types';
 import { db, isDbError, type IndexKeyValue, type IndexSpecPayload, type TableStructure } from '../../lib/db';
 import { ensureTableStructure, refreshTableStructure } from '../../state/connections';
 import { useAdapterManifests, resolveManifest } from '../../state/adapter-manifests';
-import { Loader2, AlertCircle, Plus, Trash2, Check, X } from 'lucide-react';
+import { Loader2, AlertCircle, Plus, Trash2, Check, X, Lock } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../../components/ui/select';
 import { SearchableSelect } from '../../components/ui/searchable-select';
+import { useColumnWidths } from '../../components/column-resize';
 import { toast } from 'sonner';
 import { dialectFromManifest } from '../data-grid/editor-kinds';
 import {
@@ -69,6 +70,11 @@ export interface SchemaViewHandle {
   save: () => Promise<void>;
   discard: () => void;
   isDirty: () => boolean;
+  /** Force a fresh describe from the server, replacing the cached structure
+   *  and resetting the draft editors. Wired to the toolbar Refresh button so a
+   *  view whose indexes / columns changed on disk (or were introspected before
+   *  an index was added) actually reloads instead of showing a stale cache. */
+  reload: () => Promise<void>;
 }
 
 const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function SchemaView(
@@ -202,6 +208,26 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
     setForeignKeys(fksToDrafts(s.foreignKeys));
   };
 
+  // Invalidate the cached structure and re-describe from the server, then
+  // reset the draft editors. Used by the toolbar Refresh button (via the
+  // imperative handle) and the app-wide `tablerelay:reload` event. New tables
+  // have nothing on disk yet, so this is a no-op for them.
+  const reloadStructure = useCallback(async () => {
+    if (isNew || !effectiveSchema) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const fresh = await refreshTableStructure(connection.id, effectiveSchema, tableName);
+      setStructure(fresh);
+      resetDrafts(fresh);
+    } catch (e) {
+      setError(isDbError(e) ? e.message : String(e));
+    } finally {
+      setLoading(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connection.id, effectiveSchema, tableName, isNew]);
+
   useEffect(() => {
     if (isNew) {
       // Synthesize an empty baseline so dirty-tracking and Save have something
@@ -305,6 +331,25 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
     onDirtyChangeRef.current?.(dirty);
   }, [dirty]);
 
+  // Participate in the app-wide `tablerelay:reload` broadcast (fired after a
+  // reconnect, an external ALTER, or a save elsewhere) so the schema editor
+  // re-describes instead of showing a structure cached at mount time. Skipped
+  // while there are unsaved draft edits so a background reload can't silently
+  // wipe them — an explicit toolbar Refresh goes through the imperative
+  // `reload()` and reloads regardless.
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  useEffect(() => {
+    const onReload = (e: Event) => {
+      const detail = (e as CustomEvent<{ connectionId?: string }>).detail;
+      if (detail?.connectionId && detail.connectionId !== connection.id) return;
+      if (dirtyRef.current) return;
+      void reloadStructure();
+    };
+    window.addEventListener('tablerelay:reload', onReload);
+    return () => window.removeEventListener('tablerelay:reload', onReload);
+  }, [connection.id, reloadStructure]);
+
   // Create-mode name collision: precheck against the live sibling
   // table list (already fetched for the FK picker). Disable Save with
   // an inline hint so the user doesn't hit a "Table already exists"
@@ -342,7 +387,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
     if (indexesOnlyMode) {
       const origByName = new Map(structure.indexes.map(i => [i.name, i]));
       const drop = indexes
-        .filter(i => i.originalName && (i.pendingDelete || indexNeedsRecreate(i, origByName.get(i.originalName))))
+        .filter(i => !i.system && i.originalName && (i.pendingDelete || indexNeedsRecreate(i, origByName.get(i.originalName))))
         .map(i => i.originalName!)
         .filter(Boolean);
       // Compass-shaped per-field types are captured in the columns
@@ -352,7 +397,7 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
       // unused for Mongo (kind moved to per-field per the Compass model).
       const KEY_TYPES: IndexKeyValue[] = ['asc', 'desc', 'text', '2dsphere', '2d', 'hashed', 'wildcard'];
       const create: IndexSpecPayload[] = indexes
-        .filter(i => !i.pendingDelete && (i.originalName === null || indexNeedsRecreate(i, origByName.get(i.originalName))))
+        .filter(i => !i.system && !i.pendingDelete && (i.originalName === null || indexNeedsRecreate(i, origByName.get(i.originalName))))
         .map(i => ({
           name: i.name.trim() || undefined,
           unique: i.isUnique,
@@ -462,7 +507,8 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
     isDirty: () => dirty,
     discard: doDiscard,
     save: doSave,
-  }), [dirty, structure, columns, indexes, foreignKeys, connection.id, effectiveSchema, tableName, isNew, newTableName]);
+    reload: reloadStructure,
+  }), [dirty, structure, columns, indexes, foreignKeys, connection.id, effectiveSchema, tableName, isNew, newTableName, reloadStructure]);
 
   const handleNewTableNameChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => setNewTableName(e.target.value), []);
   const handleSaveClick = useCallback(async () => {
@@ -473,6 +519,25 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
       setLocalSaving(false);
     }
   }, [doSave]);
+
+  // Resizable columns for the (SQL) columns table. Declared before the early
+  // returns below so the hook order stays stable across renders. Keys must
+  // match the header cells rendered later, in order; the trailing actions
+  // column isn't resized.
+  const columnsHeaderRef = useRef<HTMLTableRowElement | null>(null);
+  const columnKeys = useMemo(
+    () =>
+      effectiveIsNew
+        ? ['name', 'data_type', 'is_nullable', 'column_default', 'key', 'extra']
+        : ['name', 'data_type', 'is_nullable', 'column_default', 'key', 'extra', 'character_set', 'collation', 'foreign_key'],
+    [effectiveIsNew],
+  );
+  const { widths: colWidths, setWidth: setColWidth, allMeasured: colsMeasured } =
+    useColumnWidths(columnKeys, columnsHeaderRef, 0);
+  const makeColResize = useCallback(
+    (key: string) => (w: number) => setColWidth(key, w),
+    [setColWidth],
+  );
 
   if (loading) {
     return (
@@ -737,18 +802,27 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
             // collation, FK) apply, and the schema isn't enforced anyway.
             <MongoFieldsTable columns={visibleColumns} />
           ) : (
-          <table className="w-full text-sm text-left border-collapse">
+          <table
+            className="w-full text-sm text-left border-collapse"
+            style={colsMeasured ? { tableLayout: 'fixed', width: 'max-content' } : undefined}
+          >
+            {colsMeasured && (
+              <colgroup>
+                {columnKeys.map(k => <col key={k} style={{ width: colWidths[k] }} />)}
+                <col style={{ width: 44 }} />
+              </colgroup>
+            )}
             <thead className="text-[11px] text-muted-foreground uppercase bg-muted sticky top-0 z-10">
-              <tr>
-                <Th>name</Th>
-                <Th>data_type</Th>
-                <Th>is_nullable</Th>
-                <Th>column_default</Th>
-                <Th>key</Th>
-                <Th>extra</Th>
-                {!effectiveIsNew && <Th>character_set</Th>}
-                {!effectiveIsNew && <Th>collation</Th>}
-                {!effectiveIsNew && <Th>foreign_key</Th>}
+              <tr ref={columnsHeaderRef}>
+                <Th onResize={makeColResize('name')}>name</Th>
+                <Th onResize={makeColResize('data_type')}>data_type</Th>
+                <Th onResize={makeColResize('is_nullable')}>is_nullable</Th>
+                <Th onResize={makeColResize('column_default')}>column_default</Th>
+                <Th onResize={makeColResize('key')}>key</Th>
+                <Th onResize={makeColResize('extra')}>extra</Th>
+                {!effectiveIsNew && <Th onResize={makeColResize('character_set')}>character_set</Th>}
+                {!effectiveIsNew && <Th onResize={makeColResize('collation')}>collation</Th>}
+                {!effectiveIsNew && <Th onResize={makeColResize('foreign_key')}>foreign_key</Th>}
                 <Th last></Th>
               </tr>
             </thead>
@@ -921,6 +995,11 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                 </tr>
               )}
               {visibleIndexes.map(idx => {
+                // The PRIMARY key is shown for reference but managed via the
+                // column-level PRIMARY cell. Render it read-only (plain text,
+                // not dimmed inputs) so it reads at the same brightness as the
+                // editable rows.
+                const locked = !schemaEditable || idx.pendingDelete;
                 const rowCls = idx.pendingDelete
                   ? 'border-b border-border/60 line-through opacity-60 bg-destructive/5'
                   : idx.originalName === null
@@ -929,51 +1008,76 @@ const SchemaView = forwardRef<SchemaViewHandle, SchemaViewProps>(function Schema
                 return (
                   <tr key={idx.id} className={rowCls}>
                     <Td className="font-mono font-medium p-0">
-                      <CellInput
-                        value={idx.name}
-                        onCommit={makeIndexNameCommit(idx.id)}
-                        disabled={!schemaEditable || idx.pendingDelete}
-                        placeholder="idx_name"
-                      />
+                      {idx.system ? (
+                        <span className="block px-2.5 py-1.5 text-sm">{idx.name}</span>
+                      ) : (
+                        <CellInput
+                          value={idx.name}
+                          onCommit={makeIndexNameCommit(idx.id)}
+                          disabled={locked}
+                          placeholder="idx_name"
+                        />
+                      )}
                     </Td>
                     {!indexesOnlyMode && (
                       <Td className="p-0">
-                        <CellSelect
-                          value={idx.algorithm}
-                          onChange={makeIndexAlgorithmChange(idx.id)}
-                          disabled={!schemaEditable || idx.pendingDelete}
-                          options={SQL_INDEX_ALGORITHMS.map(a => ({ value: a, label: a }))}
-                        />
+                        {idx.system ? (
+                          <span className="block px-2.5 py-1.5 text-sm">{idx.algorithm}</span>
+                        ) : (
+                          <CellSelect
+                            value={idx.algorithm}
+                            onChange={makeIndexAlgorithmChange(idx.id)}
+                            disabled={locked}
+                            options={SQL_INDEX_ALGORITHMS.map(a => ({ value: a, label: a }))}
+                          />
+                        )}
                       </Td>
                     )}
                     <Td className="p-0">
-                      <CellSelect
-                        value={idx.isUnique ? 'TRUE' : 'FALSE'}
-                        onChange={makeIndexUniqueChange(idx.id)}
-                        disabled={!schemaEditable || idx.pendingDelete}
-                        options={[{ value: 'TRUE', label: 'TRUE' }, { value: 'FALSE', label: 'FALSE' }]}
-                      />
+                      {idx.system ? (
+                        <span className="block px-2.5 py-1.5 text-sm">{idx.isUnique ? 'TRUE' : 'FALSE'}</span>
+                      ) : (
+                        <CellSelect
+                          value={idx.isUnique ? 'TRUE' : 'FALSE'}
+                          onChange={makeIndexUniqueChange(idx.id)}
+                          disabled={locked}
+                          options={[{ value: 'TRUE', label: 'TRUE' }, { value: 'FALSE', label: 'FALSE' }]}
+                        />
+                      )}
                     </Td>
                     <Td className="font-mono p-0">
-                      <CellInput
-                        value={idx.columns}
-                        onCommit={makeIndexColumnsCommit(idx.id)}
-                        disabled={!schemaEditable || idx.pendingDelete}
-                        placeholder={indexesOnlyMode
-                          ? 'email, score:desc, location:2dsphere'
-                          : 'col1, col2'}
-                      />
+                      {idx.system ? (
+                        <span className="block px-2.5 py-1.5 text-sm">{idx.columns}</span>
+                      ) : (
+                        <CellInput
+                          value={idx.columns}
+                          onCommit={makeIndexColumnsCommit(idx.id)}
+                          disabled={locked}
+                          placeholder={indexesOnlyMode
+                            ? 'email, score:desc, location:2dsphere'
+                            : 'col1, col2'}
+                        />
+                      )}
                     </Td>
                     <Td last className="p-0 w-8">
-                      <button
-                        type="button"
-                        onClick={makeToggleDeleteIndex(idx.id)}
-                        disabled={!schemaEditable}
-                        className="p-1.5 text-muted-foreground hover:text-destructive"
-                        title={idx.pendingDelete ? 'Restore' : 'Delete'}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
+                      {idx.system ? (
+                        <div
+                          className="p-1.5 text-muted-foreground/60 flex items-center justify-center"
+                          title="PRIMARY key — edit it via the column's PRIMARY setting"
+                        >
+                          <Lock className="w-3.5 h-3.5" />
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={makeToggleDeleteIndex(idx.id)}
+                          disabled={!schemaEditable}
+                          className="p-1.5 text-muted-foreground hover:text-destructive"
+                          title={idx.pendingDelete ? 'Restore' : 'Delete'}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                     </Td>
                   </tr>
                 );

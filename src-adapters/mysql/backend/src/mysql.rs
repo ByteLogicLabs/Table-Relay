@@ -579,6 +579,7 @@ impl MysqlDriver {
         let indexes = indexes_map
             .into_iter()
             .map(|(name, (columns, unique, index_type))| IndexInfo {
+                is_primary: name.eq_ignore_ascii_case("PRIMARY"),
                 name,
                 columns,
                 unique,
@@ -809,6 +810,7 @@ impl MysqlDriver {
             let indexes = indexes_map
                 .into_iter()
                 .map(|(name, (columns, unique, index_type))| IndexInfo {
+                    is_primary: name.eq_ignore_ascii_case("PRIMARY"),
                     name,
                     columns,
                     unique,
