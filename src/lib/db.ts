@@ -490,6 +490,31 @@ export function isDbError(x: unknown): x is DbError {
 }
 
 /**
+ * Best-effort human-readable message for anything thrown/rejected. Tauri
+ * command rejections come back as plain objects (our `DbError` shape, or an
+ * ad-hoc `{ message }` / `{ error }`), NOT `Error` instances — so a naive
+ * `String(err)` yields the useless "[object Object]". This unwraps the common
+ * shapes and only falls back to JSON as a last resort.
+ */
+export function errText(err: unknown): string {
+  if (err == null) return '';
+  if (typeof err === 'string') return err;
+  if (isDbError(err)) return err.message;
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object') {
+    const o = err as Record<string, unknown>;
+    if (typeof o.message === 'string') return o.message;
+    if (typeof o.error === 'string') return o.error;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      /* circular — fall through */
+    }
+  }
+  return String(err);
+}
+
+/**
  * Per-connection concurrency gate for the heavy data calls (`browse`,
  * `describeTable`). Without it, opening a database with several saved tabs —
  * or a reconnect / db-switch that re-triggers them — fires a dozen+ browses
