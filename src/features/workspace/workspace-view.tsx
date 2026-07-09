@@ -1557,6 +1557,31 @@ export default function WorkspaceView({
     });
   };
 
+  // Reorder tabs by drag-and-drop (VSCode-style). The strip only shows the
+  // focused connection/database's tabs (`visibleTabs`), so we reorder within
+  // that subset and write the new order back into the slots those tabs occupy
+  // in the full `tabs` array — tabs from other databases keep their positions
+  // (they aren't visible now, so moving them would be surprising). Persistence
+  // rides the existing `tabs` -> app-state effect.
+  const handleReorderTabs = (activeId: string, overId: string) => {
+    if (activeId === overId) return;
+    const visibleIds = visibleTabs.map((t) => t.id);
+    const from = visibleIds.indexOf(activeId);
+    const to = visibleIds.indexOf(overId);
+    if (from === -1 || to === -1 || from === to) return;
+    const nextVisible = [...visibleIds];
+    nextVisible.splice(from, 1);
+    nextVisible.splice(to, 0, activeId);
+    const visibleSet = new Set(visibleIds);
+    setTabs((prev) => {
+      const byId = new Map(prev.map((t) => [t.id, t]));
+      const queue = [...nextVisible];
+      return prev.map((t) =>
+        visibleSet.has(t.id) ? byId.get(queue.shift()!)! : t,
+      );
+    });
+  };
+
   const handleTabViewModeChange = (tabId: string, mode: DataViewMode) => {
     setTabs((prev) =>
       prev.map((t) => (t.id === tabId ? { ...t, dataViewMode: mode } : t)),
@@ -2012,6 +2037,7 @@ export default function WorkspaceView({
           onTabChange={setActiveTabId}
           onCloseTab={handleCloseTab}
           onCloseTabs={handleCloseTabs}
+          onReorderTabs={handleReorderTabs}
           onNewQuery={handleNewQuery}
           onImportSql={handleImportSqlForId}
           onOpenRealtime={handleNewRealtime}

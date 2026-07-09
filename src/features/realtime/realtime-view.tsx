@@ -216,7 +216,7 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
         message: 'subscription stopped',
       });
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = isDbError(err) ? err.message : err instanceof Error ? err.message : String(err);
       onLogQuery?.(stopVerb, {
         source: 'system',
         status: 'error',

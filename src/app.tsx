@@ -10,7 +10,7 @@ import { loadSettings, hydrateSettings, applyTheme } from './lib/settings-store'
 import { hydrateCredentials } from './lib/ai-credentials';
 import { hydrateAutoApprovals } from './lib/ai-permissions';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
-import { isDbError } from './lib/db';
+import { errText } from './lib/db';
 import { connectAndLoad, disconnect as disconnectDb, markConnectionLost, useConnections } from './state/connections';
 import { getRailSnapshot, refreshRail, unpinManyTiles, useRail } from './state/rail';
 import { listen } from '@tauri-apps/api/event';
@@ -345,7 +345,7 @@ function UnlockedApp() {
       toast.success(`Connected to ${name}`, { id: toastId });
     } catch (err) {
       connectingToastIds.current.delete(id);
-      toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
+      toast.error(errText(err), { id: toastId });
     }
   };
 
@@ -399,7 +399,7 @@ function UnlockedApp() {
       await saveConnectionRecord(conn);
       toast.success(`Saved ${conn.name}`);
     } catch (e) {
-      toast.error(`Failed to save connection: ${String(e)}`);
+      toast.error(`Failed to save connection: ${errText(e)}`);
       throw e;
     }
   };
@@ -420,7 +420,7 @@ function UnlockedApp() {
       // immediately in the sidebar / cards, not just when the id changed.
       await reload();
     } catch (e) {
-      toast.error(`Failed to save connection: ${String(e)}`);
+      toast.error(`Failed to save connection: ${errText(e)}`);
       throw e;
     }
 
@@ -445,7 +445,7 @@ function UnlockedApp() {
     } catch (err) {
       connectingToastIds.current.delete(conn.id);
       setActiveConnectionIds(prev => prev.filter(cId => cId !== conn.id));
-      toast.error(isDbError(err) ? err.message : String(err), { id: toastId });
+      toast.error(errText(err), { id: toastId });
       throw err;
     }
   };
@@ -459,7 +459,7 @@ function UnlockedApp() {
       if (staleTiles.length > 0) await unpinManyTiles(staleTiles);
       await reload();
     } catch (e) {
-      toast.error(`Failed to delete connection: ${String(e)}`);
+      toast.error(`Failed to delete connection: ${errText(e)}`);
     }
   };
 

@@ -64,6 +64,10 @@ export interface IndexInfo {
    *  SPATIAL, Postgres BTREE/HASH/GIN/GIST/… (uppercased). Undefined for
    *  adapters that don't expose it (SQLite, Mongo). */
   algorithm?: string;
+  /** This index physically backs the PRIMARY KEY (MySQL `PRIMARY`, Postgres
+   *  `<table>_pkey`, SQLite `origin = pk`, Mongo `_id_`). The schema editor
+   *  shows it read-only. Set per-adapter; absent (falsy) on older payloads. */
+  isPrimary?: boolean;
 }
 
 export interface ForeignKey {
@@ -483,6 +487,31 @@ export interface DbError {
 
 export function isDbError(x: unknown): x is DbError {
   return !!x && typeof x === 'object' && 'kind' in (x as object) && 'message' in (x as object);
+}
+
+/**
+ * Best-effort human-readable message for anything thrown/rejected. Tauri
+ * command rejections come back as plain objects (our `DbError` shape, or an
+ * ad-hoc `{ message }` / `{ error }`), NOT `Error` instances — so a naive
+ * `String(err)` yields the useless "[object Object]". This unwraps the common
+ * shapes and only falls back to JSON as a last resort.
+ */
+export function errText(err: unknown): string {
+  if (err == null) return '';
+  if (typeof err === 'string') return err;
+  if (isDbError(err)) return err.message;
+  if (err instanceof Error) return err.message;
+  if (typeof err === 'object') {
+    const o = err as Record<string, unknown>;
+    if (typeof o.message === 'string') return o.message;
+    if (typeof o.error === 'string') return o.error;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      /* circular — fall through */
+    }
+  }
+  return String(err);
 }
 
 /**

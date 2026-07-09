@@ -168,11 +168,11 @@ export function isColumnsDirty(original: ColumnInfo[], drafts: DraftColumn[]): b
 }
 
 export function isIndexesDirty(original: IndexInfo[], drafts: DraftIndex[]): boolean {
-  if (drafts.some(d => d.originalName === null)) return true;
-  if (drafts.some(d => d.pendingDelete)) return true;
+  if (drafts.some(d => d.originalName === null && !d.system)) return true;
+  if (drafts.some(d => d.pendingDelete && !d.system)) return true;
   const origByName = new Map(original.map(i => [i.name, i]));
   for (const d of drafts) {
-    if (d.originalName === null || d.pendingDelete) continue;
+    if (d.system || d.originalName === null || d.pendingDelete) continue;
     const o = origByName.get(d.originalName);
     if (!o) return true;
     if (d.name !== o.name) return true;
@@ -275,7 +275,7 @@ export function buildSaveBatch(
     // Auto-generate a name when the user left it blank — silently
     // skipping the index (the previous behaviour) made it look as
     // though the index "wasn't saved" when really it was discarded.
-    for (const i of indexes.filter(x => !x.pendingDelete)) {
+    for (const i of indexes.filter(x => !x.pendingDelete && !x.system)) {
       const cols = i.columns.split(',').map(s => s.trim()).filter(Boolean);
       if (cols.length === 0) continue;
       const name = i.name.trim() || defaultIndexName(table, cols, i.isUnique);
@@ -321,6 +321,7 @@ export function buildSaveBatch(
   // 2) Drop indexes that are removed or edited. Postgres `DROP INDEX` is
   //    standalone (no `ON table`); MySQL wants `DROP INDEX name ON tbl`.
   for (const i of indexes) {
+    if (i.system) continue;
     if (i.originalName && (i.pendingDelete || indexNeedsRecreate(i, origIndexes.get(i.originalName)))) {
       if (dialect === 'mysql') {
         out.push(`DROP INDEX ${qi(i.originalName)} ON ${tbl}`);
@@ -443,7 +444,7 @@ export function buildSaveBatch(
   //    made it look like the index "rolled back" after save when really it
   //    was never emitted. Only the columns are required.
   for (const i of indexes) {
-    if (i.pendingDelete) continue;
+    if (i.pendingDelete || i.system) continue;
     const cols = i.columns.split(',').map(s => s.trim()).filter(Boolean);
     if (cols.length === 0) continue;
     const orig = i.originalName ? origIndexes.get(i.originalName) : null;

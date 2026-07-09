@@ -75,6 +75,11 @@ export interface DraftIndex {
   isUnique: boolean;
   columns: string; // comma-separated
   pendingDelete: boolean;
+  /** Server-managed index shown for reference only (the SQL `PRIMARY` key,
+   *  whose real editing path is the column-level PRIMARY cell). Rendered
+   *  read-only and excluded from the dirty-diff and generated DDL so it never
+   *  emits a bogus `DROP INDEX PRIMARY` / duplicate-PK statement. */
+  system?: boolean;
 }
 
 export type FkAction = 'NO ACTION' | 'CASCADE' | 'SET NULL' | 'RESTRICT' | 'SET DEFAULT';
@@ -141,15 +146,7 @@ export function normaliseExtra(raw: string): string {
 }
 
 export function indexesToDrafts(idxs: IndexInfo[], defaultAlgorithm: IndexAlgorithm = 'BTREE'): DraftIndex[] {
-  return idxs
-    // The PRIMARY index is the physical backing of the PK, which the
-    // column-level `key = PRIMARY` cell already owns. Surfacing it here too
-    // double-manages the same constraint: it appears as an editable index
-    // row, can't be dropped via `DROP INDEX` on MySQL ("DROP PRIMARY KEY"
-    // is the real path), and a PK edit would emit conflicting DDL. Hide it
-    // from the secondary-index pane; the PK lives on the column.
-    .filter(i => i.name.toUpperCase() !== 'PRIMARY')
-    .map(i => ({
+  return idxs.map(i => ({
     id: makeId('idx'),
     originalName: i.name,
     name: i.name,
@@ -161,6 +158,15 @@ export function indexesToDrafts(idxs: IndexInfo[], defaultAlgorithm: IndexAlgori
     isUnique: i.unique,
     columns: i.columns.join(', '),
     pendingDelete: false,
+    // The PK-backing index is the physical backing of the primary key, which
+    // the column-level `key = PRIMARY` cell already owns. Show it for reference
+    // (users expect the index list to match the engine), but mark it read-only
+    // so it can't be double-managed — editing/dropping the PK still goes
+    // through the column, and no bogus DROP/duplicate-PK DDL is emitted for it.
+    // The adapter flags it per-dialect (MySQL PRIMARY, Postgres `<t>_pkey`,
+    // SQLite `origin=pk`, Mongo `_id_`); the name check is a MySQL fallback for
+    // older payloads without the flag.
+    system: !!i.isPrimary || i.name.toUpperCase() === 'PRIMARY',
   }));
 }
 

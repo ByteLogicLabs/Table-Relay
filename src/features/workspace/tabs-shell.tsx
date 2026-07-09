@@ -1,4 +1,18 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from '@dnd-kit/core';
+import {
+  SortableContext,
+  horizontalListSortingStrategy,
+  useSortable,
+} from '@dnd-kit/sortable';
+import { CSS } from '@dnd-kit/utilities';
 import { invoke } from '@tauri-apps/api/core';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
 import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Zap, Radio, Loader2, Sparkles } from 'lucide-react';
@@ -22,6 +36,8 @@ interface TabsShellProps {
   onTabChange: (id: string) => void;
   onCloseTab: (id: string) => void;
   onCloseTabs: (mode: 'all' | 'others' | 'left' | 'right', anchorId: string) => void;
+  /** Reorder tabs by drag-and-drop. `activeId` is dropped onto `overId`'s slot. */
+  onReorderTabs?: (activeId: string, overId: string) => void;
   onNewQuery: (connectionId: string) => void;
   /** Toolbar "Import" action. Opens the Import-SQL dialog at the workspace
    *  level for the given connection. */
@@ -60,6 +76,7 @@ export default function TabsShell({
   onTabChange,
   onCloseTab,
   onCloseTabs,
+  onReorderTabs,
   onNewQuery,
   onImportSql,
   onOpenRealtime,
@@ -109,6 +126,26 @@ export default function TabsShell({
   // moves off-screen and feels broken.
   const activeTabRef = useRef<HTMLDivElement | null>(null);
   const tabScrollRef = useRef<HTMLDivElement | null>(null);
+
+  // Drag-and-drop tab reordering (VSCode-style). Native HTML5 DnD doesn't fire
+  // in the Tauri WebView, so we use @dnd-kit (pointer-based). A 5px activation
+  // distance keeps a plain click selecting the tab while a real drag reorders.
+  const tabDndSensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+  // Ordered ids for SortableContext. Sortable shifts the other tabs live as
+  // you drag and reorders within this list; the drop is committed via
+  // `onReorderTabs`.
+  const tabIds = useMemo(() => tabs.map((t) => t.id), [tabs]);
+  const handleTabDragEnd = useCallback(
+    (e: DragEndEvent) => {
+      const overId = e.over ? String(e.over.id) : null;
+      if (!overId) return;
+      const activeId = String(e.active.id);
+      if (activeId !== overId) onReorderTabs?.(activeId, overId);
+    },
+    [onReorderTabs],
+  );
   useEffect(() => {
     activeTabRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
   }, [activeTabId]);
@@ -281,27 +318,36 @@ export default function TabsShell({
           // finally engages inside.
           className="flex-1 min-w-0 flex items-center gap-1 overflow-x-auto no-scrollbar"
         >
-        {tabs.map((tab, idx) => {
-          const hasLeft = idx > 0;
-          const hasRight = idx < tabs.length - 1;
-          const hasOthers = tabs.length > 1;
-          return (
-            <TabBarItem
-              key={tab.id}
-              tab={tab}
-              isActive={activeTabId === tab.id}
-              activeTabRef={activeTabRef}
-              hasLeft={hasLeft}
-              hasRight={hasRight}
-              hasOthers={hasOthers}
-              onTabChange={onTabChange}
-              onAuxClick={handleTabAuxClick}
-              onCloseTab={onCloseTab}
-              onCloseTabs={onCloseTabs}
-              onNewQuery={handleCreateNewQuery}
-            />
-          );
-        })}
+        <DndContext
+          sensors={tabDndSensors}
+          collisionDetection={closestCenter}
+          onDragEnd={handleTabDragEnd}
+        >
+          <SortableContext items={tabIds} strategy={horizontalListSortingStrategy}>
+            {tabs.map((tab, idx) => {
+              const hasLeft = idx > 0;
+              const hasRight = idx < tabs.length - 1;
+              const hasOthers = tabs.length > 1;
+              return (
+                <TabBarItem
+                  key={tab.id}
+                  tab={tab}
+                  isActive={activeTabId === tab.id}
+                  activeTabRef={activeTabRef}
+                  hasLeft={hasLeft}
+                  hasRight={hasRight}
+                  hasOthers={hasOthers}
+                  draggable={!!onReorderTabs}
+                  onTabChange={onTabChange}
+                  onAuxClick={handleTabAuxClick}
+                  onCloseTab={onCloseTab}
+                  onCloseTabs={onCloseTabs}
+                  onNewQuery={handleCreateNewQuery}
+                />
+              );
+            })}
+          </SortableContext>
+        </DndContext>
         </div>
         <Button
           variant="ghost"
@@ -809,6 +855,8 @@ interface TabBarItemProps {
   hasLeft: boolean;
   hasRight: boolean;
   hasOthers: boolean;
+  /** Enable drag-and-drop reordering for this tab. */
+  draggable: boolean;
   onTabChange: (id: string) => void;
   onAuxClick: (e: React.MouseEvent, tabId: string) => void;
   onCloseTab: (id: string) => void;
@@ -823,12 +871,39 @@ function TabBarItem({
   hasLeft,
   hasRight,
   hasOthers,
+  draggable,
   onTabChange,
   onAuxClick,
   onCloseTab,
   onCloseTabs,
   onNewQuery,
 }: TabBarItemProps) {
+  // Sortable makes the tab a drag source + drop target and shifts the sibling
+  // tabs live as it is dragged (VSCode-style). `transition` animates that
+  // shift; `transform` moves this tab.
+  const {
+    setNodeRef,
+    listeners,
+    attributes,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id: tab.id, disabled: !draggable });
+  // The tab div needs sortable's node ref plus (when active) the parent's
+  // `activeTabRef` for scroll-into-view. Merge them in a stable callback and
+  // mirror the node into `activeTabRef` from an effect so switching the active
+  // tab can't leave it dangling.
+  const localNodeRef = useRef<HTMLDivElement | null>(null);
+  const setTabNodeRef = useCallback(
+    (el: HTMLDivElement | null) => {
+      setNodeRef(el);
+      localNodeRef.current = el;
+    },
+    [setNodeRef],
+  );
+  useEffect(() => {
+    if (isActive) activeTabRef.current = localNodeRef.current;
+  }, [isActive, activeTabRef]);
   const handleSelect = useCallback(() => onTabChange(tab.id), [onTabChange, tab.id]);
   const handleAuxClick = useCallback((e: React.MouseEvent) => onAuxClick(e, tab.id), [onAuxClick, tab.id]);
   // Suppress the browser's "open in new tab" middle-click
@@ -854,12 +929,20 @@ function TabBarItem({
     <ContextMenu>
       <ContextMenuTrigger className="shrink-0">
         <div
-          ref={isActive ? activeTabRef : null}
+          ref={setTabNodeRef}
+          {...listeners}
+          {...attributes}
+          style={{
+            // Sortable drives both the drag movement and the live shift of the
+            // other tabs. Lock Y so tabs never drift vertically out of the strip.
+            transform: transform ? CSS.Transform.toString({ ...transform, y: 0 }) : undefined,
+            transition: transition ?? undefined,
+          }}
           className={`flex items-center gap-2 px-3 py-1.5 h-8 rounded-md text-sm cursor-pointer select-none min-w-30 max-w-50 shrink-0 group transition-colors ${
             isActive
               ? 'bg-background shadow-sm border border-border/50 text-foreground'
               : 'text-muted-foreground hover:bg-muted/50'
-          }`}
+          } ${isDragging ? 'opacity-50 z-10' : ''}`}
           onClick={handleSelect}
           onAuxClick={handleAuxClick}
           // Suppress the browser's "open in new tab" middle-click

@@ -490,7 +490,12 @@ function renderToolResult(name: string, result: unknown): ReactNode {
       const truncated = r.truncated === true;
       const durationMs = typeof r.duration_ms === 'number' ? r.duration_ms : null;
       if (cols.length === 0 && rows.length === 0) {
-        return <div className="text-[11px] text-muted-foreground">Query ok — no rows.</div>;
+        return (
+          <div className="text-[11px] text-muted-foreground">
+            Query ok — no rows.
+            {durationMs !== null && <> · {durationMs.toFixed(durationMs < 10 ? 1 : 0)}ms</>}
+          </div>
+        );
       }
       return (
         <div className="text-[11px] space-y-1">
@@ -498,7 +503,7 @@ function renderToolResult(name: string, result: unknown): ReactNode {
             {shown} row{shown === 1 ? '' : 's'}
             {truncated && <span> (truncated)</span>}
             {cols.length > 0 && <> · {cols.length} col{cols.length === 1 ? '' : 's'}</>}
-            {durationMs !== null && <> · {durationMs.toFixed(0)}ms</>}
+            {durationMs !== null && <> · {durationMs.toFixed(durationMs < 10 ? 1 : 0)}ms</>}
           </div>
           <Disclosure label="Preview">
             <pre className="mt-1 font-mono whitespace-pre-wrap wrap-break-word bg-background/60 border border-border rounded px-2 py-1 max-h-48 overflow-auto text-[10.5px]">

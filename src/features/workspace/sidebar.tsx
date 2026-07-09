@@ -52,6 +52,7 @@ import {
 } from "../../state/adapter-manifests";
 import {
   db,
+  isDbError,
   type RoutineInfo,
   type TableInfo,
   type TriggerInfo,
@@ -723,7 +724,7 @@ export default function Sidebar({
       window.dispatchEvent(new CustomEvent("tablerelay:reload"));
     } catch (err) {
       toast.error(
-        `${tableConfirm.kind === "drop" ? "Drop" : "Truncate"} failed: ${err instanceof Error ? err.message : String(err)}`,
+        `${tableConfirm.kind === "drop" ? "Drop" : "Truncate"} failed: ${isDbError(err) ? err.message : err instanceof Error ? err.message : String(err)}`,
       );
     }
   }, [buildDropSql, buildTruncateSql, conn, tableConfirm, tableSelection]);
@@ -741,7 +742,7 @@ export default function Sidebar({
       void refreshTriggers();
     } catch (err) {
       toast.error(
-        `Drop failed: ${err instanceof Error ? err.message : String(err)}`,
+        `Drop failed: ${isDbError(err) ? err.message : err instanceof Error ? err.message : String(err)}`,
       );
     } finally {
       setTriggerConfirm(null);
@@ -976,7 +977,7 @@ export default function Sidebar({
       );
     } catch (err) {
       toast.error(
-        `Could not load view: ${err instanceof Error ? err.message : String(err)}`,
+        `Could not load view: ${isDbError(err) ? err.message : err instanceof Error ? err.message : String(err)}`,
       );
     }
   };
@@ -1047,7 +1048,7 @@ export default function Sidebar({
       );
     } catch (err) {
       toast.error(
-        `Could not load ${k.toLowerCase()}: ${err instanceof Error ? err.message : String(err)}`,
+        `Could not load ${k.toLowerCase()}: ${isDbError(err) ? err.message : err instanceof Error ? err.message : String(err)}`,
       );
     }
   };

@@ -585,7 +585,7 @@ impl PostgresDriver {
 
         let indexes: Vec<IndexInfo> = indexes_map
             .into_iter()
-            .map(|(name, (columns, unique, _is_primary, method))| IndexInfo {
+            .map(|(name, (columns, unique, is_primary, method))| IndexInfo {
                 name,
                 columns,
                 unique,
@@ -594,6 +594,7 @@ impl PostgresDriver {
                 // brin/spgist) pass through uppercased and render as a custom
                 // value in the searchable cell.
                 algorithm: Some(method.to_uppercase()),
+                is_primary,
             })
             .collect();
 

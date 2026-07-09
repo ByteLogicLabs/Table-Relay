@@ -232,6 +232,10 @@ impl MongoDriver {
                 }
             }
             indexes.push(IndexInfo {
+                // The default `_id_` index is server-managed and undroppable —
+                // the Mongo equivalent of a primary key, so the editor shows it
+                // read-only.
+                is_primary: name == "_id_",
                 name,
                 columns: cols,
                 unique,
