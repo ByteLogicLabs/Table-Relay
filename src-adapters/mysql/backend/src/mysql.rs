@@ -996,6 +996,7 @@ impl MysqlDriver {
                         rows: Vec::new(),
                         rows_affected: None,
                         error: Some(msg),
+                        truncated: false,
                     };
                     if let Some(sink) = &sink {
                         let _ = sink.send(r.clone());
@@ -1724,20 +1725,25 @@ async fn execute_query(
     sql: &str,
     row_limit: Option<u32>,
 ) -> Result<StatementResult, AdapterError> {
-    let effective = if let Some(limit) = row_limit {
-        if has_limit_clause(sql) {
-            sql.to_string()
-        } else {
-            format!("{sql} LIMIT {limit}")
-        }
+    // Bound the statement. A caller-supplied `row_limit` is used when present;
+    // otherwise a hard safety ceiling is applied so an unbounded `SELECT *`
+    // can't flood memory/the UI. A `LIMIT` the user already wrote is respected
+    // as-is (no cap applied).
+    let cap = if has_limit_clause(sql) {
+        None
     } else {
-        sql.to_string()
+        Some(row_limit.unwrap_or(adapter_api::MAX_RESULT_ROWS))
+    };
+    let effective = match cap {
+        Some(limit) => format!("{sql} LIMIT {limit}"),
+        None => sql.to_string(),
     };
 
     log_line!("run_query", "  sqlx←{}", effective.replace('\n', " ⏎ "));
     let t_fetch = Instant::now();
     let rows: Vec<MySqlRow> = sqlx::query(&effective).fetch_all(&mut *conn).await?;
     let fetch_ms = t_fetch.elapsed().as_secs_f64() * 1000.0;
+    let truncated = matches!(cap, Some(limit) if rows.len() as u32 >= limit);
 
     let t_meta = Instant::now();
     let columns: Vec<ColumnMeta> = if let Some(first) = rows.first() {
@@ -1806,6 +1812,7 @@ async fn execute_query(
         rows: json_rows,
         rows_affected: None,
         error: None,
+        truncated,
     })
 }
 
@@ -1848,6 +1855,7 @@ async fn execute_statement(
             rows: Vec::new(),
             rows_affected: Some(0),
             error: None,
+            truncated: false,
         });
     }
 
@@ -1861,6 +1869,7 @@ async fn execute_statement(
         rows: Vec::new(),
         rows_affected: Some(res.rows_affected()),
         error: None,
+        truncated: false,
     })
 }
 

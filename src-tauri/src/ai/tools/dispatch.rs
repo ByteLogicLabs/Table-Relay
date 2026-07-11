@@ -913,6 +913,7 @@ mod tests {
             rows: (0..rows).map(|_| vec![json!(1)]).collect(),
             rows_affected: None,
             error: error.map(String::from),
+            truncated: false,
         }
     }
 

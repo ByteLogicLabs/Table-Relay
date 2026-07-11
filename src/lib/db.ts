@@ -108,6 +108,9 @@ export interface StatementResult {
   rows: unknown[][];
   rowsAffected: number | null;
   error: string | null;
+  /** True when the backend capped an unbounded query at MAX_RESULT_ROWS —
+   *  more rows exist on the server. Add a LIMIT to fetch a specific range. */
+  truncated?: boolean;
 }
 
 export interface QueryResult {

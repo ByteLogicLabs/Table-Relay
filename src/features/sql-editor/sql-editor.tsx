@@ -1645,6 +1645,21 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             }
             return (
               <div className="flex-1 min-h-0 flex flex-col">
+                {/* Truncation notice — the backend caps otherwise-unbounded
+                    queries at MAX_RESULT_ROWS so a `SELECT *` on a huge table
+                    can't freeze the UI. Tell the user their result is partial
+                    and how to see more. */}
+                {active.truncated && (
+                  <div className="shrink-0 flex items-start gap-2 px-3 py-2 border-b border-amber-500/30 bg-amber-500/10 text-xs text-amber-700 dark:text-amber-400">
+                    <AlertCircle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+                    <div className="min-w-0">
+                      <span className="font-medium">Showing first {active.rows.length.toLocaleString()} rows.</span>{' '}
+                      <span className="text-amber-700/90 dark:text-amber-400/90">
+                        The result was capped for performance — add a LIMIT (or narrow the query) to fetch a specific range.
+                      </span>
+                    </div>
+                  </div>
+                )}
                 {/* Read-only notice — a prominent banner explaining WHY the
                     result can't be edited (no primary key, missing PK column in
                     the SELECT list, expression columns, etc.). Without this the

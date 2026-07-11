@@ -72,7 +72,7 @@ pub use manifest::{
 };
 pub use types::{
     BrowseResult, ColumnInfo, ColumnMeta, CommandWarning, ConnectionProfile, ForeignKey, IndexInfo,
-    KillResult, ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam,
+    KillResult, ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, MAX_RESULT_ROWS,
     SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind,
     TableStructure, TriggerDefinition, TriggerInfo, ViewInfo, WarningKind,
 };

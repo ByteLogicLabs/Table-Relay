@@ -198,6 +198,16 @@ function UnlockedApp() {
       });
       const unB = await listen<ReconnectEvent>('connection:reconnected', (ev) => {
         const { connectionId } = ev.payload;
+        // The user disconnected while the backend was still retrying. The
+        // recovery raced to success after the fact — suppress the toast and,
+        // crucially, do NOT re-add the connection to the active set or fire a
+        // reload (that would resurrect a connection the user intentionally
+        // closed). Just clear any lingering toast.
+        if (userDisconnected.current.has(connectionId)) {
+          const stale = reconnectToastIds.current.get(connectionId);
+          if (stale !== undefined) { toast.dismiss(stale); reconnectToastIds.current.delete(connectionId); }
+          return;
+        }
         const name = nameOf(connectionId);
         const existing = reconnectToastIds.current.get(connectionId);
         toast.success(`Reconnected to ${name}`, { id: existing });
@@ -221,6 +231,14 @@ function UnlockedApp() {
       });
       const unC = await listen<ReconnectEvent>('connection:lost', (ev) => {
         const { connectionId, error } = ev.payload;
+        // The user already disconnected — a "connection lost" error for a
+        // connection they intentionally closed is noise. Clear any lingering
+        // toast and ignore.
+        if (userDisconnected.current.has(connectionId)) {
+          const stale = reconnectToastIds.current.get(connectionId);
+          if (stale !== undefined) { toast.dismiss(stale); reconnectToastIds.current.delete(connectionId); }
+          return;
+        }
         const name = nameOf(connectionId);
         const existing = reconnectToastIds.current.get(connectionId);
         toast.error(`Connection to ${name} lost`, {

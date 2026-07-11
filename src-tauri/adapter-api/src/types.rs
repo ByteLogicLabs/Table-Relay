@@ -250,6 +250,16 @@ pub enum WarningKind {
     Custom(String),
 }
 
+/// Hard safety ceiling on rows returned by a single raw-query statement that
+/// carries no `LIMIT` of its own. A `SELECT * FROM huge_table` with no bound
+/// would otherwise materialize the whole table into memory and flood the
+/// frontend (freezing the UI). Adapters append `LIMIT MAX_RESULT_ROWS` to such
+/// statements and set `StatementResult::truncated` when the ceiling is hit.
+/// This is a backstop, not the normal paging size — the query editor pages at
+/// 50-1000 rows and browse is server-paginated; only otherwise-unbounded
+/// queries reach this cap.
+pub const MAX_RESULT_ROWS: u32 = 10_000;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatementResult {
@@ -260,6 +270,10 @@ pub struct StatementResult {
     pub rows: Vec<Vec<JsonValue>>,
     pub rows_affected: Option<u64>,
     pub error: Option<String>,
+    /// True when the result was capped at `MAX_RESULT_ROWS` because the
+    /// statement had no `LIMIT` of its own — more rows exist on the server.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

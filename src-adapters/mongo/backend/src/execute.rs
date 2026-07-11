@@ -33,6 +33,7 @@ pub(crate) async fn execute_raw(
                 rows,
                 rows_affected: affected,
                 error: None,
+                truncated: false,
             }),
             Err(e) => out.push(StatementResult {
                 sql,
@@ -41,6 +42,7 @@ pub(crate) async fn execute_raw(
                 rows: vec![],
                 rows_affected: None,
                 error: Some(e.to_string()),
+                truncated: false,
             }),
         }
     }

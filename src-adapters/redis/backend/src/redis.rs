@@ -782,6 +782,7 @@ fn placeholder_statement(sql: String) -> StatementResult {
         rows: Vec::new(),
         rows_affected: None,
         error: None,
+        truncated: false,
     }
 }
 
@@ -809,6 +810,7 @@ pub(crate) async fn run_redis_commands(
                     rows,
                     rows_affected,
                     error: None,
+                    truncated: false,
                 });
             }
             Err(e) => {
@@ -819,6 +821,7 @@ pub(crate) async fn run_redis_commands(
                     rows: Vec::new(),
                     rows_affected: None,
                     error: Some(e.to_string()),
+                    truncated: false,
                 });
             }
         }
