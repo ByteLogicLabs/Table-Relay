@@ -47,6 +47,9 @@ interface TabsShellProps {
   onTabViewModeChange: (tabId: string, mode: DataViewMode) => void;
   /** Persist SQL editor edits back onto the owning query tab. */
   onTabQueryChange?: (tabId: string, query: string) => void;
+  /** Persist the file a query tab's buffer is bound to (null = unbind) so
+   *  "Save Query" writes back to it across restarts. */
+  onTabFilePathChange?: (tabId: string, filePath: string | null) => void;
   /** Persist the trigger editor's in-progress buffer onto its tab so unsaved
    *  edits survive switching away (the editor unmounts on tab switch). */
   onTabTriggerDraftChange?: (tabId: string, draft: string) => void;
@@ -82,6 +85,7 @@ export default function TabsShell({
   onOpenRealtime,
   onTabViewModeChange,
   onTabQueryChange,
+  onTabFilePathChange,
   onTabTriggerDraftChange,
   onTabDirtyChange,
   onTabRealtimePatternChange,
@@ -429,6 +433,7 @@ export default function TabsShell({
                 isActive={isActive}
                 tabSchema={tabSchema}
                 onTabQueryChange={onTabQueryChange}
+                onTabFilePathChange={onTabFilePathChange}
                 onAppendQueryLog={onAppendQueryLog}
               />
             );
@@ -663,6 +668,7 @@ interface QueryPaneProps {
   isActive: boolean;
   tabSchema: string | undefined;
   onTabQueryChange?: (tabId: string, query: string) => void;
+  onTabFilePathChange?: (tabId: string, filePath: string | null) => void;
   onAppendQueryLog: AppendQueryLogFn;
 }
 
@@ -672,11 +678,16 @@ function QueryPane({
   isActive,
   tabSchema,
   onTabQueryChange,
+  onTabFilePathChange,
   onAppendQueryLog,
 }: QueryPaneProps) {
   const handleQueryChange = useCallback(
     (q: string) => onTabQueryChange?.(tab.id, q),
     [onTabQueryChange, tab.id],
+  );
+  const handleFilePathChange = useCallback(
+    (path: string | null) => onTabFilePathChange?.(tab.id, path),
+    [onTabFilePathChange, tab.id],
   );
   const handleLogQuery = useCallback(
     (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
@@ -696,9 +707,11 @@ function QueryPane({
         tabId={tab.id}
         isActive={isActive}
         initialQuery={tab.query}
+        initialFilePath={tab.filePath}
         connection={tabConnection}
         defaultSchema={tabSchema}
         onQueryChange={handleQueryChange}
+        onFilePathChange={handleFilePathChange}
         onLogQuery={handleLogQuery}
       />
     </div>

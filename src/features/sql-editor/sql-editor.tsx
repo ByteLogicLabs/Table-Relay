@@ -1,10 +1,19 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
-import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, Square } from 'lucide-react';
+import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, Square, Trash2 } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { readTextFile, writeTextFile } from '@tauri-apps/plugin-fs';
 import { Button } from '../../components/ui/button';
+import { Checkbox } from '../../components/ui/checkbox';
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter,
+} from '../../components/ui/dialog';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -73,6 +82,10 @@ interface SqlEditorProps {
    */
   isActive?: boolean;
   initialQuery?: string;
+  /** File path this tab's buffer was previously bound to (persisted on the
+   *  tab). Seeds `savedFilePath` so "Save Query" writes back to it after a
+   *  restart instead of prompting Save As. */
+  initialFilePath?: string;
   connection: ConnectionProfile;
   /**
    * Database to target for this editor — takes priority over
@@ -85,9 +98,12 @@ interface SqlEditorProps {
    * switches and reloads. Without it the editor behaves as a scratchpad.
    */
   onQueryChange?: (query: string) => void;
+  /** Persists the bound file path back onto the owning tab (null = unbind) so
+   *  "Save Query" survives restarts. */
+  onFilePathChange?: (filePath: string | null) => void;
 }
 
-export default function SqlEditor({ tabId, isActive = true, initialQuery = '', connection, defaultSchema, onLogQuery, onQueryChange }: SqlEditorProps) {
+export default function SqlEditor({ tabId, isActive = true, initialQuery = '', initialFilePath, connection, defaultSchema, onLogQuery, onQueryChange, onFilePathChange }: SqlEditorProps) {
   const settings = useSettings();
   const effectiveSchema = defaultSchema ?? connection.database ?? undefined;
   const manifests = useAdapterManifests();
@@ -137,7 +153,18 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
   const [query, setQuery] = useState(initialQuery ?? '');
   // Path of the file this buffer is bound to (set on Save As or Load). Cmd+S
   // writes back here silently; with none set it falls back to a Save As dialog.
-  const [savedFilePath, setSavedFilePath] = useState<string | null>(null);
+  // Seeded from the tab so the binding survives an app restart, not just tab
+  // switches (the component stays mounted across those).
+  const [savedFilePath, setSavedFilePath] = useState<string | null>(initialFilePath ?? null);
+  // Bind (or unbind, with null) the buffer to a file: update local state AND
+  // persist it onto the owning tab so "Save Query" keeps writing back after a
+  // reload. Always go through this instead of setSavedFilePath directly.
+  const onFilePathChangeRef = useRef(onFilePathChange);
+  onFilePathChangeRef.current = onFilePathChange;
+  const bindFilePath = useCallback((path: string | null) => {
+    setSavedFilePath(path);
+    onFilePathChangeRef.current?.(path);
+  }, []);
 
   // Persist query edits to the owning tab on a short debounce so we don't
   // thrash localStorage on every keystroke. The ref pattern keeps the latest
@@ -413,11 +440,17 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
   const [pendingResultEdits, setPendingResultEdits] = useState<Record<string, string>>({});
   const [activeResultEdit, setActiveResultEdit] = useState<{ rowIdx: number; col: string; value: string } | null>(null);
   const [isSavingResult, setIsSavingResult] = useState(false);
+  // Row-selection for deletion. Holds indices into `activeResult.rows` (the
+  // same index the edit map keys off). Reset on result change alongside edits.
+  const [selectedResultRows, setSelectedResultRows] = useState<Set<number>>(new Set());
+  const [isDeletingRows, setIsDeletingRows] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   // Reset edit state when the result the user is looking at changes — avoid
   // applying edits intended for one query to a different one.
   useEffect(() => {
     setPendingResultEdits({});
     setActiveResultEdit(null);
+    setSelectedResultRows(new Set());
     setEditableStructure(null);
     setStructureError(null);
     setFilterSearchText('');
@@ -498,6 +531,10 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             : null;
   const resultIsEditable = queryAnalysis.editable && !!editableStructure && editableReason === null;
   const pendingEditCount = Object.keys(pendingResultEdits).length;
+  // Deletion needs the same "one base-table row, PK present" guarantee editing
+  // does (to build a safe WHERE), plus the adapter must support row deletes.
+  const resultIsDeletable = resultIsEditable && !!activeManifest?.capabilities.deleteRows;
+  const selectedRowCount = selectedResultRows.size;
 
   const handleSaveResultEdits = async () => {
     if (!resultIsEditable || !activeResult || !editableStructure) return;
@@ -556,6 +593,72 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
       toast.error(`Save failed: ${msg}`);
     } finally {
       setIsSavingResult(false);
+    }
+  };
+
+  // Toggle one result row's selection (keyed by its index into activeResult.rows).
+  const toggleResultRow = useCallback((rowIdx: number, checked: boolean) => {
+    setSelectedResultRows(prev => {
+      const next = new Set(prev);
+      if (checked) next.add(rowIdx); else next.delete(rowIdx);
+      return next;
+    });
+  }, []);
+
+  // Header checkbox: select every currently-visible (filtered) row, or clear.
+  const toggleAllResultRows = useCallback((checked: boolean) => {
+    setSelectedResultRows(checked ? new Set(filteredRows.map(r => r.idx)) : new Set());
+  }, [filteredRows]);
+
+  // Delete the selected rows: one DELETE … WHERE pk = … per row (same PK build
+  // as the update path), then re-run the query so the grid reflects server
+  // state. Guarded by resultIsDeletable so we never issue a delete against a
+  // result we can't map to a single base-table row.
+  const handleDeleteSelectedRows = async () => {
+    if (!resultIsDeletable || !activeResult || !editableStructure) return;
+    const rowIndices = [...selectedResultRows];
+    if (rowIndices.length === 0) return;
+    setIsDeletingRows(true);
+    const started = performance.now();
+    try {
+      let deleted = 0;
+      for (const rowIdx of rowIndices) {
+        const row = activeResult.rows[rowIdx];
+        if (!row) continue;
+        const primaryKey = editableStructure.primaryKey.map(col => {
+          const idx = activeResult.columns.findIndex(c => c.name === col);
+          return { column: col, value: idx >= 0 ? row[idx] : null };
+        });
+        const res = await db.deleteRows(connection.id, {
+          schema: editableStructure.schema,
+          table: editableStructure.name,
+          primaryKey,
+        });
+        deleted += res.rowsAffected;
+      }
+      const elapsed = performance.now() - started;
+      onLogQuery?.(`delete ${rowIndices.length} row${rowIndices.length === 1 ? '' : 's'} in ${editableStructure.schema}.${editableStructure.name}`, {
+        source: 'editor',
+        status: 'ok',
+        durationMs: elapsed,
+        message: `${deleted} row${deleted === 1 ? '' : 's'} affected`,
+      });
+      toast.success(`Deleted ${deleted} row${deleted === 1 ? '' : 's'}`);
+      setSelectedResultRows(new Set());
+      setConfirmDeleteOpen(false);
+      // Re-run the same statement so the grid drops the deleted rows.
+      void handleRun(activeResult.sql);
+    } catch (err) {
+      const msg = isDbError(err) ? err.message : String(err);
+      onLogQuery?.(`delete ${rowIndices.length} row${rowIndices.length === 1 ? '' : 's'} in ${editableStructure.schema}.${editableStructure.name}`, {
+        source: 'editor',
+        status: 'error',
+        message: msg,
+        durationMs: performance.now() - started,
+      });
+      toast.error(`Delete failed: ${msg}`);
+    } finally {
+      setIsDeletingRows(false);
     }
   };
 
@@ -944,7 +1047,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
             : [{ name: 'SQL', extensions: ['sql'] }, { name: 'All files', extensions: ['*'] }],
         });
         if (!path) return; // user cancelled
-        setSavedFilePath(path);
+        bindFilePath(path);
       }
       await writeTextFile(path, body);
       toast.success('Query saved');
@@ -981,7 +1084,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
       // Bind the buffer to the loaded file only when it replaced an empty editor
       // — so Cmd+S writes back to it. If we appended to existing content, the
       // buffer is a mix and shouldn't silently overwrite the source file.
-      setSavedFilePath(wasEmpty ? picked : null);
+      bindFilePath(wasEmpty ? picked : null);
       toast.success('Query loaded');
     } catch (err) {
       toast.error(`Load failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -1709,10 +1812,55 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                     </Button>
                   </div>
                 )}
+                {/* Row-delete action bar — surfaces only when rows are selected
+                    via the checkbox column (which itself only renders when the
+                    result is safely deletable). */}
+                {resultIsDeletable && selectedRowCount > 0 && (
+                  <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 border-b border-border bg-background/40 text-xs">
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-red-500/15 text-red-700 dark:text-red-400 border border-red-500/30 font-medium">
+                        <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                        {selectedRowCount} row{selectedRowCount === 1 ? '' : 's'} selected
+                      </span>
+                    </div>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-7"
+                      disabled={isDeletingRows}
+                      onClick={() => setSelectedResultRows(new Set())}
+                      title="Clear row selection"
+                    >
+                      <X className="w-3.5 h-3.5 mr-1.5" /> Clear
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      className="h-7"
+                      onClick={() => setConfirmDeleteOpen(true)}
+                      disabled={isDeletingRows}
+                      title="Delete the selected rows from the database"
+                    >
+                      {isDeletingRows ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
+                      {isDeletingRows ? 'Deleting…' : `Delete ${selectedRowCount}`}
+                    </Button>
+                  </div>
+                )}
                 <div className="flex-1 min-h-0 overflow-auto" style={{ maxWidth: 'var(--content-max-w, 100%)' }}>
                   <table className="text-xs text-left border-collapse" style={{ width: 'max-content', minWidth: '100%' }}>
                     <thead className="text-[11px] text-muted-foreground bg-muted sticky top-0 z-10 shadow-sm">
                       <tr>
+                        {resultIsDeletable && (
+                          <th className="w-9 px-2 py-1 border-b border-r border-border text-center">
+                            <Checkbox
+                              checked={filteredRows.length > 0 && selectedRowCount >= filteredRows.length}
+                              indeterminate={selectedRowCount > 0 && selectedRowCount < filteredRows.length}
+                              onCheckedChange={(c) => toggleAllResultRows(c === true)}
+                              disabled={isDeletingRows || filteredRows.length === 0}
+                              aria-label="Select all rows"
+                            />
+                          </th>
+                        )}
                         <th className="w-10 px-2 py-1 border-b border-r border-border font-medium text-center whitespace-nowrap">#</th>
                         {active.columns.map((col, ci) => {
                           const isPk = pkColumns.has(col.name);
@@ -1738,8 +1886,20 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                       </tr>
                     </thead>
                     <tbody>
-                      {filteredRows.map(({ row, idx: ri }) => (
-                        <tr key={ri} className="border-b border-border hover:bg-muted/20">
+                      {filteredRows.map(({ row, idx: ri }) => {
+                        const rowSelected = selectedResultRows.has(ri);
+                        return (
+                        <tr key={ri} className={`border-b border-border hover:bg-muted/20 ${rowSelected ? 'bg-red-500/10' : ''}`}>
+                          {resultIsDeletable && (
+                            <td className="px-2 py-1 border-r border-border text-center bg-muted/10">
+                              <Checkbox
+                                checked={rowSelected}
+                                onCheckedChange={(c) => toggleResultRow(ri, c === true)}
+                                disabled={isDeletingRows}
+                                aria-label={`Select row ${ri + 1}`}
+                              />
+                            </td>
+                          )}
                           <td className="px-2 py-1 border-r border-border text-center text-muted-foreground bg-muted/10 whitespace-nowrap">
                             {ri + 1}
                           </td>
@@ -1794,10 +1954,11 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
                             );
                           })}
                         </tr>
-                      ))}
+                        );
+                      })}
                       {active.rows.length === 0 && (
                         <tr>
-                          <td className="px-4 py-3 text-xs text-muted-foreground" colSpan={active.columns.length + 1}>
+                          <td className="px-4 py-3 text-xs text-muted-foreground" colSpan={active.columns.length + (resultIsDeletable ? 2 : 1)}>
                             Query returned no rows.
                           </td>
                         </tr>
@@ -1892,6 +2053,32 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', c
         statements={destructiveWarning ?? []}
         onConfirm={handleDestructiveConfirm}
       />
+
+      {/* Confirm before issuing DELETEs — this hits the database immediately
+          (unlike the browse grid's staged pending-delete queue), so make the
+          user acknowledge the row count and target table. */}
+      <Dialog open={confirmDeleteOpen} onOpenChange={(o) => { if (!isDeletingRows) setConfirmDeleteOpen(o); }}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Delete {selectedRowCount} row{selectedRowCount === 1 ? '' : 's'}?</DialogTitle>
+            <DialogDescription>
+              {editableStructure && (
+                <>This permanently deletes {selectedRowCount === 1 ? 'the selected row' : `${selectedRowCount} selected rows`} from{' '}
+                <span className="font-medium text-foreground">{editableStructure.schema}.{editableStructure.name}</span>. This can't be undone.</>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setConfirmDeleteOpen(false)} disabled={isDeletingRows}>
+              Cancel
+            </Button>
+            <Button variant="destructive" onClick={() => void handleDeleteSelectedRows()} disabled={isDeletingRows}>
+              {isDeletingRows ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5 mr-1.5" />}
+              {isDeletingRows ? 'Deleting…' : `Delete ${selectedRowCount}`}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

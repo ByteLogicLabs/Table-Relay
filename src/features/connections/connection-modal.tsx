@@ -136,6 +136,10 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
     sshAuthKind: 'key',
   });
   const [isTesting, setIsTesting] = useState(false);
+  // Monotonic id for the in-flight test. Cancel/re-test bumps it so a stale
+  // db_test_connection result (the backend call can't be aborted, only ignored)
+  // is discarded instead of overwriting the toast the user already dismissed.
+  const testRunId = useRef(0);
   const [isSaving, setIsSaving] = useState(false);
   /** Every registered adapter manifest. Loaded once per modal open. */
   const [manifests, setManifests] = useState<AdapterManifest[] | null>(null);
@@ -326,15 +330,29 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
       return;
     }
     setIsTesting(true);
+    const runId = ++testRunId.current;
     // One toast for the whole run: loading -> success/error, updated by id so
-    // it shows progress without the user scrolling the form.
+    // it shows progress without the user scrolling the form. The cancel action
+    // bumps testRunId so the eventual result is ignored (the backend call keeps
+    // running until it times out, but the user gets the UI back immediately).
     const toastId = toast.loading('Testing connection…', {
       description: 'Running connection checks…',
+      cancel: {
+        label: 'Cancel',
+        onClick: () => {
+          testRunId.current++;
+          toast.dismiss(toastId);
+          setIsTesting(false);
+        },
+      },
     });
     try {
       const report = await invoke<TestReport>('db_test_connection', {
         profile: buildProfileInput(),
       });
+      // User cancelled (or started another test) while this was in flight —
+      // drop the result silently rather than clobber the current toast/state.
+      if (testRunId.current !== runId) return;
       // Per-step lines (✓ ok / ✗ failed / — skipped) with timing + message —
       // the same detail the old inline panel showed, now in the toast. Rendered
       // as JSX so line breaks + colors survive (plain "\n" strings collapse).
@@ -381,11 +399,14 @@ export default function ConnectionModal({ isOpen, onClose, onSave, initialData, 
         });
       }
     } catch (e: unknown) {
+      if (testRunId.current !== runId) return;
       const err = e as { message?: string; kind?: string } | string;
       const msg = typeof err === 'string' ? err : (err?.message || JSON.stringify(err));
       toast.error('Connection failed', { id: toastId, description: msg, duration: 10000 });
     } finally {
-      setIsTesting(false);
+      // Only the still-current run owns the button state; a cancelled run
+      // already reset it in the cancel handler.
+      if (testRunId.current === runId) setIsTesting(false);
     }
   };
 
