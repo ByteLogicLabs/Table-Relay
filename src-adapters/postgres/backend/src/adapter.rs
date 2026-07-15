@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    Adapter, AdapterError, BrowseRequest, BrowseResult, CommandWarning, CountRequest, ForeignKey,
-    KillResult, MutateRequest, Mutation, ProcessInfo, QueryResult, RoutineDefinition, RoutineInfo,
+    Adapter, AdapterError, AlterUserRequest, BrowseRequest, BrowseResult, CommandWarning,
+    CountRequest, CreateUserRequest, ForeignKey, GrantInfo, KillResult, ManageUsersCapability,
+    MutateRequest, Mutation, ProcessInfo, QueryResult, RoutineDefinition, RoutineInfo,
     SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, SubscribeEvent, SubscribeRequest,
-    SubscriptionHandle, TableStructure, TriggerDefinition, TriggerInfo, ViewInfo,
+    SubscriptionHandle, TableStructure, TriggerDefinition, TriggerInfo, UserInfo, UserRef, ViewInfo,
 };
 use adapter_ssh::Tunnel;
 use async_trait::async_trait;
@@ -190,6 +191,30 @@ impl Adapter for PostgresAdapter {
 
     async fn kill_processes(&self, ids: &[String]) -> Result<Vec<KillResult>, AdapterError> {
         self.driver.kill_processes(ids).await
+    }
+
+    async fn can_manage_users(&self) -> Result<ManageUsersCapability, AdapterError> {
+        self.driver.can_manage_users().await
+    }
+
+    async fn list_users(&self) -> Result<Vec<UserInfo>, AdapterError> {
+        self.driver.list_users().await
+    }
+
+    async fn list_grants(&self, user: &UserRef) -> Result<GrantInfo, AdapterError> {
+        self.driver.list_grants(user).await
+    }
+
+    async fn create_user(&self, req: CreateUserRequest) -> Result<(), AdapterError> {
+        self.driver.create_user(req).await
+    }
+
+    async fn alter_user(&self, req: AlterUserRequest) -> Result<(), AdapterError> {
+        self.driver.alter_user(req).await
+    }
+
+    async fn drop_user(&self, user: &UserRef) -> Result<(), AdapterError> {
+        self.driver.drop_user(user).await
     }
 
     async fn subscribe(

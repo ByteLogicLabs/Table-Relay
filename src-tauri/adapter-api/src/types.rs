@@ -376,3 +376,121 @@ pub struct SaveTriggerRequest {
     /// free-form DDL mode for dialect features the structured form can't express.
     pub create_sql: Option<String>,
 }
+
+// ---- User / role management ----
+//
+// Engine-neutral surface for the "Manage users" feature. SQL engines map a
+// user to an account (`'name'@'host'` on MySQL, a `ROLE` on Postgres); document
+// / KV stores map it to their own account concept (Mongo users, Redis ACL
+// users). The adapter owns the dialect — the frontend only ever sees these
+// structs.
+
+/// Whether the *current* connection is allowed to manage other users, plus a
+/// short human-readable reason to show when it can't. Returned by
+/// `Adapter::can_manage_users`; the UI both gates the feature per-driver (via
+/// the manifest `manage_users` flag) AND disables the create/alter/drop
+/// controls at runtime based on this.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManageUsersCapability {
+    /// The current account can create/alter/drop users and edit privileges.
+    pub can_manage: bool,
+    /// Why not, when `can_manage` is false (e.g. "requires the CREATE USER
+    /// privilege"). Empty when `can_manage` is true.
+    pub reason: String,
+}
+
+/// One database user / role / account, as shown in the users list.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserInfo {
+    /// Account name. For MySQL this is the bare user (paired with `host`);
+    /// for Postgres/Mongo/Redis it is the role/user name.
+    pub name: String,
+    /// Host the account is scoped to (MySQL `'name'@'host'`). `None` for
+    /// engines without a host component.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// True when the account can log in (Postgres `rolcanlogin`, MySQL always
+    /// true, Redis `on`). `None` when the concept doesn't apply.
+    #[serde(default)]
+    pub can_login: Option<bool>,
+    /// True when the account has server-admin / superuser powers (Postgres
+    /// `rolsuper`, MySQL `SUPER`/`ALL … WITH GRANT OPTION`, Mongo root).
+    #[serde(default)]
+    pub is_superuser: Option<bool>,
+    /// True when the account is locked / disabled and cannot connect.
+    #[serde(default)]
+    pub is_locked: Option<bool>,
+    /// Free-form extra attributes to show as a secondary line (e.g. Postgres
+    /// "Create DB, Create role"; Mongo databases the roles span). Adapter-
+    /// formatted for display; may be empty.
+    #[serde(default)]
+    pub attributes: Vec<String>,
+}
+
+/// The effective privileges / grants held by a single account. `statements`
+/// are the engine's own grant lines, shown verbatim so nothing is lost in
+/// translation (MySQL `SHOW GRANTS`, Postgres assembled `GRANT …`, Mongo role
+/// list, Redis ACL rule string).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantInfo {
+    pub statements: Vec<String>,
+}
+
+/// Request to create a new user / role.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateUserRequest {
+    pub name: String,
+    /// MySQL host part; ignored by engines without a host concept. Defaults to
+    /// `%` when omitted for MySQL.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Plaintext password to set. `None` creates a password-less account where
+    /// the engine allows it.
+    #[serde(default)]
+    pub password: Option<String>,
+    /// Grant server-admin / superuser powers on creation (Postgres `SUPERUSER`,
+    /// MySQL `WITH GRANT OPTION` on `*.*`). Defaults to false.
+    #[serde(default)]
+    pub is_superuser: bool,
+    /// Whether the account may log in (Postgres `LOGIN`). Defaults to true.
+    #[serde(default = "default_true")]
+    pub can_login: bool,
+}
+
+/// Request to alter an existing user / role. Only the `Some` fields are
+/// applied; `None` leaves that attribute unchanged.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AlterUserRequest {
+    pub name: String,
+    #[serde(default)]
+    pub host: Option<String>,
+    /// New password. `Some("")` is rejected by adapters; `None` leaves it.
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub is_superuser: Option<bool>,
+    #[serde(default)]
+    pub can_login: Option<bool>,
+    /// Lock (true) / unlock (false) the account. `None` leaves it.
+    #[serde(default)]
+    pub is_locked: Option<bool>,
+}
+
+/// Identifies a single account for drop / grant-inspection. `host` is the
+/// MySQL host part, ignored elsewhere.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserRef {
+    pub name: String,
+    #[serde(default)]
+    pub host: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}

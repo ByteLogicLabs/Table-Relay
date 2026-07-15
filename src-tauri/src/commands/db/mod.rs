@@ -10,6 +10,7 @@ mod mutations;
 mod queries;
 mod realtime;
 mod schema;
+mod users;
 
 // Glob re-exports so the hidden `__cmd__*` macros that `#[tauri::command]`
 // generates alongside each command function are also brought into this module
@@ -20,6 +21,7 @@ pub use mutations::*;
 pub use queries::*;
 pub use realtime::*;
 pub use schema::*;
+pub use users::*;
 
 use std::sync::Arc;
 
