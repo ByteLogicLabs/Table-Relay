@@ -13,10 +13,11 @@ use std::time::Instant;
 
 use adapter_api::log_line;
 use adapter_api::{
-    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
-    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest,
-    SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
-    TriggerDefinition, TriggerInfo, ViewInfo,
+    AdapterError, AlterUserRequest, ColumnInfo, ColumnMeta, CreateUserRequest, ForeignKey,
+    GrantInfo, IndexInfo, KillResult, ManageUsersCapability, ProcessInfo, ProcessKind, QueryResult,
+    RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest, SchemaInfo, ServerDetail,
+    ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, TriggerDefinition,
+    TriggerInfo, UserInfo, UserRef, ViewInfo,
 };
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, NaiveDate, NaiveDateTime, NaiveTime, Utc};
@@ -1309,6 +1310,259 @@ impl PostgresDriver {
             }
         }
         Ok(results)
+    }
+}
+
+// ---- User / role management ----
+
+/// Quote a Postgres identifier (role name): wrap in double quotes and double
+/// any internal double-quote. `CREATE ROLE` / `ALTER ROLE` / `DROP ROLE` don't
+/// accept a bind parameter for the role name, so every name is routed through
+/// this before interpolation.
+fn pg_quote_ident(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        if ch == '"' {
+            out.push('"');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
+}
+
+/// Quote a Postgres string literal (e.g. a password in `PASSWORD '…'`): wrap
+/// in single quotes and double any internal single-quote.
+fn pg_quote_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+impl PostgresDriver {
+    /// A role can manage users when it is a superuser or has CREATEROLE.
+    pub async fn can_manage_users(&self) -> Result<ManageUsersCapability, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        let row = sqlx::query(
+            "SELECT rolsuper, rolcreaterole FROM pg_roles WHERE rolname = current_user",
+        )
+        .fetch_optional(&mut *conn)
+        .await?;
+
+        let (is_super, can_create) = match row {
+            Some(r) => (
+                r.try_get::<bool, _>("rolsuper").unwrap_or(false),
+                r.try_get::<bool, _>("rolcreaterole").unwrap_or(false),
+            ),
+            None => (false, false),
+        };
+        let can = is_super || can_create;
+        Ok(ManageUsersCapability {
+            can_manage: can,
+            reason: if can {
+                String::new()
+            } else {
+                "requires the CREATEROLE attribute or superuser".into()
+            },
+        })
+    }
+
+    pub async fn list_users(&self) -> Result<Vec<UserInfo>, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        // Exclude the built-in `pg_*` roles — they're internal and can't be
+        // managed like real accounts.
+        let rows = sqlx::query(
+            "SELECT rolname, rolsuper, rolcanlogin, rolcreatedb, rolcreaterole \
+             FROM pg_roles WHERE rolname NOT LIKE 'pg\\_%' ORDER BY rolname",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+
+        let mut users = Vec::with_capacity(rows.len());
+        for row in rows {
+            let name: String = row.try_get("rolname").unwrap_or_default();
+            let is_super: bool = row.try_get("rolsuper").unwrap_or(false);
+            let can_login: bool = row.try_get("rolcanlogin").unwrap_or(false);
+            let create_db: bool = row.try_get("rolcreatedb").unwrap_or(false);
+            let create_role: bool = row.try_get("rolcreaterole").unwrap_or(false);
+
+            let mut attributes = Vec::new();
+            if create_db {
+                attributes.push("Create DB".to_string());
+            }
+            if create_role {
+                attributes.push("Create role".to_string());
+            }
+            if !can_login {
+                attributes.push("No login (group role)".to_string());
+            }
+
+            users.push(UserInfo {
+                name,
+                host: None,
+                can_login: Some(can_login),
+                is_superuser: Some(is_super),
+                is_locked: None,
+                attributes,
+            });
+        }
+        Ok(users)
+    }
+
+    /// Assemble a grant summary: role attributes, memberships, and per-table
+    /// privileges. Postgres has no single `SHOW GRANTS`, so we synthesize the
+    /// most useful lines. Uses a bind parameter for the role name (this is a
+    /// read-only SELECT, so parameters are available — unlike DDL).
+    pub async fn list_grants(&self, user: &UserRef) -> Result<GrantInfo, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        let mut statements = Vec::new();
+
+        // Attributes line.
+        if let Some(row) = sqlx::query(
+            "SELECT rolsuper, rolcreatedb, rolcreaterole, rolcanlogin, rolreplication \
+             FROM pg_roles WHERE rolname = $1",
+        )
+        .bind(&user.name)
+        .fetch_optional(&mut *conn)
+        .await?
+        {
+            let mut attrs = Vec::new();
+            if row.try_get::<bool, _>("rolsuper").unwrap_or(false) {
+                attrs.push("SUPERUSER");
+            }
+            if row.try_get::<bool, _>("rolcreatedb").unwrap_or(false) {
+                attrs.push("CREATEDB");
+            }
+            if row.try_get::<bool, _>("rolcreaterole").unwrap_or(false) {
+                attrs.push("CREATEROLE");
+            }
+            if row.try_get::<bool, _>("rolcanlogin").unwrap_or(false) {
+                attrs.push("LOGIN");
+            } else {
+                attrs.push("NOLOGIN");
+            }
+            if row.try_get::<bool, _>("rolreplication").unwrap_or(false) {
+                attrs.push("REPLICATION");
+            }
+            statements.push(format!(
+                "ALTER ROLE {} WITH {};",
+                pg_quote_ident(&user.name),
+                attrs.join(" ")
+            ));
+        }
+
+        // Role memberships.
+        let memberships = sqlx::query(
+            "SELECT g.rolname AS grantee_of \
+             FROM pg_auth_members m \
+             JOIN pg_roles r ON r.oid = m.member \
+             JOIN pg_roles g ON g.oid = m.roleid \
+             WHERE r.rolname = $1 ORDER BY g.rolname",
+        )
+        .bind(&user.name)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in &memberships {
+            let of: String = row.try_get("grantee_of").unwrap_or_default();
+            statements.push(format!(
+                "GRANT {} TO {};",
+                pg_quote_ident(&of),
+                pg_quote_ident(&user.name)
+            ));
+        }
+
+        // Per-table privileges (from information_schema).
+        let table_grants = sqlx::query(
+            "SELECT table_schema, table_name, string_agg(DISTINCT privilege_type, ', ') AS privs \
+             FROM information_schema.role_table_grants \
+             WHERE grantee = $1 \
+             GROUP BY table_schema, table_name ORDER BY table_schema, table_name",
+        )
+        .bind(&user.name)
+        .fetch_all(&mut *conn)
+        .await?;
+        for row in &table_grants {
+            let schema: String = row.try_get("table_schema").unwrap_or_default();
+            let table: String = row.try_get("table_name").unwrap_or_default();
+            let privs: String = row.try_get("privs").unwrap_or_default();
+            statements.push(format!(
+                "GRANT {} ON {}.{} TO {};",
+                privs,
+                pg_quote_ident(&schema),
+                pg_quote_ident(&table),
+                pg_quote_ident(&user.name)
+            ));
+        }
+
+        if statements.is_empty() {
+            statements.push("-- no explicit grants".to_string());
+        }
+        Ok(GrantInfo { statements })
+    }
+
+    pub async fn create_user(&self, req: CreateUserRequest) -> Result<(), AdapterError> {
+        let ident = pg_quote_ident(&req.name);
+        let mut opts = Vec::new();
+        opts.push(if req.can_login { "LOGIN" } else { "NOLOGIN" }.to_string());
+        if req.is_superuser {
+            opts.push("SUPERUSER".to_string());
+        }
+        if let Some(pw) = &req.password {
+            opts.push(format!("PASSWORD {}", pg_quote_str(pw)));
+        }
+        let stmt = format!("CREATE ROLE {ident} WITH {}", opts.join(" "));
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&stmt).execute(&mut *conn).await?;
+        Ok(())
+    }
+
+    pub async fn alter_user(&self, req: AlterUserRequest) -> Result<(), AdapterError> {
+        let ident = pg_quote_ident(&req.name);
+        let mut opts = Vec::new();
+        if let Some(is_super) = req.is_superuser {
+            opts.push(if is_super { "SUPERUSER" } else { "NOSUPERUSER" }.to_string());
+        }
+        if let Some(can_login) = req.can_login {
+            opts.push(if can_login { "LOGIN" } else { "NOLOGIN" }.to_string());
+        }
+        if let Some(pw) = &req.password {
+            if pw.is_empty() {
+                return Err(AdapterError::Other("password cannot be empty".into()));
+            }
+            opts.push(format!("PASSWORD {}", pg_quote_str(pw)));
+        }
+        // Postgres has no per-role "locked" flag; the closest is toggling
+        // login. Treat is_locked=true as NOLOGIN, false as LOGIN — but only if
+        // can_login wasn't already given (avoid a contradictory statement).
+        if req.can_login.is_none() {
+            if let Some(locked) = req.is_locked {
+                opts.push(if locked { "NOLOGIN" } else { "LOGIN" }.to_string());
+            }
+        }
+        if opts.is_empty() {
+            return Ok(());
+        }
+        let stmt = format!("ALTER ROLE {ident} WITH {}", opts.join(" "));
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&stmt).execute(&mut *conn).await?;
+        Ok(())
+    }
+
+    pub async fn drop_user(&self, user: &UserRef) -> Result<(), AdapterError> {
+        let ident = pg_quote_ident(&user.name);
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&format!("DROP ROLE {ident}"))
+            .execute(&mut *conn)
+            .await?;
+        Ok(())
     }
 }
 

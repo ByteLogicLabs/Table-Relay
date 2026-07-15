@@ -8,10 +8,11 @@
 use std::time::Instant;
 
 use adapter_api::{
-    AdapterError, ColumnInfo, ColumnMeta, ForeignKey, IndexInfo, KillResult, ProcessInfo,
-    ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest,
-    SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind, TableStructure,
-    TriggerDefinition, TriggerInfo, ViewInfo,
+    AdapterError, AlterUserRequest, ColumnInfo, ColumnMeta, CreateUserRequest, ForeignKey,
+    GrantInfo, IndexInfo, KillResult, ManageUsersCapability, ProcessInfo, ProcessKind, QueryResult,
+    RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest, SchemaInfo, ServerDetail,
+    ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, TriggerDefinition,
+    TriggerInfo, UserInfo, UserRef, ViewInfo,
 };
 use adapter_api::log_line;
 use bigdecimal::BigDecimal;
@@ -2114,6 +2115,197 @@ impl MysqlDriver {
             }
         }
         Ok(results)
+    }
+}
+
+// ---- User / role management ----
+
+/// Escape a value for a MySQL single-quoted string literal. `CREATE USER` /
+/// `GRANT` don't accept bind parameters for the account name/host/password, so
+/// every user-supplied value is routed through this before interpolation.
+/// Backslash and single-quote are the only metacharacters inside `'…'`.
+fn mysql_quote_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        match ch {
+            '\'' => out.push_str("''"),
+            '\\' => out.push_str("\\\\"),
+            _ => out.push(ch),
+        }
+    }
+    out.push('\'');
+    out
+}
+
+/// `'user'@'host'` account literal with both parts escaped.
+fn mysql_account(user: &str, host: &str) -> String {
+    format!("{}@{}", mysql_quote_str(user), mysql_quote_str(host))
+}
+
+/// Read a text-ish column that MySQL may report as binary (`_bin` collations
+/// on `mysql.user`), decoding via bytes so a `String` type-mismatch can't
+/// silently blank the value. Returns an empty string if the column is absent
+/// or NULL.
+fn mysql_text(row: &MySqlRow, col: &str) -> String {
+    if let Ok(s) = row.try_get::<String, _>(col) {
+        return s;
+    }
+    match row.try_get::<Vec<u8>, _>(col) {
+        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+        Err(_) => String::new(),
+    }
+}
+
+impl MysqlDriver {
+    /// Probe whether the *current* account can manage users. It needs the
+    /// `CREATE USER` privilege (or `ALL PRIVILEGES` / `GRANT OPTION` on `*.*`).
+    /// We read `SHOW GRANTS FOR CURRENT_USER()` and look for those tokens.
+    pub async fn can_manage_users(&self) -> Result<ManageUsersCapability, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        let rows = sqlx::query("SHOW GRANTS FOR CURRENT_USER()")
+            .fetch_all(&mut *conn)
+            .await?;
+
+        let mut can = false;
+        for row in &rows {
+            // Each row is a single grant string like
+            // "GRANT CREATE USER ON *.* TO ...".
+            let line: String = row.try_get::<String, _>(0).unwrap_or_default();
+            let upper = line.to_ascii_uppercase();
+            if upper.contains("ALL PRIVILEGES ON *.*")
+                || upper.contains("CREATE USER")
+                || (upper.contains("ON *.*") && upper.contains("WITH GRANT OPTION"))
+            {
+                can = true;
+                break;
+            }
+        }
+
+        Ok(ManageUsersCapability {
+            can_manage: can,
+            reason: if can {
+                String::new()
+            } else {
+                "requires the CREATE USER privilege (or GRANT OPTION on *.*)".into()
+            },
+        })
+    }
+
+    pub async fn list_users(&self) -> Result<Vec<UserInfo>, AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        // `Super_priv` / account-locking columns exist on modern MySQL and
+        // MariaDB; select the portable core and probe the rest defensively.
+        let rows = sqlx::query(
+            "SELECT User, Host, \
+                    COALESCE(Super_priv, 'N') AS super_priv, \
+                    COALESCE(account_locked, 'N') AS account_locked \
+             FROM mysql.user ORDER BY User, Host",
+        )
+        .fetch_all(&mut *conn)
+        .await?;
+
+        let mut users = Vec::with_capacity(rows.len());
+        for row in rows {
+            // `mysql.user.User` / `Host` use a `_bin` collation, so sqlx often
+            // reports them as binary columns and a `try_get::<String>` fails —
+            // which is why the list rendered blank. Decode as bytes and go
+            // through UTF-8 lossily so we get the name regardless.
+            let name = mysql_text(&row, "User");
+            let host = mysql_text(&row, "Host");
+            let super_priv = mysql_text(&row, "super_priv");
+            let locked = mysql_text(&row, "account_locked");
+            users.push(UserInfo {
+                name,
+                host: Some(host),
+                // Every row in mysql.user is a login account.
+                can_login: Some(true),
+                is_superuser: Some(super_priv.eq_ignore_ascii_case("Y")),
+                is_locked: Some(locked.eq_ignore_ascii_case("Y")),
+                attributes: Vec::new(),
+            });
+        }
+        Ok(users)
+    }
+
+    pub async fn list_grants(&self, user: &UserRef) -> Result<GrantInfo, AdapterError> {
+        let host = user.host.as_deref().unwrap_or("%");
+        let account = mysql_account(&user.name, host);
+        let mut conn = self.pool.acquire().await?;
+        let rows = sqlx::query(&format!("SHOW GRANTS FOR {account}"))
+            .fetch_all(&mut *conn)
+            .await?;
+        let statements = rows
+            .iter()
+            .map(|r| r.try_get::<String, _>(0).unwrap_or_default())
+            .collect();
+        Ok(GrantInfo { statements })
+    }
+
+    pub async fn create_user(&self, req: CreateUserRequest) -> Result<(), AdapterError> {
+        let host = req.host.as_deref().unwrap_or("%");
+        let account = mysql_account(&req.name, host);
+        let mut stmt = format!("CREATE USER {account}");
+        if let Some(pw) = &req.password {
+            stmt.push_str(&format!(" IDENTIFIED BY {}", mysql_quote_str(pw)));
+        }
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&stmt).execute(&mut *conn).await?;
+
+        // Superuser on MySQL == ALL PRIVILEGES ON *.* WITH GRANT OPTION.
+        if req.is_superuser {
+            sqlx::query(&format!(
+                "GRANT ALL PRIVILEGES ON *.* TO {account} WITH GRANT OPTION"
+            ))
+            .execute(&mut *conn)
+            .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn alter_user(&self, req: AlterUserRequest) -> Result<(), AdapterError> {
+        let host = req.host.as_deref().unwrap_or("%");
+        let account = mysql_account(&req.name, host);
+        let mut conn = self.pool.acquire().await?;
+
+        if let Some(pw) = &req.password {
+            if pw.is_empty() {
+                return Err(AdapterError::Other("password cannot be empty".into()));
+            }
+            sqlx::query(&format!(
+                "ALTER USER {account} IDENTIFIED BY {}",
+                mysql_quote_str(pw)
+            ))
+            .execute(&mut *conn)
+            .await?;
+        }
+
+        if let Some(locked) = req.is_locked {
+            let clause = if locked { "ACCOUNT LOCK" } else { "ACCOUNT UNLOCK" };
+            sqlx::query(&format!("ALTER USER {account} {clause}"))
+                .execute(&mut *conn)
+                .await?;
+        }
+
+        if let Some(is_super) = req.is_superuser {
+            let stmt = if is_super {
+                format!("GRANT ALL PRIVILEGES ON *.* TO {account} WITH GRANT OPTION")
+            } else {
+                format!("REVOKE ALL PRIVILEGES, GRANT OPTION FROM {account}")
+            };
+            sqlx::query(&stmt).execute(&mut *conn).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn drop_user(&self, user: &UserRef) -> Result<(), AdapterError> {
+        let host = user.host.as_deref().unwrap_or("%");
+        let account = mysql_account(&user.name, host);
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&format!("DROP USER {account}"))
+            .execute(&mut *conn)
+            .await?;
+        Ok(())
     }
 }
 

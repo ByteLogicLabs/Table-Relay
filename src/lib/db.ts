@@ -205,6 +205,52 @@ export interface KillResult {
   error?: string | null;
 }
 
+// ---- User / role management ----
+
+/** Whether the current connection may manage users, plus why not. */
+export interface ManageUsersCapability {
+  canManage: boolean;
+  reason: string;
+}
+
+/** One database user / role / account. */
+export interface UserInfo {
+  name: string;
+  host?: string | null;
+  canLogin?: boolean | null;
+  isSuperuser?: boolean | null;
+  isLocked?: boolean | null;
+  attributes: string[];
+}
+
+/** The effective grants held by an account, as the engine's own grant lines. */
+export interface GrantInfo {
+  statements: string[];
+}
+
+export interface CreateUserRequest {
+  name: string;
+  host?: string | null;
+  password?: string | null;
+  isSuperuser?: boolean;
+  canLogin?: boolean;
+}
+
+export interface AlterUserRequest {
+  name: string;
+  host?: string | null;
+  password?: string | null;
+  isSuperuser?: boolean | null;
+  canLogin?: boolean | null;
+  isLocked?: boolean | null;
+}
+
+/** Identifies a single account (name + optional MySQL host). */
+export interface UserRef {
+  name: string;
+  host?: string | null;
+}
+
 // ---- Command warnings ----
 
 export type WarningKind =
@@ -355,6 +401,10 @@ export interface Capabilities {
   /** Adapter supports process_list / kill_process — the UI shows a
    *  "Processes" panel when set. */
   processList: boolean;
+  /** Adapter supports user/role management — the sidebar shows a "Users"
+   *  entry when set (still gated at runtime by canManageUsers for the
+   *  current account's privileges). */
+  manageUsers: boolean;
   // file I/O — lists of file-format tokens the adapter can ingest / emit.
   // Empty list = the operation is unsupported by this adapter.
   // Tokens are adapter-neutral ("sql", "csv", "json", "ndjson", "ddl", …)
@@ -725,4 +775,17 @@ export const db = {
   // Command analysis (destructive warning)
   analyzeCommand: (connectionId: string, command: string) =>
     invoke<CommandWarning[]>('db_analyze_command', { connectionId, command }),
+  // User / role management
+  canManageUsers: (connectionId: string) =>
+    invoke<ManageUsersCapability>('db_can_manage_users', { connectionId }),
+  listUsers: (connectionId: string) =>
+    invoke<UserInfo[]>('db_list_users', { connectionId }),
+  listGrants: (connectionId: string, user: UserRef) =>
+    invoke<GrantInfo>('db_list_grants', { connectionId, user }),
+  createUser: (connectionId: string, request: CreateUserRequest) =>
+    invoke<void>('db_create_user', { connectionId, request }),
+  alterUser: (connectionId: string, request: AlterUserRequest) =>
+    invoke<void>('db_alter_user', { connectionId, request }),
+  dropUser: (connectionId: string, user: UserRef) =>
+    invoke<void>('db_drop_user', { connectionId, user }),
 };

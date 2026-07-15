@@ -111,6 +111,11 @@ pub struct Capabilities {
     /// Adapter supports `process_list` / `kill_process` — the UI shows
     /// a "Processes" panel when set.
     pub process_list: bool,
+    /// Adapter supports user/role management — `can_manage_users`,
+    /// `list_users`, `list_grants`, `create_user`, `alter_user`, `drop_user`.
+    /// The sidebar shows a "Users" entry when set (still gated at runtime by
+    /// `can_manage_users` for the current account's privileges).
+    pub manage_users: bool,
     // file-level I/O — lists of file-format tokens the adapter can
     // ingest / emit. Empty slice = the operation is unsupported. Token
     // vocabulary is deliberately adapter-neutral ("sql", "csv", "json",

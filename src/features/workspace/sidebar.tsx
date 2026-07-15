@@ -15,6 +15,7 @@ import {
   Waypoints,
   Radio,
   Activity,
+  Users,
   FileUp,
   FileDown,
   Unplug,
@@ -40,6 +41,7 @@ import DatabasePickerDialog from "../connections/database-picker-dialog";
 import ConnectionManagerDialog from "../connections/connection-manager-dialog";
 import ConnectPickerDialog from "../connections/connect-picker-dialog";
 import { ProcessListPanel } from "../process-list/process-list-panel";
+import { UsersPanel } from "../users/users-panel";
 import { ConnectionProfile } from "../../types";
 import {
   connectAndLoad,
@@ -285,6 +287,11 @@ export default function Sidebar({
   // where historically everything supported them.
   const supportsRealtime = activeManifest?.capabilities.realtime ?? false;
   const supportsProcessList = activeManifest?.capabilities.processList ?? false;
+  // User management defaults to `false` (only the SQL adapters that declare it
+  // are shown) so document/KV stores don't flash the entry while manifests
+  // load. Runtime privilege gating happens inside the panel.
+  const supportsManageUsers =
+    activeManifest?.capabilities.manageUsers ?? false;
   // Create-table is offered for SQL adapters (createTable DDL) and for
   // document stores, where the same "new" flow creates a collection.
   const supportsCreateTable =
@@ -313,6 +320,7 @@ export default function Sidebar({
     : null;
   const [retrying, setRetrying] = useState(false);
   const [processListOpen, setProcessListOpen] = useState(false);
+  const [usersOpen, setUsersOpen] = useState(false);
 
   // Minimum-visible-time gate for the post-connect spinner.
   //
@@ -1066,6 +1074,7 @@ export default function Sidebar({
     () => setProcessListOpen(true),
     [],
   );
+  const handleOpenUsers = useCallback(() => setUsersOpen(true), []);
   const handleNewQuery = useCallback(() => {
     if (conn) onNewQuery(conn.id);
   }, [conn, onNewQuery]);
@@ -1237,6 +1246,18 @@ export default function Sidebar({
             <Activity className="w-4 h-4" />
           </Button>
         )}
+        {supportsManageUsers && (
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            title="Users & Privileges"
+            aria-label="Users & Privileges"
+            onClick={handleOpenUsers}
+          >
+            <Users className="w-4 h-4" />
+          </Button>
+        )}
       </div>
 
       {/* Header: server + database dropdown */}
@@ -1298,6 +1319,11 @@ export default function Sidebar({
               {supportsProcessList && (
                 <DropdownMenuItem onClick={handleOpenProcessList}>
                   <Activity className="w-4 h-4 mr-2" /> Processes
+                </DropdownMenuItem>
+              )}
+              {supportsManageUsers && (
+                <DropdownMenuItem onClick={handleOpenUsers}>
+                  <Users className="w-4 h-4 mr-2" /> Users & Privileges
                 </DropdownMenuItem>
               )}
               {(onImportSql && supportsImport) ||
@@ -1363,6 +1389,15 @@ export default function Sidebar({
           open={processListOpen}
           onOpenChange={setProcessListOpen}
           connectionId={conn.id}
+        />
+      )}
+
+      {conn && usersOpen && (
+        <UsersPanel
+          open={usersOpen}
+          onOpenChange={setUsersOpen}
+          connectionId={conn.id}
+          driver={conn.driver}
         />
       )}
 
