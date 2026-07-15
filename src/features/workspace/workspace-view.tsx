@@ -1598,6 +1598,18 @@ export default function WorkspaceView({
     );
   };
 
+  // The editor reports the file its buffer is bound to (or null when unbound)
+  // so "Save Query" writes back to it across restarts. Normalize null → absent.
+  const handleTabFilePathChange = (tabId: string, filePath: string | null) => {
+    setTabs((prev) =>
+      prev.map((t) =>
+        t.id === tabId && t.filePath !== (filePath ?? undefined)
+          ? { ...t, filePath: filePath ?? undefined }
+          : t,
+      ),
+    );
+  };
+
   // An editor reports whether it has unsaved edits so the tab strip can show a
   // VSCode-style unsaved dot. Cheap no-op when the flag is unchanged.
   const handleTabDirtyChange = (tabId: string, dirty: boolean) => {
@@ -2043,6 +2055,7 @@ export default function WorkspaceView({
           onOpenRealtime={handleNewRealtime}
           onTabViewModeChange={handleTabViewModeChange}
           onTabQueryChange={handleTabQueryChange}
+          onTabFilePathChange={handleTabFilePathChange}
           onTabTriggerDraftChange={handleTabTriggerDraftChange}
           onTabDirtyChange={handleTabDirtyChange}
           onTabRealtimePatternChange={handleTabRealtimePatternChange}

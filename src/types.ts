@@ -64,6 +64,11 @@ export interface AppTab {
   database?: string;
   table?: string; // For data and structure tabs
   query?: string; // For query tab
+  /** Path of the file a query tab's buffer is bound to (set on Save As or on
+   *  loading a file into an empty editor). Persisted so "Save Query" writes
+   *  back to the same file across tab switches AND app restarts, instead of
+   *  falling back to a Save As prompt. Undefined = no bound file yet. */
+  filePath?: string;
   schemaName?: string; // For erd tab (legacy alias for schema)
   isNew?: boolean; // Indicates if the structure represents a new table
   /** True when the tab's editor has unsaved edits. Editors report this up via
