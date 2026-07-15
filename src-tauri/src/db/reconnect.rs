@@ -71,6 +71,12 @@ fn is_transient_other(err: &AdapterError) -> bool {
         || msg.contains("connection refused")
         || msg.contains("connection closed")
         || msg.contains("unexpected eof")
+        // sqlx's message for a stale/dropped connection (e.g. MySQL closing an
+        // idle pooled socket via wait_timeout): "expected to read N bytes, got
+        // 0 bytes at EOF". Distinct wording from "unexpected eof", so match it
+        // explicitly — otherwise it surfaces raw instead of retrying on a fresh
+        // connection, which the reconnect supervisor is designed to do.
+        || msg.contains("bytes at eof")
         || msg.contains("no route to host")
 }
 
