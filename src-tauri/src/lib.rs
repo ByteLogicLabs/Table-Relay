@@ -476,6 +476,13 @@ pub fn run() {
             commands::db::db_kill_process,
             commands::db::db_kill_processes,
             commands::db::db_analyze_command,
+            // User / role management.
+            commands::db::db_can_manage_users,
+            commands::db::db_list_users,
+            commands::db::db_list_grants,
+            commands::db::db_create_user,
+            commands::db::db_alter_user,
+            commands::db::db_drop_user,
             // Rail tiles (pinned server + database pairs).
             commands::rail::rail_list,
             commands::rail::rail_pin,

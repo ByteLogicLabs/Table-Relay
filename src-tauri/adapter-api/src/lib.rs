@@ -71,10 +71,12 @@ pub use manifest::{
     FieldKind, Permissions, Provenance, QueryEditorInfo, RealtimeKind, SqlDialect,
 };
 pub use types::{
-    BrowseResult, ColumnInfo, ColumnMeta, CommandWarning, ConnectionProfile, ForeignKey, IndexInfo,
-    KillResult, ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam, MAX_RESULT_ROWS,
+    AlterUserRequest, BrowseResult, ColumnInfo, ColumnMeta, CommandWarning, ConnectionProfile,
+    CreateUserRequest, ForeignKey, GrantInfo, IndexInfo, KillResult, ManageUsersCapability,
+    ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam,
     SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind,
-    TableStructure, TriggerDefinition, TriggerInfo, ViewInfo, WarningKind,
+    TableStructure, TriggerDefinition, TriggerInfo, UserInfo, UserRef, ViewInfo, WarningKind,
+    MAX_RESULT_ROWS,
 };
 
 /// Contract every built-in adapter implements.
@@ -441,6 +443,58 @@ pub trait Adapter: Send + Sync {
             }
         }
         Ok(results)
+    }
+
+    // ---- user / role management ----------------------------------------
+
+    /// Can the *current* connection manage other users? Runs a cheap
+    /// privilege probe (MySQL `SHOW GRANTS FOR CURRENT_USER()`, Postgres
+    /// `rolsuper`/`rolcreaterole`) so the UI can disable the create/alter/
+    /// drop controls for an under-privileged account instead of letting the
+    /// action fail. Default returns `can_manage = false` — adapters opt in by
+    /// overriding and flipping `Capabilities::manage_users` in the manifest.
+    async fn can_manage_users(&self) -> Result<ManageUsersCapability, AdapterError> {
+        Ok(ManageUsersCapability {
+            can_manage: false,
+            reason: "user management is not supported by this adapter".into(),
+        })
+    }
+
+    /// List every user / role / account on the server. Default Unsupported.
+    async fn list_users(&self) -> Result<Vec<UserInfo>, AdapterError> {
+        Err(AdapterError::Unsupported(
+            "list_users not supported by this adapter".into(),
+        ))
+    }
+
+    /// The effective grants / privileges held by a single account, as the
+    /// engine's own grant lines. Default Unsupported.
+    async fn list_grants(&self, _user: &UserRef) -> Result<GrantInfo, AdapterError> {
+        Err(AdapterError::Unsupported(
+            "list_grants not supported by this adapter".into(),
+        ))
+    }
+
+    /// Create a new user / role. Default Unsupported.
+    async fn create_user(&self, _req: CreateUserRequest) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "create_user not supported by this adapter".into(),
+        ))
+    }
+
+    /// Alter an existing user / role (password, privileges, lock). Only the
+    /// `Some` fields on the request are applied. Default Unsupported.
+    async fn alter_user(&self, _req: AlterUserRequest) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "alter_user not supported by this adapter".into(),
+        ))
+    }
+
+    /// Drop a user / role. Default Unsupported.
+    async fn drop_user(&self, _user: &UserRef) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "drop_user not supported by this adapter".into(),
+        ))
     }
 
     // ---- realtime ------------------------------------------------------

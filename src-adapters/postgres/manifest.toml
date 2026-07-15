@@ -65,6 +65,7 @@ query_editor      = true
 explain_plan      = true
 ssh_tunnel        = true
 process_list      = true
+manage_users      = true
 
 import            = ["sql", "ddl", "txt"]
 export            = ["csv", "json", "sql"]
