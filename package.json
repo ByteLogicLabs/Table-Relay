@@ -5,6 +5,7 @@
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
+    "predev": "npm run sweep:rust",
     "dev": "vite",
     "build": "tsc && cross-env NODE_OPTIONS=--max-old-space-size=4096 vite build",
     "preview": "vite preview",
