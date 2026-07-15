@@ -534,7 +534,18 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
   // Deletion needs the same "one base-table row, PK present" guarantee editing
   // does (to build a safe WHERE), plus the adapter must support row deletes.
   const resultIsDeletable = resultIsEditable && !!activeManifest?.capabilities.deleteRows;
-  const selectedRowCount = selectedResultRows.size;
+  // Only rows currently visible (matching the active filter) count as selected
+  // for deletion. Without this, "select all" then narrowing the filter would
+  // still delete the now-hidden rows — a silent data-loss footgun. Intersecting
+  // the selection with `filteredRows` keeps the count, the header checkbox, the
+  // confirm dialog, and the actual delete all operating on exactly what's on
+  // screen. Rows that scroll out of the filter stay in the set (so clearing the
+  // filter restores them) but can't be deleted while hidden.
+  const visibleSelectedIndices = useMemo(
+    () => filteredRows.filter(r => selectedResultRows.has(r.idx)).map(r => r.idx),
+    [filteredRows, selectedResultRows],
+  );
+  const selectedRowCount = visibleSelectedIndices.length;
 
   const handleSaveResultEdits = async () => {
     if (!resultIsEditable || !activeResult || !editableStructure) return;
@@ -616,7 +627,8 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
   // result we can't map to a single base-table row.
   const handleDeleteSelectedRows = async () => {
     if (!resultIsDeletable || !activeResult || !editableStructure) return;
-    const rowIndices = [...selectedResultRows];
+    // Delete only rows visible under the current filter (see visibleSelectedIndices).
+    const rowIndices = visibleSelectedIndices;
     if (rowIndices.length === 0) return;
     setIsDeletingRows(true);
     const started = performance.now();

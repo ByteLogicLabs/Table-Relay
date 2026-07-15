@@ -516,7 +516,12 @@ function UserForm({ connectionId, withHost, mode, onCancel, onSaved }: FormProps
           isSuperuser:
             existing.isSuperuser !== isSuperuser ? isSuperuser : null,
           canLogin: existing.canLogin !== canLogin ? canLogin : null,
-          isLocked: existing.isLocked !== isLocked ? isLocked : null,
+          // Only send a lock change when the server actually has a lock concept
+          // (MySQL sets is_locked to a real bool; Postgres leaves it null, and
+          // its "lock" is proxied to NOLOGIN). Without the null guard, PG edits
+          // always saw `null !== false` → sent false → silently appended LOGIN,
+          // turning NOLOGIN roles into login roles on every edit.
+          isLocked: existing.isLocked != null && existing.isLocked !== isLocked ? isLocked : null,
         });
         toast.success('User updated');
       } else {
