@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use adapter_api::{
     AdapterError, AlterUserRequest, ColumnInfo, ColumnMeta, CreateUserRequest, ForeignKey,
-    GrantInfo, IndexInfo, KillResult, ManageUsersCapability, ProcessInfo, ProcessKind, QueryResult,
+    GrantInfo, GrantRequest, IndexInfo, KillResult, ManageUsersCapability, ProcessInfo, ProcessKind,
+    QueryResult,
     RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest, SchemaInfo, ServerDetail,
     ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, TriggerDefinition,
     TriggerInfo, UserInfo, UserRef, ViewInfo,
@@ -2152,6 +2153,68 @@ fn mysql_account(user: &str, host: &str) -> String {
     format!("{}@{}", mysql_quote_str(user), mysql_quote_str(host))
 }
 
+/// Backtick-quote a MySQL identifier (database / table), doubling any internal
+/// backtick. GRANT/REVOKE take the scope as `` `db`.`table` `` and don't accept
+/// bind parameters, so every identifier is routed through this.
+fn mysql_quote_ident(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('`');
+    for ch in s.chars() {
+        if ch == '`' {
+            out.push('`');
+        }
+        out.push(ch);
+    }
+    out.push('`');
+    out
+}
+
+/// A privilege token is safe to interpolate iff it is only ASCII uppercase
+/// letters and underscores in space-separated words. This admits every real
+/// MySQL privilege — static (`SELECT`, `CREATE VIEW`) AND MySQL 8 dynamic ones
+/// (`SYSTEM_USER`, `AUDIT_ABORT_EXEMPT`, `FIREWALL_EXEMPT`, …) — while making
+/// injection impossible: no quote, semicolon, comment, paren, or wildcard can
+/// appear. An unknown-but-well-formed privilege is left for the server to
+/// reject (a harmless SQL error), not a way to smuggle SQL.
+fn is_privilege_token(s: &str) -> bool {
+    !s.is_empty()
+        && s.split(' ')
+            .all(|w| !w.is_empty() && w.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'))
+}
+
+/// Validate + normalize a requested privilege list into the comma-joined SQL
+/// fragment. Each entry is whitespace-collapsed + upper-cased; `ALL` is an alias
+/// for `ALL PRIVILEGES`. A token with any character outside `[A-Z_ ]` fails the
+/// whole request.
+fn validate_mysql_privileges(input: &[String]) -> Result<String, AdapterError> {
+    if input.is_empty() {
+        return Err(AdapterError::Other("no privileges selected".into()));
+    }
+    let mut out = Vec::with_capacity(input.len());
+    for p in input {
+        let norm = p.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+        let norm = if norm == "ALL" { "ALL PRIVILEGES".to_string() } else { norm };
+        if !is_privilege_token(&norm) {
+            return Err(AdapterError::Other(format!("unsupported privilege: {p}")));
+        }
+        out.push(norm);
+    }
+    Ok(out.join(", "))
+}
+
+/// Build the MySQL grant scope from the optional database / table. A missing
+/// database means global (`*.*`); a database without a table means the whole
+/// database (`` `db`.* ``).
+fn mysql_scope(database: Option<&str>, table: Option<&str>) -> String {
+    match (database, table) {
+        (None, _) => "*.*".to_string(),
+        (Some(db), None) => format!("{}.*", mysql_quote_ident(db)),
+        (Some(db), Some(tbl)) => {
+            format!("{}.{}", mysql_quote_ident(db), mysql_quote_ident(tbl))
+        }
+    }
+}
+
 /// Read a text-ish column that MySQL may report as binary (`_bin` collations
 /// on `mysql.user`), decoding via bytes so a `String` type-mismatch can't
 /// silently blank the value. Returns an empty string if the column is absent
@@ -2232,6 +2295,8 @@ impl MysqlDriver {
                 is_superuser: Some(super_priv.eq_ignore_ascii_case("Y")),
                 is_locked: Some(locked.eq_ignore_ascii_case("Y")),
                 attributes: Vec::new(),
+                roles: Vec::new(),
+                database: None,
             });
         }
         Ok(users)
@@ -2316,6 +2381,37 @@ impl MysqlDriver {
             .await?;
         Ok(())
     }
+
+    pub async fn grant_privileges(&self, req: GrantRequest) -> Result<(), AdapterError> {
+        let privs = validate_mysql_privileges(&req.privileges)?;
+        let host = req.user.host.as_deref().unwrap_or("%");
+        let account = mysql_account(&req.user.name, host);
+        let scope = mysql_scope(req.database.as_deref(), req.table.as_deref());
+        let mut stmt = format!("GRANT {privs} ON {scope} TO {account}");
+        if req.with_grant_option {
+            stmt.push_str(" WITH GRANT OPTION");
+        }
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&stmt).execute(&mut *conn).await?;
+        Ok(())
+    }
+
+    pub async fn revoke_privileges(&self, req: GrantRequest) -> Result<(), AdapterError> {
+        let privs = validate_mysql_privileges(&req.privileges)?;
+        let host = req.user.host.as_deref().unwrap_or("%");
+        let account = mysql_account(&req.user.name, host);
+        let scope = mysql_scope(req.database.as_deref(), req.table.as_deref());
+        let stmt = format!("REVOKE {privs} ON {scope} FROM {account}");
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&stmt).execute(&mut *conn).await?;
+        Ok(())
+    }
+
+    pub async fn flush_privileges(&self) -> Result<(), AdapterError> {
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("FLUSH PRIVILEGES").execute(&mut *conn).await?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2355,5 +2451,68 @@ mod limit_tests {
     #[test]
     fn ignores_collimit_lookalike() {
         assert!(!has_limit_clause("SELECT COLLIMIT FROM t"));
+    }
+}
+
+#[cfg(test)]
+mod grant_tests {
+    use super::{mysql_quote_ident, mysql_scope, validate_mysql_privileges};
+
+    #[test]
+    fn accepts_known_privileges_normalized() {
+        let out = validate_mysql_privileges(&["select".into(), "Insert".into()]).unwrap();
+        assert_eq!(out, "SELECT, INSERT");
+    }
+
+    #[test]
+    fn all_alias_expands() {
+        let out = validate_mysql_privileges(&["all".into()]).unwrap();
+        assert_eq!(out, "ALL PRIVILEGES");
+    }
+
+    #[test]
+    fn multiword_privilege_whitespace_collapsed() {
+        let out = validate_mysql_privileges(&["create   view".into()]).unwrap();
+        assert_eq!(out, "CREATE VIEW");
+    }
+
+    #[test]
+    fn accepts_dynamic_privileges() {
+        // MySQL 8 dynamic privileges (underscored, not in any fixed list) map
+        // through unchanged.
+        let out = validate_mysql_privileges(&[
+            "system_user".into(),
+            "AUDIT_ABORT_EXEMPT".into(),
+        ])
+        .unwrap();
+        assert_eq!(out, "SYSTEM_USER, AUDIT_ABORT_EXEMPT");
+    }
+
+    #[test]
+    fn rejects_injection_in_privilege() {
+        // Any character outside [A-Z_ ] (here an injection payload) is refused.
+        assert!(validate_mysql_privileges(&["SELECT; DROP DATABASE x".into()]).is_err());
+        assert!(validate_mysql_privileges(&["ALL PRIVILEGES ON *.* TO evil".into()]).is_err());
+        assert!(validate_mysql_privileges(&["SELECT(secret)".into()]).is_err());
+    }
+
+    #[test]
+    fn rejects_empty_privilege_list() {
+        assert!(validate_mysql_privileges(&[]).is_err());
+    }
+
+    #[test]
+    fn quotes_identifier_and_escapes_backtick() {
+        assert_eq!(mysql_quote_ident("db"), "`db`");
+        assert_eq!(mysql_quote_ident("we`ird"), "`we``ird`");
+    }
+
+    #[test]
+    fn scope_levels() {
+        assert_eq!(mysql_scope(None, None), "*.*");
+        assert_eq!(mysql_scope(Some("app"), None), "`app`.*");
+        assert_eq!(mysql_scope(Some("app"), Some("users")), "`app`.`users`");
+        // A backtick in an identifier can't break out of the scope.
+        assert_eq!(mysql_scope(Some("a`b"), None), "`a``b`.*");
     }
 }

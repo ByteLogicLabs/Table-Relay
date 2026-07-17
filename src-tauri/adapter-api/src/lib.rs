@@ -72,8 +72,9 @@ pub use manifest::{
 };
 pub use types::{
     AlterUserRequest, BrowseResult, ColumnInfo, ColumnMeta, CommandWarning, ConnectionProfile,
-    CreateUserRequest, ForeignKey, GrantInfo, IndexInfo, KillResult, ManageUsersCapability,
-    ProcessInfo, ProcessKind, QueryResult, RoutineDefinition, RoutineInfo, RoutineParam,
+    CreateUserRequest, ForeignKey, GrantInfo, GrantRequest, IndexInfo, KillResult,
+    ManageUsersCapability, ProcessInfo, ProcessKind, QueryResult, RoleGrant, RoutineDefinition,
+    RoutineInfo, RoutineParam,
     SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, StatementResult, TableInfo, TableKind,
     TableStructure, TriggerDefinition, TriggerInfo, UserInfo, UserRef, ViewInfo, WarningKind,
     MAX_RESULT_ROWS,
@@ -494,6 +495,31 @@ pub trait Adapter: Send + Sync {
     async fn drop_user(&self, _user: &UserRef) -> Result<(), AdapterError> {
         Err(AdapterError::Unsupported(
             "drop_user not supported by this adapter".into(),
+        ))
+    }
+
+    /// GRANT a set of privileges on a scope to an account. Privileges are
+    /// validated against the engine's allowlist and identifiers are quoted.
+    /// Default Unsupported.
+    async fn grant_privileges(&self, _req: GrantRequest) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "grant_privileges not supported by this adapter".into(),
+        ))
+    }
+
+    /// REVOKE a set of privileges on a scope from an account. Default Unsupported.
+    async fn revoke_privileges(&self, _req: GrantRequest) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "revoke_privileges not supported by this adapter".into(),
+        ))
+    }
+
+    /// Reload the in-memory grant tables (MySQL `FLUSH PRIVILEGES`). Only needed
+    /// when the grant tables were edited directly; GRANT/REVOKE already reload.
+    /// Default Unsupported (Postgres and others apply grants immediately).
+    async fn flush_privileges(&self) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported(
+            "flush_privileges not supported by this adapter".into(),
         ))
     }
 

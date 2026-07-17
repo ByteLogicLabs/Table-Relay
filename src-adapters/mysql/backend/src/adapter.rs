@@ -6,7 +6,8 @@ use std::sync::Arc;
 
 use adapter_api::{
     Adapter, AdapterError, AlterUserRequest, BrowseRequest, BrowseResult, CommandWarning,
-    CountRequest, CreateUserRequest, ForeignKey, GrantInfo, KillResult, ManageUsersCapability,
+    CountRequest, CreateUserRequest, ForeignKey, GrantInfo, GrantRequest, KillResult,
+    ManageUsersCapability,
     MutateRequest, Mutation, ProcessInfo, QueryResult, RoutineDefinition, RoutineInfo,
     SaveTriggerRequest, SchemaInfo, ServerDetail, ServerInfo, TableStructure, TriggerDefinition,
     TriggerInfo, UserInfo, UserRef, ViewInfo,
@@ -224,6 +225,18 @@ impl Adapter for MysqlAdapter {
 
     async fn drop_user(&self, user: &UserRef) -> Result<(), AdapterError> {
         self.driver.drop_user(user).await
+    }
+
+    async fn grant_privileges(&self, req: GrantRequest) -> Result<(), AdapterError> {
+        self.driver.grant_privileges(req).await
+    }
+
+    async fn revoke_privileges(&self, req: GrantRequest) -> Result<(), AdapterError> {
+        self.driver.revoke_privileges(req).await
+    }
+
+    async fn flush_privileges(&self) -> Result<(), AdapterError> {
+        self.driver.flush_privileges().await
     }
 
     async fn shutdown(&self) {

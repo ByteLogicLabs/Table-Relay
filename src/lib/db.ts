@@ -216,6 +216,12 @@ export interface ManageUsersCapability {
   reason: string;
 }
 
+/** A Mongo role grant: a role scoped to a database. */
+export interface RoleGrant {
+  role: string;
+  db: string;
+}
+
 /** One database user / role / account. */
 export interface UserInfo {
   name: string;
@@ -224,6 +230,10 @@ export interface UserInfo {
   isSuperuser?: boolean | null;
   isLocked?: boolean | null;
   attributes: string[];
+  /** Mongo role grants (empty for SQL engines). */
+  roles?: RoleGrant[];
+  /** Mongo: the database the user authenticates against. */
+  database?: string | null;
 }
 
 /** The effective grants held by an account, as the engine's own grant lines. */
@@ -237,6 +247,10 @@ export interface CreateUserRequest {
   password?: string | null;
   isSuperuser?: boolean;
   canLogin?: boolean;
+  /** Mongo: database to create the user in (defaults to `admin`). */
+  database?: string | null;
+  /** Mongo: roles to grant on creation. */
+  roles?: RoleGrant[];
 }
 
 export interface AlterUserRequest {
@@ -246,12 +260,29 @@ export interface AlterUserRequest {
   isSuperuser?: boolean | null;
   canLogin?: boolean | null;
   isLocked?: boolean | null;
+  /** Mongo: the user's database. */
+  database?: string | null;
+  /** Mongo: replace the user's roles (undefined leaves them unchanged). */
+  roles?: RoleGrant[] | null;
 }
 
-/** Identifies a single account (name + optional MySQL host). */
+/** Identifies a single account (name + optional MySQL host / Mongo database). */
 export interface UserRef {
   name: string;
   host?: string | null;
+  database?: string | null;
+}
+
+/** GRANT/REVOKE a privilege set on a scope. Scope is engine-specific: for
+ *  MySQL `database`=DB (undefined = global `*.*`), `table`=table; for Postgres
+ *  `database` carries the schema and global scope isn't allowed. Privileges are
+ *  validated against the engine's allowlist on the backend. */
+export interface GrantRequest {
+  user: UserRef;
+  privileges: string[];
+  database?: string | null;
+  table?: string | null;
+  withGrantOption?: boolean;
 }
 
 // ---- Command warnings ----
@@ -791,4 +822,11 @@ export const db = {
     invoke<void>('db_alter_user', { connectionId, request }),
   dropUser: (connectionId: string, user: UserRef) =>
     invoke<void>('db_drop_user', { connectionId, user }),
+  grantPrivileges: (connectionId: string, request: GrantRequest) =>
+    invoke<void>('db_grant_privileges', { connectionId, request }),
+  revokePrivileges: (connectionId: string, request: GrantRequest) =>
+    invoke<void>('db_revoke_privileges', { connectionId, request }),
+  /** MySQL FLUSH PRIVILEGES — reload the in-memory grant tables. */
+  flushPrivileges: (connectionId: string) =>
+    invoke<void>('db_flush_privileges', { connectionId }),
 };

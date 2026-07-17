@@ -14,7 +14,8 @@ use std::time::Instant;
 use adapter_api::log_line;
 use adapter_api::{
     AdapterError, AlterUserRequest, ColumnInfo, ColumnMeta, CreateUserRequest, ForeignKey,
-    GrantInfo, IndexInfo, KillResult, ManageUsersCapability, ProcessInfo, ProcessKind, QueryResult,
+    GrantInfo, GrantRequest, IndexInfo, KillResult, ManageUsersCapability, ProcessInfo, ProcessKind,
+    QueryResult,
     RoutineDefinition, RoutineInfo, RoutineParam, SaveTriggerRequest, SchemaInfo, ServerDetail,
     ServerInfo, StatementResult, TableInfo, TableKind, TableStructure, TriggerDefinition,
     TriggerInfo, UserInfo, UserRef, ViewInfo,
@@ -1333,6 +1334,51 @@ fn pg_quote_ident(s: &str) -> String {
     out
 }
 
+/// Table-level privileges accepted in a Postgres GRANT/REVOKE. Strict
+/// allowlist: the privilege list is the one part interpolated verbatim (not
+/// identifier/string quoted), so anything outside this set is rejected to keep
+/// the statement injection-proof.
+const PG_TABLE_PRIVILEGES: &[&str] = &[
+    "ALL PRIVILEGES",
+    "SELECT",
+    "INSERT",
+    "UPDATE",
+    "DELETE",
+    "TRUNCATE",
+    "REFERENCES",
+    "TRIGGER",
+];
+
+/// Validate + normalize a requested privilege list into the comma-joined SQL
+/// fragment. `ALL` is accepted as an alias for `ALL PRIVILEGES`; an unknown
+/// privilege fails the whole request.
+fn validate_pg_privileges(input: &[String]) -> Result<String, AdapterError> {
+    if input.is_empty() {
+        return Err(AdapterError::Other("no privileges selected".into()));
+    }
+    let mut out = Vec::with_capacity(input.len());
+    for p in input {
+        let norm = p.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_uppercase();
+        let norm = if norm == "ALL" { "ALL PRIVILEGES".to_string() } else { norm };
+        if !PG_TABLE_PRIVILEGES.contains(&norm.as_str()) {
+            return Err(AdapterError::Other(format!("unsupported privilege: {p}")));
+        }
+        out.push(norm);
+    }
+    Ok(out.join(", "))
+}
+
+/// Resolve the schema a grant targets. Postgres table privileges are
+/// schema-scoped, so a schema is required — there is no cluster-wide table
+/// grant. The request's `database` field carries the schema name for Postgres.
+fn pg_grant_schema(req: &GrantRequest) -> Result<&str, AdapterError> {
+    req.database.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+        AdapterError::Other(
+            "Postgres grants need a schema — pick Schema or Table scope.".into(),
+        )
+    })
+}
+
 /// Quote a Postgres string literal (e.g. a password in `PASSWORD '…'`): wrap
 /// in single quotes and double any internal single-quote.
 fn pg_quote_str(s: &str) -> String {
@@ -1413,6 +1459,8 @@ impl PostgresDriver {
                 is_superuser: Some(is_super),
                 is_locked: None,
                 attributes,
+                roles: Vec::new(),
+                database: None,
             });
         }
         Ok(users)
@@ -1563,6 +1611,45 @@ impl PostgresDriver {
         sqlx::query(&format!("DROP ROLE {ident}"))
             .execute(&mut *conn)
             .await?;
+        Ok(())
+    }
+
+    pub async fn grant_privileges(&self, req: GrantRequest) -> Result<(), AdapterError> {
+        let privs = validate_pg_privileges(&req.privileges)?;
+        let role = pg_quote_ident(&req.user.name);
+        let schema_q = pg_quote_ident(pg_grant_schema(&req)?);
+        let mut conn = self.pool.acquire().await?;
+        // A role needs USAGE on the schema before it can reach anything inside
+        // it; grant it first so a fresh role isn't left with table rights it
+        // can't actually exercise.
+        sqlx::query(&format!("GRANT USAGE ON SCHEMA {schema_q} TO {role}"))
+            .execute(&mut *conn)
+            .await?;
+        let target = match req.table.as_deref() {
+            Some(tbl) => format!("TABLE {schema_q}.{}", pg_quote_ident(tbl)),
+            None => format!("ALL TABLES IN SCHEMA {schema_q}"),
+        };
+        let mut stmt = format!("GRANT {privs} ON {target} TO {role}");
+        if req.with_grant_option {
+            stmt.push_str(" WITH GRANT OPTION");
+        }
+        sqlx::query(&stmt).execute(&mut *conn).await?;
+        Ok(())
+    }
+
+    pub async fn revoke_privileges(&self, req: GrantRequest) -> Result<(), AdapterError> {
+        let privs = validate_pg_privileges(&req.privileges)?;
+        let role = pg_quote_ident(&req.user.name);
+        let schema_q = pg_quote_ident(pg_grant_schema(&req)?);
+        // Leave the schema's USAGE grant in place — the role may hold other
+        // grants inside it; only revoke the requested table privileges.
+        let target = match req.table.as_deref() {
+            Some(tbl) => format!("TABLE {schema_q}.{}", pg_quote_ident(tbl)),
+            None => format!("ALL TABLES IN SCHEMA {schema_q}"),
+        };
+        let stmt = format!("REVOKE {privs} ON {target} FROM {role}");
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query(&stmt).execute(&mut *conn).await?;
         Ok(())
     }
 }
@@ -2383,6 +2470,43 @@ fn decode_pg_tgtype(tgtype: i16) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pg_privileges_normalized_and_all_alias() {
+        assert_eq!(
+            validate_pg_privileges(&["select".into(), "Insert".into()]).unwrap(),
+            "SELECT, INSERT"
+        );
+        assert_eq!(validate_pg_privileges(&["all".into()]).unwrap(), "ALL PRIVILEGES");
+    }
+
+    #[test]
+    fn pg_rejects_unknown_privilege_injection() {
+        assert!(validate_pg_privileges(&["SELECT; DROP SCHEMA public".into()]).is_err());
+        // MySQL-only privileges aren't valid Postgres table privileges.
+        assert!(validate_pg_privileges(&["LOCK TABLES".into()]).is_err());
+        assert!(validate_pg_privileges(&[]).is_err());
+    }
+
+    #[test]
+    fn pg_grant_needs_a_schema() {
+        let no_schema = GrantRequest {
+            user: UserRef { name: "r".into(), host: None, database: None },
+            privileges: vec!["SELECT".into()],
+            database: None,
+            table: None,
+            with_grant_option: false,
+        };
+        assert!(pg_grant_schema(&no_schema).is_err());
+        let with_schema = GrantRequest { database: Some("public".into()), ..no_schema };
+        assert_eq!(pg_grant_schema(&with_schema).unwrap(), "public");
+    }
+
+    #[test]
+    fn pg_quotes_identifier_and_escapes_quote() {
+        assert_eq!(pg_quote_ident("tbl"), "\"tbl\"");
+        assert_eq!(pg_quote_ident("we\"ird"), "\"we\"\"ird\"");
+    }
 
     #[test]
     fn detects_inline_limit() {

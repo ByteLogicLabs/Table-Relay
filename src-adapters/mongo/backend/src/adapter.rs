@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    Adapter, AdapterError, BrowseRequest, BrowseResult, CommandWarning, CountRequest,
-    ModifyIndexesRequest, MutateRequest, Mutation, ProcessInfo, QueryResult, SchemaInfo,
-    ServerDetail, ServerInfo, TableStructure,
+    Adapter, AdapterError, AlterUserRequest, BrowseRequest, BrowseResult, CommandWarning,
+    CountRequest, CreateUserRequest, ManageUsersCapability, ModifyIndexesRequest, MutateRequest,
+    Mutation, ProcessInfo, QueryResult, SchemaInfo, ServerDetail, ServerInfo, TableStructure,
+    UserInfo, UserRef,
 };
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
@@ -122,6 +123,28 @@ impl Adapter for MongoAdapter {
 
     async fn kill_process(&self, id: &str) -> Result<(), AdapterError> {
         self.driver.kill_process(id).await
+    }
+
+    // ---- user / role management (role-based; see `users` module) ----
+
+    async fn can_manage_users(&self) -> Result<ManageUsersCapability, AdapterError> {
+        crate::users::can_manage_users(&self.driver).await
+    }
+
+    async fn list_users(&self) -> Result<Vec<UserInfo>, AdapterError> {
+        crate::users::list_users(&self.driver).await
+    }
+
+    async fn create_user(&self, req: CreateUserRequest) -> Result<(), AdapterError> {
+        crate::users::create_user(&self.driver, req).await
+    }
+
+    async fn alter_user(&self, req: AlterUserRequest) -> Result<(), AdapterError> {
+        crate::users::alter_user(&self.driver, req).await
+    }
+
+    async fn drop_user(&self, user: &UserRef) -> Result<(), AdapterError> {
+        crate::users::drop_user(&self.driver, user).await
     }
 
     async fn subscribe(
