@@ -414,6 +414,16 @@ pub struct ManageUsersCapability {
     pub reason: String,
 }
 
+/// A role granted to a Mongo user on a specific database (e.g.
+/// `{ role: "readWrite", db: "sales" }`). SQL engines don't use this — their
+/// access is modeled as privileges via `GrantRequest`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RoleGrant {
+    pub role: String,
+    pub db: String,
+}
+
 /// One database user / role / account, as shown in the users list.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -441,6 +451,14 @@ pub struct UserInfo {
     /// formatted for display; may be empty.
     #[serde(default)]
     pub attributes: Vec<String>,
+    /// Structured role grants (Mongo). Empty for SQL engines, which express
+    /// access as privileges instead. Lets the UI edit roles without parsing.
+    #[serde(default)]
+    pub roles: Vec<RoleGrant>,
+    /// The database this account is defined in / authenticates against (Mongo).
+    /// `None` for engines without a per-user database.
+    #[serde(default)]
+    pub database: Option<String>,
 }
 
 /// The effective privileges / grants held by a single account. `statements`
@@ -473,6 +491,13 @@ pub struct CreateUserRequest {
     /// Whether the account may log in (Postgres `LOGIN`). Defaults to true.
     #[serde(default = "default_true")]
     pub can_login: bool,
+    /// Database the user is created in / authenticates against (Mongo). Ignored
+    /// by SQL engines. Defaults to `admin` in the Mongo adapter when omitted.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Roles to grant on creation (Mongo). Ignored by SQL engines.
+    #[serde(default)]
+    pub roles: Vec<RoleGrant>,
 }
 
 /// Request to alter an existing user / role. Only the `Some` fields are
@@ -493,16 +518,58 @@ pub struct AlterUserRequest {
     /// Lock (true) / unlock (false) the account. `None` leaves it.
     #[serde(default)]
     pub is_locked: Option<bool>,
+    /// The user's database (Mongo). Required to target a Mongo user.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Replace the user's roles (Mongo). `Some` sets the full role list;
+    /// `None` leaves roles unchanged. Ignored by SQL engines.
+    #[serde(default)]
+    pub roles: Option<Vec<RoleGrant>>,
 }
 
 /// Identifies a single account for drop / grant-inspection. `host` is the
-/// MySQL host part, ignored elsewhere.
+/// MySQL host part; `database` is the Mongo user's database — both ignored by
+/// engines that don't use them.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserRef {
     pub name: String,
     #[serde(default)]
     pub host: Option<String>,
+    #[serde(default)]
+    pub database: Option<String>,
+}
+
+/// Request to GRANT or REVOKE a set of privileges on a scope for one account.
+///
+/// SECURITY: `privileges` are validated against the target engine's fixed
+/// allowlist inside the adapter (never interpolated blind), and `database` /
+/// `table` are engine-quoted as identifiers. Callers cannot inject SQL through
+/// any field.
+///
+/// Scope is expressed by which of `database` / `table` are set. The meaning is
+/// engine-specific (the adapter maps it):
+///   - MySQL:    None/None = `*.*` (global), db/None = `` `db`.* ``, db/table = `` `db`.`table` ``.
+///   - Postgres: `database` carries the *schema*. schema/None = all tables in
+///     the schema, schema/table = that table. Global (None/None) is rejected.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantRequest {
+    pub user: UserRef,
+    /// Privilege keywords, case-insensitive (e.g. `["SELECT","INSERT"]` or
+    /// `["ALL"]`). Each is validated against the engine allowlist; an unknown
+    /// privilege fails the whole request.
+    pub privileges: Vec<String>,
+    /// Database (MySQL) or schema (Postgres) the scope lives in. `None` targets
+    /// the broadest scope the engine allows.
+    #[serde(default)]
+    pub database: Option<String>,
+    /// Table within `database`/schema. `None` targets the whole database/schema.
+    #[serde(default)]
+    pub table: Option<String>,
+    /// Also confer `WITH GRANT OPTION` (grant only; ignored on revoke).
+    #[serde(default)]
+    pub with_grant_option: bool,
 }
 
 fn default_true() -> bool {

@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use adapter_api::{
-    AdapterError, AlterUserRequest, CreateUserRequest, GrantInfo, ManageUsersCapability, UserInfo,
-    UserRef,
+    AdapterError, AlterUserRequest, CreateUserRequest, GrantInfo, GrantRequest,
+    ManageUsersCapability, UserInfo, UserRef,
 };
 use tauri::{AppHandle, State};
 
@@ -109,5 +109,52 @@ pub async fn db_drop_user(
         let user = user.clone();
         async move { a.drop_user(&user).await }
     })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_grant_privileges(
+    app: AppHandle,
+    connection_id: String,
+    request: GrantRequest,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<(), AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let request = request.clone();
+        async move { a.grant_privileges(request).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_revoke_privileges(
+    app: AppHandle,
+    connection_id: String,
+    request: GrantRequest,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<(), AdapterError> {
+    with_retry(&app, &registry, &factories, &connection_id, |a| {
+        let request = request.clone();
+        async move { a.revoke_privileges(request).await }
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn db_flush_privileges(
+    app: AppHandle,
+    connection_id: String,
+    factories: State<'_, Arc<FactoryRegistry>>,
+    registry: State<'_, Arc<Registry>>,
+) -> Result<(), AdapterError> {
+    with_retry(
+        &app,
+        &registry,
+        &factories,
+        &connection_id,
+        |a| async move { a.flush_privileges().await },
+    )
     .await
 }

@@ -9,6 +9,7 @@ pub mod index;
 pub mod mongo;
 pub mod mutate;
 pub mod subscribe;
+pub mod users;
 
 include!(concat!(env!("OUT_DIR"), "/manifest_generated.rs"));
 

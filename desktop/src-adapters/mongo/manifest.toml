@@ -44,6 +44,7 @@ query_editor      = true
 explain_plan      = false
 ssh_tunnel        = true
 process_list      = true
+manage_users      = true
 
 import            = []
 export            = ["json", "ndjson"]

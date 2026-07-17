@@ -483,6 +483,9 @@ pub fn run() {
             commands::db::db_create_user,
             commands::db::db_alter_user,
             commands::db::db_drop_user,
+            commands::db::db_grant_privileges,
+            commands::db::db_revoke_privileges,
+            commands::db::db_flush_privileges,
             // Rail tiles (pinned server + database pairs).
             commands::rail::rail_list,
             commands::rail::rail_pin,
