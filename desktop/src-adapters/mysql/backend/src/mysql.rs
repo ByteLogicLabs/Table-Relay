@@ -1565,7 +1565,6 @@ fn is_query(sql: &str) -> bool {
 /// Does the SQL already contain a top-level `LIMIT` clause? Ignores LIMIT
 /// tokens that appear inside quotes/backticks so we don't misfire on a
 /// column or literal named `LIMIT`.
-#[cfg(test)]
 fn has_limit_clause(sql: &str) -> bool {
     let bytes = sql.as_bytes();
     let mut i = 0;
