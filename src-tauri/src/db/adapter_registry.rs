@@ -147,6 +147,7 @@ mod tests {
             alter_table: false,
             drop_table: false,
             manage_indexes: false,
+            manage_users: false,
             diagram: false,
             erd_inference: false,
             query_editor: false,

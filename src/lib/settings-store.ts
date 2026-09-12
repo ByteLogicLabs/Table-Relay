@@ -58,6 +58,8 @@ export interface AppSettings {
   nullDisplay: NullDisplay;       // how NULL renders in the grid
   confirmDestructive: boolean;    // warn before DELETE/UPDATE/DROP
   restoreOnStartup: boolean;      // auto-reconnect pinned tiles on boot
+  autoClearCacheOnBoot: boolean;  // clear tab and query cache on startup
+  cacheMaxThresholdMb: number;    // max cache size in MB before keeping purely in-memory
   connectionRailMode: RailMode;   // sidebar 1 behaviour: auto / expanded / collapsed
 
   // Editor (Monaco)
@@ -75,6 +77,8 @@ export interface AppSettings {
   aiEffort: EffortLevel;          // how hard the AI works per turn (drives iterations / tokens / reasoning)
 }
 
+export const CACHE_THRESHOLD_OPTIONS = [1, 2, 5, 10, 20];
+
 const KEY = 'tablerelay:settings:v1';
 const OLD_KEY = 'dbtable:settings:v1';
 // One-time migration markers (kept out of AppSettings so they don't leak into
@@ -86,7 +90,9 @@ export const DEFAULTS: AppSettings = {
   defaultRowLimit: 100,
   nullDisplay: 'null-text',
   confirmDestructive: true,
-  restoreOnStartup: true,
+  restoreOnStartup: false,
+  autoClearCacheOnBoot: true,
+  cacheMaxThresholdMb: 2,
   connectionRailMode: 'auto',
   editorFontSize: 13,
   editorTabSize: 2,

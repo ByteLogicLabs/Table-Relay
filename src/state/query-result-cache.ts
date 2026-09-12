@@ -22,3 +22,8 @@ export function clearQueryResultSnapshot(tabId: string) {
   cache.delete(tabId);
 }
 
+export function clearAllQueryResultSnapshots() {
+  cache.clear();
+}
+
+

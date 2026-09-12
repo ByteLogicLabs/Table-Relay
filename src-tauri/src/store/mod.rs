@@ -177,6 +177,11 @@ impl Store {
         Ok(self.status())
     }
 
+    pub fn encrypted_size_bytes(&self) -> Option<u64> {
+        std::fs::metadata(&self.encrypted_path).ok().map(|m| m.len())
+    }
+
+
     pub fn with_conn<R>(
         &self,
         persist_after: bool,
@@ -316,3 +321,5 @@ impl serde::Serialize for StoreError {
         W { kind, message: self.to_string() }.serialize(s)
     }
 }
+
+

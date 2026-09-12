@@ -46,6 +46,25 @@ pub fn delete(conn: &Connection, key: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+pub fn purge_tab_cache(conn: &Connection) -> Result<(), StoreError> {
+    conn.execute(
+        "DELETE FROM app_state WHERE key IN (
+            'tablerelay:tabs:v1',
+            'tablerelay:activeTab:v1',
+            'tablerelay:activeTabByConn:v1',
+            'dbtable:tabs:v1',
+            'dbtable:activeTab:v1',
+            'dbtable:activeTabByConn:v1'
+        )",
+        [],
+    )?;
+    // Reclaim dead pages from previously stored large queries so store.db.enc shrinks
+    let _ = conn.execute_batch("VACUUM;");
+    Ok(())
+}
+
+
+
 fn row_to_entry(row: &rusqlite::Row<'_>) -> rusqlite::Result<AppStateEntry> {
     Ok(AppStateEntry {
         key: row.get(0)?,

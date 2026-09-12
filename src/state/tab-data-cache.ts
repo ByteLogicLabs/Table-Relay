@@ -95,3 +95,9 @@ export function clearCachedGridsWhere(pred: (tabId: string) => boolean): void {
   }
 }
 
+/** Clear all in-memory grid caches. */
+export function clearAllCachedGrids(): void {
+  cache.clear();
+}
+
+

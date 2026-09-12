@@ -126,9 +126,19 @@ pub fn run() {
                 }
             });
 
+            // Wipe any cached tabs on boot so heavy queries from prior sessions
+            // are never resurrected to cause startup lag.
+            if let Err(e) = store.with_conn(true, |conn| {
+                crate::store::repo_app_state::purge_tab_cache(conn)
+            }) {
+                crate::log::write_line("store", &format!("purge tab cache on boot failed: {e}"));
+            }
+
+
             // Restore the user's file-logging preference (default OFF in
             // release). Must come after the store opens.
             crate::commands::logs::apply_persisted_logging(&store);
+
 
             // Factory registry + built-in adapters. Must run before any
             // `db_connect` command can dispatch by adapter id.
@@ -419,6 +429,8 @@ pub fn run() {
             commands::store::app_state_get,
             commands::store::app_state_set,
             commands::store::app_state_delete,
+            commands::store::app_state_purge_cache,
+            commands::store::app_state_store_size,
             commands::store::ai_settings_list,
             commands::store::ai_settings_get,
             commands::store::ai_settings_save,
@@ -524,6 +536,8 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
+
 }
 
 /// Enable or disable the connection-dependent native menu items (Edit Current /

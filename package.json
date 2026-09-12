@@ -14,7 +14,6 @@
     "sweep:rust": "node scripts/sweep-target.mjs",
     "lint": "tsc --noEmit",
     "tauri": "tauri",
-    "pretauri:dev": "npm run sweep:rust",
     "tauri:dev": "tauri dev",
     "pretauri:dev:verbose": "npm run sweep:rust",
     "tauri:dev:verbose": "tauri dev -v",

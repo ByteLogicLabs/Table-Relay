@@ -55,21 +55,11 @@ export function computeFocusHint(tab: AppTab | undefined): ChatFocus | undefined
 export function loadLegacyTabs(): AppTab[] {
   if (typeof window === "undefined") return [];
   try {
-    const raw =
-      window.localStorage.getItem(TABS_STORAGE_KEY) ??
-      window.localStorage.getItem(OLD_TABS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter(
-      (t): t is AppTab =>
-        t &&
-        typeof t.id === "string" &&
-        typeof t.title === "string" &&
-        typeof t.type === "string" &&
-        typeof t.connectionId === "string",
-    );
+    window.localStorage.removeItem(TABS_STORAGE_KEY);
+    window.localStorage.removeItem(OLD_TABS_STORAGE_KEY);
   } catch {
-    return [];
+    /* noop */
   }
+  return [];
 }
+

@@ -70,6 +70,8 @@ interface TabsShellProps {
   /** Currently-focused database on the rail. Used as fallback when a query
    *  tab wasn't stamped with a schema at creation time. */
   focusedDatabase?: string | null;
+  /** Currently-focused connection id. */
+  focusedConnectionId?: string | null;
 }
 
 export default function TabsShell({
@@ -95,6 +97,7 @@ export default function TabsShell({
   onClearQueryLog,
   noDatabaseSelected,
   focusedDatabase,
+  focusedConnectionId,
 }: TabsShellProps) {
   const activeTab = tabs.find(t => t.id === activeTabId);
   const connection = activeTab ? activeConnections.find(c => c.id === activeTab.connectionId) : undefined;
@@ -168,10 +171,13 @@ export default function TabsShell({
   const handleCreateNewQuery = useCallback(() => {
     if (connection) {
       onNewQuery(connection.id);
+    } else if (focusedConnectionId) {
+      onNewQuery(focusedConnectionId);
     } else if (activeConnections.length > 0) {
       onNewQuery(activeConnections[0].id);
     }
-  }, [connection, activeConnections, onNewQuery]);
+  }, [connection, focusedConnectionId, activeConnections, onNewQuery]);
+
 
   const openChat = useCallback(() => {
     window.dispatchEvent(new CustomEvent('tablerelay:toggle-chat'));
