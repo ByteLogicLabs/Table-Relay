@@ -146,6 +146,7 @@ export default function ConnectionExportDialog({
         schemas={schemas}
         initialSchema={firstSchema}
         initialTable={firstTable}
+        isConnectionExport={true}
         supportsUpdateIfExists={dialect !== null}
         supportsSql={supportsSql}
         onExport={handleExport}

@@ -19,6 +19,8 @@ import ConnectionExportDialog from "../connections/connection-export-dialog";
 import ChatPanel from "../ai-chat/chat-panel";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { readTextFile } from "@tauri-apps/plugin-fs";
 import {
   connectAndLoad,
   getActiveDatabase,
@@ -1094,6 +1096,86 @@ export default function WorkspaceView({
     setActiveTabId(newTab.id);
   };
 
+  const handleOpenQueryFile = async (targetConnectionId?: string) => {
+    const connId =
+      targetConnectionId ?? focusedConnection?.id ?? activeConnections[0]?.id;
+    if (!connId) {
+      toast.error("No active connection to open a query for");
+      return;
+    }
+    const connection = activeConnections.find((c) => c.id === connId);
+    const manifest = connection
+      ? resolveManifest(adapterManifests, connection.driver)
+      : null;
+    const isDoc = manifest?.queryEditor?.language?.trim() === "mongo";
+
+    try {
+      const picked = await openDialog({
+        multiple: false,
+        filters: isDoc
+          ? [
+              { name: "Query", extensions: ["js", "txt"] },
+              { name: "All files", extensions: ["*"] },
+            ]
+          : [
+              { name: "SQL", extensions: ["sql", "txt"] },
+              { name: "All files", extensions: ["*"] },
+            ],
+      });
+      if (!picked || Array.isArray(picked)) return;
+      const text = await readTextFile(picked);
+      const fileName = picked.split(/[/\\]/).pop() || "Query";
+
+      const tileDb =
+        focusedTile && focusedTile.serverId === connId
+          ? focusedTile.databaseName
+          : undefined;
+
+      const activeTab = tabs.find((t) => t.id === activeTabId);
+      const canReuseActive =
+        activeTab &&
+        activeTab.type === "query" &&
+        activeTab.connectionId === connId &&
+        !activeTab.filePath &&
+        !activeTab.dirty &&
+        (!activeTab.query || !activeTab.query.trim());
+
+      if (canReuseActive) {
+        setTabs((prev) =>
+          prev.map((t) =>
+            t.id === activeTab.id
+              ? {
+                  ...t,
+                  title: fileName,
+                  filePath: picked,
+                  query: text,
+                  dirty: false,
+                }
+              : t,
+          ),
+        );
+      } else {
+        const newTab: AppTab = {
+          id: `query-${connId}-${Date.now()}`,
+          title: fileName,
+          type: "query",
+          connectionId: connId,
+          schema: tileDb,
+          query: text,
+          filePath: picked,
+          dirty: false,
+        };
+        setTabs((prev) => [...prev, newTab]);
+        setActiveTabId(newTab.id);
+      }
+      toast.success(`Loaded ${fileName}`);
+    } catch (err) {
+      toast.error(
+        `Failed to open query: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  };
+
   const handleNewRealtime = (connectionId: string) => {
     // Reuse an existing realtime tab on the same connection instead of
     // stacking new ones — the typical use case is "watch and come back",
@@ -1593,13 +1675,21 @@ export default function WorkspaceView({
 
   // The editor reports the file its buffer is bound to (or null when unbound)
   // so "Save Query" writes back to it across restarts. Normalize null → absent.
+  // When bound, retitle the tab to the file's basename so users see the file name.
   const handleTabFilePathChange = (tabId: string, filePath: string | null) => {
     setTabs((prev) =>
-      prev.map((t) =>
-        t.id === tabId && t.filePath !== (filePath ?? undefined)
-          ? { ...t, filePath: filePath ?? undefined }
-          : t,
-      ),
+      prev.map((t) => {
+        if (t.id !== tabId) return t;
+        const nextPath = filePath ?? undefined;
+        const nextTitle = nextPath
+          ? nextPath.split(/[/\\]/).pop() || t.title
+          : t.title;
+        return {
+          ...t,
+          filePath: nextPath,
+          title: nextTitle,
+        };
+      }),
     );
   };
 
@@ -2044,6 +2134,7 @@ export default function WorkspaceView({
           onCloseTabs={handleCloseTabs}
           onReorderTabs={handleReorderTabs}
           onNewQuery={handleNewQuery}
+          onOpenQueryFile={handleOpenQueryFile}
           onImportSql={handleImportSqlForId}
           onOpenRealtime={handleNewRealtime}
           onTabViewModeChange={handleTabViewModeChange}

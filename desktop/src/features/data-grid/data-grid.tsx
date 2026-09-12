@@ -1751,6 +1751,23 @@ export default function DataGrid({
     });
   };
 
+  const deleteRow = (rowId: string) => {
+    if (selectedRows.has(rowId) && selectedRows.size > 1) {
+      queueDeleteSelected();
+      return;
+    }
+    if (rowId.startsWith("new:")) {
+      discardInsert(rowId);
+      return;
+    }
+    pushHistory();
+    setPendingDeletes((prev) => {
+      const next = new Set(prev);
+      next.add(rowId);
+      return next;
+    });
+  };
+
   // Append a blank row at the bottom of the grid. It lives in pendingInserts
   // until commit flushes it as an INSERT. The user edits its cells the normal
   // way — activeEdit / editedCells treats it like any fetched row.
@@ -3814,9 +3831,11 @@ export default function DataGrid({
         rows={[...data.rows, ...pendingInserts]}
         pendingDeletes={pendingDeletes}
         editedCells={editedCells}
+        selectedRows={selectedRows}
         onBeginEdit={beginEdit}
         onUndoRowDelete={undoRowDelete}
         onDiscardInsert={discardInsert}
+        onDeleteRow={deleteRow}
         onSetNull={handleSetNull}
         onDuplicateRow={handleDuplicateRow}
       />

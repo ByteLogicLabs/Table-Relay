@@ -15,7 +15,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { invoke } from '@tauri-apps/api/core';
 import { AppTab, ConnectionProfile, DataViewMode, QueryLogEntry } from '../../types';
-import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, Waypoints, FunctionSquare, Zap, Radio, Loader2, Sparkles } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Plus, X, Table as TableIcon, LayoutTemplate, Terminal, FolderOpen, Waypoints, FunctionSquare, Zap, Radio, Loader2, Sparkles } from 'lucide-react';
 import { copyText } from '../../lib/clipboard';
 import { Button } from '../../components/ui/button';
 import { ContextMenu, ContextMenuContent, ContextMenuItem, ContextMenuSeparator, ContextMenuTrigger } from '../../components/ui/context-menu';
@@ -39,6 +39,7 @@ interface TabsShellProps {
   /** Reorder tabs by drag-and-drop. `activeId` is dropped onto `overId`'s slot. */
   onReorderTabs?: (activeId: string, overId: string) => void;
   onNewQuery: (connectionId: string) => void;
+  onOpenQueryFile?: (connectionId: string) => void;
   /** Toolbar "Import" action. Opens the Import-SQL dialog at the workspace
    *  level for the given connection. */
   onImportSql: (connectionId: string) => void;
@@ -83,6 +84,7 @@ export default function TabsShell({
   onCloseTabs,
   onReorderTabs,
   onNewQuery,
+  onOpenQueryFile,
   onImportSql,
   onOpenRealtime,
   onTabViewModeChange,
@@ -177,6 +179,16 @@ export default function TabsShell({
       onNewQuery(activeConnections[0].id);
     }
   }, [connection, focusedConnectionId, activeConnections, onNewQuery]);
+
+  const handleOpenQuery = useCallback(() => {
+    if (connection) {
+      onOpenQueryFile?.(connection.id);
+    } else if (focusedConnectionId) {
+      onOpenQueryFile?.(focusedConnectionId);
+    } else if (activeConnections.length > 0) {
+      onOpenQueryFile?.(activeConnections[0].id);
+    }
+  }, [connection, focusedConnectionId, activeConnections, onOpenQueryFile]);
 
 
   const openChat = useCallback(() => {
@@ -353,6 +365,7 @@ export default function TabsShell({
                   onCloseTab={onCloseTab}
                   onCloseTabs={onCloseTabs}
                   onNewQuery={handleCreateNewQuery}
+                  onOpenQueryFile={handleOpenQuery}
                 />
               );
             })}
@@ -364,10 +377,20 @@ export default function TabsShell({
           size="icon"
           className="h-8 w-8 ml-1 shrink-0 text-muted-foreground hover:text-foreground"
           onClick={handleCreateNewQuery}
-          title="New query"
+          title="New query (⌘T)"
           aria-label="New query"
         >
           <Terminal className="w-4 h-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+          onClick={handleOpenQuery}
+          title="Open query from file (⌘I)"
+          aria-label="Open query from file"
+        >
+          <FolderOpen className="w-4 h-4" />
         </Button>
       </div>
 
@@ -440,6 +463,8 @@ export default function TabsShell({
                 tabSchema={tabSchema}
                 onTabQueryChange={onTabQueryChange}
                 onTabFilePathChange={onTabFilePathChange}
+                onTabDirtyChange={onTabDirtyChange}
+                onOpenQueryFile={onOpenQueryFile ? () => onOpenQueryFile(tabConnection.id) : undefined}
                 onAppendQueryLog={onAppendQueryLog}
               />
             );
@@ -675,6 +700,8 @@ interface QueryPaneProps {
   tabSchema: string | undefined;
   onTabQueryChange?: (tabId: string, query: string) => void;
   onTabFilePathChange?: (tabId: string, filePath: string | null) => void;
+  onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
+  onOpenQueryFile?: () => void;
   onAppendQueryLog: AppendQueryLogFn;
 }
 
@@ -685,6 +712,8 @@ function QueryPane({
   tabSchema,
   onTabQueryChange,
   onTabFilePathChange,
+  onTabDirtyChange,
+  onOpenQueryFile,
   onAppendQueryLog,
 }: QueryPaneProps) {
   const handleQueryChange = useCallback(
@@ -694,6 +723,10 @@ function QueryPane({
   const handleFilePathChange = useCallback(
     (path: string | null) => onTabFilePathChange?.(tab.id, path),
     [onTabFilePathChange, tab.id],
+  );
+  const handleDirtyChange = useCallback(
+    (dirty: boolean) => onTabDirtyChange?.(tab.id, dirty),
+    [onTabDirtyChange, tab.id],
   );
   const handleLogQuery = useCallback(
     (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
@@ -718,6 +751,8 @@ function QueryPane({
         defaultSchema={tabSchema}
         onQueryChange={handleQueryChange}
         onFilePathChange={handleFilePathChange}
+        onDirtyChange={handleDirtyChange}
+        onOpenQueryFile={onOpenQueryFile}
         onLogQuery={handleLogQuery}
       />
     </div>
@@ -881,6 +916,7 @@ interface TabBarItemProps {
   onCloseTab: (id: string) => void;
   onCloseTabs: (mode: 'all' | 'others' | 'left' | 'right', anchorId: string) => void;
   onNewQuery: () => void;
+  onOpenQueryFile?: () => void;
 }
 
 function TabBarItem({
@@ -896,6 +932,7 @@ function TabBarItem({
   onCloseTab,
   onCloseTabs,
   onNewQuery,
+  onOpenQueryFile,
 }: TabBarItemProps) {
   // Sortable makes the tab a drag source + drop target and shifts the sibling
   // tabs live as it is dragged (VSCode-style). `transition` animates that
@@ -1024,6 +1061,11 @@ function TabBarItem({
         </ContextMenuItem>
         <ContextMenuSeparator />
         <ContextMenuItem onClick={onNewQuery}>New Query</ContextMenuItem>
+        {onOpenQueryFile && (
+          <ContextMenuItem onClick={onOpenQueryFile}>
+            Open Query from File…
+          </ContextMenuItem>
+        )}
       </ContextMenuContent>
     </ContextMenu>
   );

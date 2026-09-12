@@ -284,9 +284,11 @@ interface SharedMenuProps {
   rows: GridRow[];
   pendingDeletes: Set<string>;
   editedCells: Record<string, unknown>;
+  selectedRows?: Set<string>;
   onBeginEdit: (rowId: string, col: string, value: string) => void;
   onUndoRowDelete: (rowId: string) => void;
   onDiscardInsert: (rowId: string) => void;
+  onDeleteRow: (rowId: string) => void;
   onSetNull: (rowId: string, col: string) => void;
   onDuplicateRow: (rowId: string) => void;
 }
@@ -297,9 +299,11 @@ export function SharedContextMenu({
   rows,
   pendingDeletes,
   editedCells,
+  selectedRows,
   onBeginEdit,
   onUndoRowDelete,
   onDiscardInsert,
+  onDeleteRow,
   onSetNull,
   onDuplicateRow,
 }: SharedMenuProps) {
@@ -362,15 +366,24 @@ export function SharedContextMenu({
   const handleDuplicateRow = () => act(() => onDuplicateRow(state.rowId));
   const handleDiscardInsert = () => act(() => onDiscardInsert(state.rowId));
   const handleUndoRowDelete = () => act(() => onUndoRowDelete(state.rowId));
+  const handleDeleteRow = () => act(() => onDeleteRow(state.rowId));
+
+  const isMultiSelected =
+    !!selectedRows?.has(state.rowId) && (selectedRows?.size ?? 0) > 1;
+  const deleteLabel = isMultiSelected
+    ? `Delete ${selectedRows!.size} rows`
+    : "Delete row";
 
   // Clamp menu position so it doesn't overflow the viewport.
   const MENU_W = 200;
-  const MENU_H_EST = 220;
+  const MENU_H_EST = 260;
   const x = Math.min(state.x, window.innerWidth - MENU_W - 4);
   const y = Math.min(state.y, window.innerHeight - MENU_H_EST - 4);
 
   const itemCls =
     "w-full text-left px-3 py-1.5 text-sm rounded-sm hover:bg-accent hover:text-accent-foreground cursor-pointer select-none";
+  const destructiveItemCls =
+    "w-full text-left px-3 py-1.5 text-sm rounded-sm text-destructive hover:bg-destructive/10 focus:bg-destructive/10 cursor-pointer select-none";
   const sepCls = "my-1 h-px bg-border";
 
   return (
@@ -397,11 +410,9 @@ export function SharedContextMenu({
           <button className={itemCls} onClick={handleDuplicateRow}>
             Duplicate row
           </button>
-        </>
-      ) : (
-        <>
+          <div className={sepCls} />
           {isDraft ? (
-            <button className={itemCls} onClick={handleDiscardInsert}>
+            <button className={destructiveItemCls} onClick={handleDiscardInsert}>
               Discard new row
             </button>
           ) : isPendingDelete ? (
@@ -409,9 +420,30 @@ export function SharedContextMenu({
               Undo delete
             </button>
           ) : (
-            <button className={itemCls} onClick={onClose}>
-              View Record
+            <button className={destructiveItemCls} onClick={handleDeleteRow}>
+              {deleteLabel}
             </button>
+          )}
+        </>
+      ) : (
+        <>
+          {isDraft ? (
+            <button className={destructiveItemCls} onClick={handleDiscardInsert}>
+              Discard new row
+            </button>
+          ) : isPendingDelete ? (
+            <button className={itemCls} onClick={handleUndoRowDelete}>
+              Undo delete
+            </button>
+          ) : (
+            <>
+              <button className={itemCls} onClick={onClose}>
+                View Record
+              </button>
+              <button className={destructiveItemCls} onClick={handleDeleteRow}>
+                {deleteLabel}
+              </button>
+            </>
           )}
           <div className={sepCls} />
           <button className={itemCls} onClick={handleCopyRowAsJson}>

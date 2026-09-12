@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Trash2, ChevronDown, ChevronUp, Sparkles } from 'lucide-react';
+import { Trash2, ChevronDown, ChevronUp, Sparkles, Copy } from 'lucide-react';
 import { Button } from '../../components/ui/button';
 import { Checkbox } from '../../components/ui/checkbox';
 import { QueryLogEntry } from '../../types';
 import { highlight, tokenClass } from '../../lib/highlight';
 import { prefillChat } from '../../state/ai';
+import { copyText } from '../../lib/clipboard';
 
 interface QueryLogProps {
   entries: QueryLogEntry[];
@@ -138,7 +139,7 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
         <div
           ref={scrollRef}
           style={{ height }}
-          className="overflow-auto font-mono text-[12px] leading-5 px-3 py-2 bg-(--editor-bg)"
+          className="overflow-auto font-mono text-[12px] leading-5 px-3 py-2 bg-(--editor-bg) select-text"
         >
           {ordered.length === 0 ? (
             <div className="text-muted-foreground text-xs">No queries executed yet.</div>
@@ -154,9 +155,9 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
               const assistKind = e.status === 'error' ? 'fix' : 'explain';
               const assistLabel = assistKind === 'fix' ? 'Fix with AI' : 'Explain with AI';
               return (
-                <div key={e.id} className="group mb-2 border-l-2 pl-2 relative" style={{ borderColor: statusColor }}>
-                  <div className="text-muted-foreground italic flex items-start justify-between gap-2">
-                    <div className="min-w-0 wrap-break-word">
+                <div key={e.id} className="group mb-2 border-l-2 pl-2 relative select-text" style={{ borderColor: statusColor }}>
+                  <div className="text-muted-foreground italic flex items-start justify-between gap-2 select-text">
+                    <div className="min-w-0 wrap-break-word select-text">
                       -- {formatTimestamp(e.timestamp)}
                       {e.durationMs !== undefined && <span className="opacity-80"> · {e.durationMs.toFixed(1)}ms</span>}
                       <span className="not-italic font-medium" style={{ color: statusColor }}> · {statusLabel}</span>
@@ -164,20 +165,44 @@ export default function QueryLog({ entries, onClear, defaultOpen = true }: Query
                       {e.status === 'ok' && e.message && <span className="opacity-80 not-italic"> · {e.message}</span>}
                       <span className="opacity-70"> · {e.source}</span>
                     </div>
-                    {canAssist && (
+                    <div className="shrink-0 not-italic flex items-center gap-1">
                       <button
                         type="button"
-                        title={assistLabel}
-                        aria-label={assistLabel}
-                        onClick={makeHandleAssist(e.statement, assistKind, e.message)}
-                        className="shrink-0 not-italic opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 border border-primary/30 hover:border-primary/60 rounded px-1.5 py-0.5 bg-background/40"
+                        title="Copy statement"
+                        aria-label="Copy statement"
+                        onClick={() => void copyText(e.statement, 'Statement copied')}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground border border-border/60 hover:border-border rounded px-1.5 py-0.5 bg-background/40 select-none cursor-pointer"
                       >
-                        <Sparkles className="w-3 h-3" />
-                        {assistKind === 'fix' ? 'Fix' : 'Explain'}
+                        <Copy className="w-3 h-3" />
+                        Copy
                       </button>
-                    )}
+                      {e.message && (
+                        <button
+                          type="button"
+                          title="Copy message"
+                          aria-label="Copy message"
+                          onClick={() => void copyText(e.message!, 'Message copied')}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground border border-border/60 hover:border-border rounded px-1.5 py-0.5 bg-background/40 select-none cursor-pointer"
+                        >
+                          <Copy className="w-3 h-3" />
+                          Copy msg
+                        </button>
+                      )}
+                      {canAssist && (
+                        <button
+                          type="button"
+                          title={assistLabel}
+                          aria-label={assistLabel}
+                          onClick={makeHandleAssist(e.statement, assistKind, e.message)}
+                          className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-[10px] text-primary hover:text-primary/80 border border-primary/30 hover:border-primary/60 rounded px-1.5 py-0.5 bg-background/40 select-none cursor-pointer"
+                        >
+                          <Sparkles className="w-3 h-3" />
+                          {assistKind === 'fix' ? 'Fix' : 'Explain'}
+                        </button>
+                      )}
+                    </div>
                   </div>
-                  <div className="whitespace-pre-wrap break-all">
+                  <div className="whitespace-pre-wrap break-all select-text cursor-text">
                     {highlightOn
                       ? highlight(e.statement, detectDialect(e.statement)).map((t, i) => (
                           <span key={i} className={tokenClass[t.kind]}>{t.text}</span>

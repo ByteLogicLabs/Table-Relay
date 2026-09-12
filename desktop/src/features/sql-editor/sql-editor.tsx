@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from 'react';
-import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, Square, Trash2 } from 'lucide-react';
+import { Play, FastForward, AlignLeft, AlertCircle, Sparkles, Table2, Braces, Copy, Check, Loader2, Lock, Undo2, X, Download, Square, Trash2, FolderOpen, Save } from 'lucide-react';
 import Editor, { type OnMount, type Monaco } from '@monaco-editor/react';
 import type { IDisposable, editor as MonacoEditorNs } from 'monaco-editor';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
@@ -101,9 +101,13 @@ interface SqlEditorProps {
   /** Persists the bound file path back onto the owning tab (null = unbind) so
    *  "Save Query" survives restarts. */
   onFilePathChange?: (filePath: string | null) => void;
+  /** An editor reports its unsaved state so the tab shows an unsaved dot. */
+  onDirtyChange?: (dirty: boolean) => void;
+  /** Trigger workspace-level query file open so it opens as a new tab. */
+  onOpenQueryFile?: () => void;
 }
 
-export default function SqlEditor({ tabId, isActive = true, initialQuery = '', initialFilePath, connection, defaultSchema, onLogQuery, onQueryChange, onFilePathChange }: SqlEditorProps) {
+export default function SqlEditor({ tabId, isActive = true, initialQuery = '', initialFilePath, connection, defaultSchema, onLogQuery, onQueryChange, onFilePathChange, onDirtyChange, onOpenQueryFile }: SqlEditorProps) {
   const settings = useSettings();
   const effectiveSchema = defaultSchema ?? connection.database ?? undefined;
   const manifests = useAdapterManifests();
@@ -165,6 +169,15 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
     setSavedFilePath(path);
     onFilePathChangeRef.current?.(path);
   }, []);
+
+  const savedContentRef = useRef(initialQuery ?? '');
+  const onDirtyChangeRef = useRef(onDirtyChange);
+  onDirtyChangeRef.current = onDirtyChange;
+
+  useEffect(() => {
+    const isDirty = query !== savedContentRef.current;
+    onDirtyChangeRef.current?.(isDirty);
+  }, [query]);
 
   // Persist query edits to the owning tab on a short debounce so we don't
   // thrash localStorage on every keystroke. The ref pattern keeps the latest
@@ -872,7 +885,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
   // (the user's original SQL, not the LIMIT-wrapped form).
   const runSql = async (
     sqlToRun: string,
-    opts: { pagedFetchSize?: number } = {},
+    opts: { pagedFetchSize?: number; unlimited?: boolean } = {},
   ) => {
     runStartRef.current = performance.now();
     setRunElapsedMs(0);
@@ -915,7 +928,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
             setActiveResultIndex(collected.length - 1);
           }
         },
-        undefined,
+        opts.unlimited ? 0 : undefined,
         effectiveSchema,
         tabId,
       );
@@ -949,7 +962,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
     // no sentinel-row trimming (fetch the whole result set).
     if (size <= 0) {
       setHasNextPage(false);
-      await runSql(stmt);
+      await runSql(stmt, { unlimited: true });
       return;
     }
     await runSql(buildPagedSql(stmt, targetPage, size), {
@@ -962,14 +975,14 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
     // LIMIT/OFFSET and pager controls. Anything else (non-SELECT, multi-
     // statement, user-supplied LIMIT) runs verbatim with paging off.
     const pageable = pageableSelect(payload);
-    if (pageable) {
+    if (pageable && pageSize > 0) {
       setPagedStmt(pageable);
       await runPage(pageable, 0, pageSize);
       return;
     }
     setPagedStmt(null);
     setHasNextPage(false);
-    await runSql(payload);
+    await runSql(payload, { unlimited: pageSize === 0 });
   };
 
   const handleRun = async (statementOverride?: string) => {
@@ -1062,16 +1075,21 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
         bindFilePath(path);
       }
       await writeTextFile(path, body);
+      savedContentRef.current = body;
+      onDirtyChangeRef.current?.(false);
       toast.success('Query saved');
     } catch (err) {
       toast.error(`Save failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
-  // Import a query from a file into the editor. If the buffer already has
-  // content we append (separated by a blank line) rather than clobber the
-  // user's work; an empty buffer is replaced outright.
+  // Import a query from a file into the editor. If onOpenQueryFile is available
+  // it opens as a new tab with the file name. Otherwise it loads in-place.
   const handleImportQuery = async () => {
+    if (onOpenQueryFile) {
+      onOpenQueryFile();
+      return;
+    }
     try {
       const picked = await openDialog({
         multiple: false,
@@ -1363,6 +1381,24 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
         <Button variant="ghost" size="sm" onClick={handleFormat}>
           <AlignLeft className="w-4 h-4 mr-2" />
           {isDocumentStore ? 'Format JSON' : 'Format SQL'}
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleImportQuery}
+          title="Open query from file (⌘I)"
+        >
+          <FolderOpen className="w-4 h-4 mr-1.5" />
+          Open…
+        </Button>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => void handleExportQuery(false)}
+          title="Save query to file (⌘S)"
+        >
+          <Save className="w-4 h-4 mr-1.5" />
+          Save
         </Button>
         {/* Row limit lives in the persistent footer (always visible, before and
             after a run) rather than here. Load / Save / Save As live in the
