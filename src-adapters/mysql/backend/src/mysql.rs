@@ -1556,6 +1556,8 @@ fn is_query(sql: &str) -> bool {
     head.starts_with("SELECT")
         || head.starts_with("SHOW")
         || head.starts_with("DESCRIBE")
+        || head.starts_with("DESC ")
+        || head == "DESC"
         || head.starts_with("EXPLAIN")
         || head.starts_with("WITH")
 }
@@ -1563,6 +1565,7 @@ fn is_query(sql: &str) -> bool {
 /// Does the SQL already contain a top-level `LIMIT` clause? Ignores LIMIT
 /// tokens that appear inside quotes/backticks so we don't misfire on a
 /// column or literal named `LIMIT`.
+#[cfg(test)]
 fn has_limit_clause(sql: &str) -> bool {
     let bytes = sql.as_bytes();
     let mut i = 0;
@@ -1727,25 +1730,18 @@ async fn execute_query(
     sql: &str,
     row_limit: Option<u32>,
 ) -> Result<StatementResult, AdapterError> {
-    // Bound the statement. A caller-supplied `row_limit` is used when present;
-    // otherwise a hard safety ceiling is applied so an unbounded `SELECT *`
-    // can't flood memory/the UI. A `LIMIT` the user already wrote is respected
-    // as-is (no cap applied).
-    let cap = if has_limit_clause(sql) {
-        None
-    } else {
-        Some(row_limit.unwrap_or(adapter_api::MAX_RESULT_ROWS))
-    };
-    let effective = match cap {
-        Some(limit) => format!("{sql} LIMIT {limit}"),
-        None => sql.to_string(),
-    };
+    // Bound the statement safely via prepare_capped_query. Pure SELECT statements
+    // without existing limits are capped; SHOW, DESCRIBE, EXPLAIN, locking queries,
+    // and queries with trailing semicolons or comments are executed cleanly without
+    // illegal LIMIT injections.
+    let (effective, can_be_truncated) = adapter_api::prepare_capped_query(sql, row_limit);
 
     log_line!("run_query", "  sqlx←{}", effective.replace('\n', " ⏎ "));
     let t_fetch = Instant::now();
     let rows: Vec<MySqlRow> = sqlx::query(&effective).fetch_all(&mut *conn).await?;
     let fetch_ms = t_fetch.elapsed().as_secs_f64() * 1000.0;
-    let truncated = matches!(cap, Some(limit) if rows.len() as u32 >= limit);
+    let cap = row_limit.unwrap_or(adapter_api::MAX_RESULT_ROWS);
+    let truncated = can_be_truncated && rows.len() as u32 >= cap;
 
     let t_meta = Instant::now();
     let columns: Vec<ColumnMeta> = if let Some(first) = rows.first() {

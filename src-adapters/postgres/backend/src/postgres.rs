@@ -1796,8 +1796,10 @@ fn is_query(sql: &str) -> bool {
         || head.starts_with("WITH")
         || head.starts_with("VALUES")
         || head.starts_with("TABLE ")
+        || head.contains("RETURNING")
 }
 
+#[cfg(test)]
 fn has_limit_clause(sql: &str) -> bool {
     // Same parsing rules as MySQL's helper but without backtick tracking
     // — Postgres doesn't use backticks. Detects top-level LIMIT ignoring
@@ -1978,22 +1980,15 @@ async fn execute_query(
     sql: &str,
     row_limit: Option<u32>,
 ) -> Result<StatementResult, AdapterError> {
-    // Bound the statement. A caller-supplied `row_limit` is used when present;
-    // otherwise a hard safety ceiling is applied so an unbounded `SELECT *`
-    // can't flood memory/the UI. A `LIMIT` the user already wrote is respected
-    // as-is (no cap applied).
-    let cap = if has_limit_clause(sql) {
-        None
-    } else {
-        Some(row_limit.unwrap_or(adapter_api::MAX_RESULT_ROWS))
-    };
-    let effective = match cap {
-        Some(limit) => format!("{sql} LIMIT {limit}"),
-        None => sql.to_string(),
-    };
+    // Bound the statement safely via prepare_capped_query. Pure SELECT statements
+    // without existing limits are capped; SHOW, EXPLAIN, locking queries, and
+    // queries with trailing semicolons or comments are executed cleanly without
+    // illegal LIMIT injections.
+    let (effective, can_be_truncated) = adapter_api::prepare_capped_query(sql, row_limit);
 
     let rows: Vec<PgRow> = sqlx::query(&effective).fetch_all(&mut *conn).await?;
-    let truncated = matches!(cap, Some(limit) if rows.len() as u32 >= limit);
+    let cap = row_limit.unwrap_or(adapter_api::MAX_RESULT_ROWS);
+    let truncated = can_be_truncated && rows.len() as u32 >= cap;
 
     let columns: Vec<ColumnMeta> = if let Some(first) = rows.first() {
         first

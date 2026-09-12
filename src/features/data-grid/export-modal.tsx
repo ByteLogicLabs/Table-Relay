@@ -120,6 +120,7 @@ interface ExportModalProps {
   schemas: SchemaInfo[];
   initialSchema: string;
   initialTable: string;
+  isConnectionExport?: boolean;
   supportsUpdateIfExists: boolean;
   /** Whether the active store can produce SQL dumps. False for document/KV
    *  stores (Mongo, Redis) where INSERT/CREATE statements are meaningless —
@@ -137,15 +138,32 @@ export default function ExportModal({
   schemas,
   initialSchema,
   initialTable,
+  isConnectionExport = false,
   supportsUpdateIfExists,
   supportsSql,
   onExport,
 }: ExportModalProps) {
   const [schema, setSchema] = useState(initialSchema);
   const [tableOptions, setTableOptions] = useState<Record<string, TableOptions>>(
-    () => ({ [initialTable]: defaultTableOptions(true) }),
+    () => {
+      if (isConnectionExport) {
+        const schemaObj = schemas.find((s) => s.name === initialSchema) ?? schemas[0];
+        const res: Record<string, TableOptions> = {};
+        if (schemaObj) {
+          for (const t of schemaObj.tables) {
+            if (t.kind !== "view") {
+              res[t.name] = defaultTableOptions(true, supportsSql);
+            }
+          }
+        }
+        return res;
+      }
+      return { [initialTable]: defaultTableOptions(true) };
+    },
   );
-  const [format, setFormat] = useState<ExportFormat>("csv");
+  const [format, setFormat] = useState<ExportFormat>(() =>
+    isConnectionExport && supportsSql ? "sql" : "csv",
+  );
   const [includeHeader, setIncludeHeader] = useState(true);
   const [gzip, setGzip] = useState(false);
   const [qualifyDatabase, setQualifyDatabase] = useState(false);
@@ -244,19 +262,23 @@ export default function ExportModal({
   );
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedViews(new Set(views));
+    setSelectedViews(isConnectionExport ? new Set(views) : new Set());
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, viewsKey]);
+  }, [isOpen, viewsKey, isConnectionExport]);
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedRoutines(new Set(routines.map((r) => r.name)));
+    setSelectedRoutines(
+      isConnectionExport ? new Set(routines.map((r) => r.name)) : new Set(),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, routinesKey]);
+  }, [isOpen, routinesKey, isConnectionExport]);
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedTriggers(new Set(triggers.map((t) => t.name)));
+    setSelectedTriggers(
+      isConnectionExport ? new Set(triggers.map((t) => t.name)) : new Set(),
+    );
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isOpen, triggersKey]);
+  }, [isOpen, triggersKey, isConnectionExport]);
 
   // Table list filtered by the search box. Selection/column toggles always
   // operate on the full `selectableTables` set, not just the visible filter.
@@ -309,14 +331,28 @@ export default function ExportModal({
   useEffect(() => {
     if (!isOpen) return;
     setSchema(initialSchema);
-    setTableOptions({ [initialTable]: defaultTableOptions(true) });
-    setFormat("csv");
+    if (isConnectionExport) {
+      const schemaObj = schemas.find((s) => s.name === initialSchema) ?? schemas[0];
+      const res: Record<string, TableOptions> = {};
+      if (schemaObj) {
+        for (const t of schemaObj.tables) {
+          if (t.kind !== "view") {
+            res[t.name] = defaultTableOptions(true, supportsSql);
+          }
+        }
+      }
+      setTableOptions(res);
+      setFormat(supportsSql ? "sql" : "csv");
+    } else {
+      setTableOptions({ [initialTable]: defaultTableOptions(true) });
+      setFormat("csv");
+    }
     setTableQuery("");
     setGzip(false);
     setSplitMb(0);
     setQualifyDatabase(false);
     setObjectTab("tables");
-  }, [initialSchema, initialTable, isOpen]);
+  }, [initialSchema, initialTable, isOpen, isConnectionExport, schemas, supportsSql]);
 
   // (Object selections default to all-checked via the key-based effects above,
   // which also re-default on schema change and on async list arrival.)
@@ -338,10 +374,14 @@ export default function ExportModal({
     setTableOptions((prev) => {
       const next: Record<string, TableOptions> = {};
       for (const name of names) {
-        next[name] = prev[name] ?? defaultTableOptions(false);
+        next[name] =
+          prev[name] ??
+          (isConnectionExport
+            ? defaultTableOptions(true, supportsSql)
+            : defaultTableOptions(false));
       }
-      const hasAnyData = Object.values(next).some((opts) => opts.data);
-      if (!hasAnyData && names.size > 0) {
+      const hasAnyData = Object.values(next).some((opts) => opts.data || opts.schema);
+      if (!hasAnyData && names.size > 0 && !isConnectionExport) {
         const fallback = names.has(initialTable)
           ? initialTable
           : selectableTables[0].name;
@@ -352,7 +392,7 @@ export default function ExportModal({
       }
       return next;
     });
-  }, [initialTable, selectableTables, selectedSchema, supportsUpdateIfExists]);
+  }, [initialTable, selectableTables, selectedSchema, supportsUpdateIfExists, isConnectionExport, supportsSql]);
 
   const toggleOption = useCallback(
     (table: string, option: TableOption, checked: boolean) => {
@@ -457,6 +497,33 @@ export default function ExportModal({
       })
     );
   };
+
+  const allTablesChecked =
+    selectableTables.length > 0 &&
+    selectableTables.every((table) => {
+      const opts = tableOptions[table.name] ?? defaultTableOptions(false);
+      return format === "sql" ? opts.schema || opts.data : opts.data;
+    });
+
+  const setAllTables = useCallback(
+    (all: boolean) => {
+      setTableOptions((prev) => {
+        const next: Record<string, TableOptions> = { ...prev };
+        for (const t of selectableTables) {
+          const current = next[t.name] ?? defaultTableOptions(false);
+          next[t.name] = {
+            ...current,
+            schema: all && format === "sql",
+            data: all,
+            drop: all ? current.drop : false,
+            update: all ? current.update : false,
+          };
+        }
+        return next;
+      });
+    },
+    [format, selectableTables],
+  );
 
   // Formats offered for the active store. Document/KV stores (Mongo, Redis)
   // can't produce SQL dumps, so SQL is dropped for them — they get CSV/JSON.
@@ -705,9 +772,20 @@ export default function ExportModal({
                 <div className="px-3 pt-3 pb-2 border-b border-border/60 space-y-2 shrink-0">
                   <div className="flex items-center justify-between gap-2">
                     <Label className="text-xs text-muted-foreground">Tables</Label>
-                    <span className="text-[11px] text-muted-foreground tabular-nums">
-                      {selectedCount} of {selectableTables.length} selected
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[11px] text-muted-foreground tabular-nums">
+                        {selectedCount} of {selectableTables.length} selected
+                      </span>
+                      {selectableTables.length > 0 && format !== "csv" && (
+                        <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground cursor-pointer select-none">
+                          <Checkbox
+                            checked={allTablesChecked}
+                            onCheckedChange={(v) => setAllTables(v === true)}
+                          />
+                          Select all
+                        </label>
+                      )}
+                    </div>
                   </div>
                   <div className="relative">
                     <Search className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
@@ -976,9 +1054,9 @@ function ObjectList({
   );
 }
 
-function defaultTableOptions(selected: boolean): TableOptions {
+function defaultTableOptions(selected = false, includeSchema = false): TableOptions {
   return {
-    schema: false,
+    schema: selected && includeSchema,
     data: selected,
     drop: false,
     update: false,

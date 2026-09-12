@@ -13,6 +13,7 @@ pub mod error;
 pub mod intent;
 pub mod log;
 pub mod manifest;
+pub mod query_cap;
 pub mod ssh_hosts;
 pub mod template;
 pub mod types;
@@ -79,6 +80,7 @@ pub use types::{
     TableStructure, TriggerDefinition, TriggerInfo, UserInfo, UserRef, ViewInfo, WarningKind,
     MAX_RESULT_ROWS,
 };
+pub use query_cap::prepare_capped_query;
 
 /// Contract every built-in adapter implements.
 ///
