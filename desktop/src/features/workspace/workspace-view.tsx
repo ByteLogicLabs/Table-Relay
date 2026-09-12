@@ -37,11 +37,16 @@ import { ai } from "../../lib/ai";
 import {
   clearCachedGrid,
   clearCachedGridsWhere,
+  clearAllCachedGrids,
 } from "../../state/tab-data-cache";
-import { clearQueryResultSnapshot } from "../../state/query-result-cache";
+import {
+  clearQueryResultSnapshot,
+  clearAllQueryResultSnapshots,
+} from "../../state/query-result-cache";
 import { recordQueryLog, clearQueryLogStore } from "../../state/query-log-store";
 import { setDebugPage } from "../../state/debug";
-import { getAppState, setAppState } from "../../lib/app-state-store";
+import { getAppState, setAppState, deleteAppState } from "../../lib/app-state-store";
+import { loadSettings } from "../../lib/settings-store";
 import {
   SIDEBAR_WIDTH_KEY,
   SIDEBAR_MIN_WIDTH,
@@ -61,7 +66,7 @@ import {
   OLD_FOCUSED_TILE_KEY,
   OLD_CHAT_WIDTH_KEY,
 } from "./workspace-constants";
-import { computeFocusHint, loadLegacyTabs } from "./workspace-utils";
+import { computeFocusHint } from "./workspace-utils";
 
 interface WorkspaceViewProps {
   activeConnections: ConnectionProfile[];
@@ -106,71 +111,70 @@ export default function WorkspaceView({
     Record<string, string>
   >({});
 
+  // Flush in-memory tab data caches and remove any persistent tab cache keys on window close
+  useEffect(() => {
+    const handleCleanCache = () => {
+      clearAllCachedGrids();
+      clearAllQueryResultSnapshots();
+      void deleteAppState(TABS_STORAGE_KEY);
+      void deleteAppState(ACTIVE_TAB_BY_CONN_KEY);
+      void deleteAppState(ACTIVE_TAB_KEY);
+      try {
+        window.localStorage.removeItem(TABS_STORAGE_KEY);
+        window.localStorage.removeItem(ACTIVE_TAB_BY_CONN_KEY);
+        window.localStorage.removeItem(ACTIVE_TAB_KEY);
+        window.localStorage.removeItem(OLD_TABS_STORAGE_KEY);
+        window.localStorage.removeItem(OLD_ACTIVE_TAB_BY_CONN_KEY);
+        window.localStorage.removeItem(OLD_ACTIVE_TAB_KEY);
+      } catch {
+        /* noop */
+      }
+    };
+
+    window.addEventListener("beforeunload", handleCleanCache);
+    return () => {
+      window.removeEventListener("beforeunload", handleCleanCache);
+    };
+  }, []);
+
+
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Purge leftover tab cache on boot if configured so heavy queries never lag the app
+      let storedTabs: AppTab[] | null = null;
+      let storedActiveByConn: Record<string, string> | null = null;
+      if (loadSettings().autoClearCacheOnBoot) {
+        clearAllCachedGrids();
+        clearAllQueryResultSnapshots();
+        void deleteAppState(TABS_STORAGE_KEY);
+        void deleteAppState(ACTIVE_TAB_BY_CONN_KEY);
+        void deleteAppState(ACTIVE_TAB_KEY);
+      } else {
+        [storedTabs, storedActiveByConn] = await Promise.all([
+          getAppState<AppTab[]>(TABS_STORAGE_KEY).catch(() => null),
+          getAppState<Record<string, string>>(ACTIVE_TAB_BY_CONN_KEY).catch(() => null),
+        ]);
+      }
+
       const [
-        storedTabs,
-        storedActiveByConn,
         storedFocusedTile,
         storedChatWidth,
         storedSidebarWidth,
       ] = await Promise.all([
-        getAppState<AppTab[]>(TABS_STORAGE_KEY).catch(() => null),
-        getAppState<Record<string, string>>(ACTIVE_TAB_BY_CONN_KEY).catch(
-          () => null,
-        ),
         getAppState<string>(FOCUSED_TILE_KEY).catch(() => null),
         getAppState<number>(CHAT_WIDTH_KEY).catch(() => null),
         getAppState<number>(SIDEBAR_WIDTH_KEY).catch(() => null),
       ]);
       if (cancelled) return;
 
-      const nextTabs = Array.isArray(storedTabs)
-        ? storedTabs.filter(
-            (t): t is AppTab =>
-              t &&
-              typeof t.id === "string" &&
-              typeof t.title === "string" &&
-              typeof t.type === "string" &&
-              typeof t.connectionId === "string",
-          )
-        : loadLegacyTabs();
-      setTabs(nextTabs);
-
-      if (
-        storedActiveByConn &&
-        typeof storedActiveByConn === "object" &&
-        !Array.isArray(storedActiveByConn)
-      ) {
-        setActiveTabByConn(storedActiveByConn);
-      } else {
-        try {
-          const raw =
-            window.localStorage.getItem(ACTIVE_TAB_BY_CONN_KEY) ??
-            window.localStorage.getItem(OLD_ACTIVE_TAB_BY_CONN_KEY);
-          if (raw) {
-            const parsed = JSON.parse(raw);
-            if (
-              parsed &&
-              typeof parsed === "object" &&
-              !Array.isArray(parsed)
-            ) {
-              setActiveTabByConn(parsed as Record<string, string>);
-            }
-          } else {
-            const legacy =
-              window.localStorage.getItem(ACTIVE_TAB_KEY) ??
-              window.localStorage.getItem(OLD_ACTIVE_TAB_KEY);
-            const owner = legacy
-              ? nextTabs.find((t) => t.id === legacy)
-              : undefined;
-            if (owner) setActiveTabByConn({ [owner.connectionId]: legacy! });
-          }
-        } catch {
-          /* noop */
-        }
+      if (storedTabs && Array.isArray(storedTabs) && storedTabs.length > 0) {
+        setTabs(storedTabs);
       }
+      if (storedActiveByConn && typeof storedActiveByConn === "object") {
+        setActiveTabByConn(storedActiveByConn);
+      }
+
 
       if (storedFocusedTile) {
         setFocusedTileId(storedFocusedTile);
@@ -246,16 +250,6 @@ export default function WorkspaceView({
     };
   }, []);
 
-  // Persist tabs + per-connection active tab so reopening the app lands you
-  // back in the same workspace with each connection's tabs intact.
-  useEffect(() => {
-    if (!workspaceStateHydrated.current) return;
-    void setAppState(TABS_STORAGE_KEY, tabs);
-  }, [tabs]);
-  useEffect(() => {
-    if (!workspaceStateHydrated.current) return;
-    void setAppState(ACTIVE_TAB_BY_CONN_KEY, activeTabByConn);
-  }, [activeTabByConn]);
   const [focusedTileId, setFocusedTileId] = useState<string | null>(null);
   // When the user picks a connection (not a tile), we track it explicitly so
   // the sidebar knows which server to show even before a database is chosen.
@@ -575,6 +569,28 @@ export default function WorkspaceView({
     void setAppState(FOCUSED_TILE_KEY, focusedTileId);
   }, [focusedTileId]);
 
+  // Persist tabs safely with query size safeguard
+  useEffect(() => {
+    if (!workspaceStateHydrated.current) return;
+    const maxQueryBytes = (loadSettings().cacheMaxThresholdMb ?? 2) * 1024 * 1024;
+    const safeTabs = tabs.map((t) => {
+      if (t.query && t.query.length > maxQueryBytes) {
+        return {
+          ...t,
+          query: `-- [Large query omitted from persistent storage: ${Math.round(t.query.length / 1024)} KB]\n`,
+        };
+      }
+      return t;
+    });
+    void setAppState(TABS_STORAGE_KEY, safeTabs);
+  }, [tabs]);
+
+  // Persist activeTabByConn
+  useEffect(() => {
+    if (!workspaceStateHydrated.current) return;
+    void setAppState(ACTIVE_TAB_BY_CONN_KEY, activeTabByConn);
+  }, [activeTabByConn]);
+
   // Clear focus if the focused tile has been unpinned. If the rail still has
   // other tiles, fall through to the first one so the workspace never sits on
   // an empty picker when we have valid candidates — that's what caused the
@@ -596,39 +612,16 @@ export default function WorkspaceView({
     }
   }, [railState.tiles, focusedTileId, focusedConnectionId]);
 
-  // Sync tabs with the rail: when a tile is unpinned, close any tabs that
-  // belong to that (connection, database) pair so the tab strip doesn't hold
-  // onto orphaned windows. Tabs without a schema (query tabs tied only to a
-  // connection) stay put unless the whole server is gone from the rail too.
+  // Prune tabs only if their connection profile was deleted
   useEffect(() => {
-    const pinnedPairs = new Set(
-      railState.tiles.map((t) => `${t.serverId}::${t.databaseName}`),
-    );
-    const pinnedServers = new Set(railState.tiles.map((t) => t.serverId));
+    const connIds = new Set(connections.map((c) => c.id));
     setTabs((prev) => {
-      const kept = prev.filter((tab) => {
-        // Schema-bound tabs require their (conn, db) pair to still be pinned.
-        if (tab.schema)
-          return pinnedPairs.has(`${tab.connectionId}::${tab.schema}`);
-        // Query tabs (no schema) only require the server to still have any pin.
-        return pinnedServers.has(tab.connectionId);
-      });
+      const kept = prev.filter((tab) => connIds.has(tab.connectionId));
       if (kept.length === prev.length) return prev;
-      // Drop any per-connection active-tab entries whose referenced tab was
-      // just removed — otherwise the empty state won't render for that conn.
-      const keptIds = new Set(kept.map((t) => t.id));
-      setActiveTabByConn((map) => {
-        const next: Record<string, string> = {};
-        for (const [cid, id] of Object.entries(map)) {
-          if (keptIds.has(id)) next[cid] = id;
-        }
-        return next;
-      });
       return kept;
     });
-    // We only need to re-run this when the rail changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [railState.tiles]);
+  }, [connections]);
+
 
   const focusedTile: RailTile | null =
     railState.tiles.find((t) => t.id === focusedTileId) ?? null;
@@ -2065,6 +2058,7 @@ export default function WorkspaceView({
           onClearQueryLog={clearQueryLog}
           noDatabaseSelected={!!focusedConnection && !focusedTile}
           focusedDatabase={focusedTile?.databaseName ?? null}
+          focusedConnectionId={focusedConnection?.id ?? null}
         />
       </div>
 

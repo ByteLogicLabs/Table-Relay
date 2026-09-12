@@ -73,6 +73,29 @@ pub fn app_state_delete(store: State<'_, Arc<Store>>, key: String) -> SResult<()
     with_conn_persist(&store, |c| repo_app_state::delete(c, &key))
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PurgeCacheResult {
+    pub success: bool,
+    pub store_size_bytes: u64,
+}
+
+#[tauri::command]
+pub fn app_state_purge_cache(store: State<'_, Arc<Store>>) -> SResult<PurgeCacheResult> {
+    with_conn_persist(&store, |c| repo_app_state::purge_tab_cache(c))?;
+    let size = store.encrypted_size_bytes().unwrap_or(0);
+    Ok(PurgeCacheResult {
+        success: true,
+        store_size_bytes: size,
+    })
+}
+
+#[tauri::command]
+pub fn app_state_store_size(store: State<'_, Arc<Store>>) -> SResult<u64> {
+    Ok(store.encrypted_size_bytes().unwrap_or(0))
+}
+
+
 // -----------------------------------------------------------------------------
 // AI settings — per-provider credentials + preferences.
 // -----------------------------------------------------------------------------

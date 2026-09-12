@@ -30,7 +30,9 @@ import {
   type AppSettings, type AppTheme, type NullDisplay,
   applyTheme, loadSettings, resetSettings, saveSettings, useSettings,
   EFFORT_LEVELS, EFFORT_LABELS, EFFORT_PRESETS, type EffortLevel,
+  CACHE_THRESHOLD_OPTIONS,
 } from '../../lib/settings-store';
+import { purgeCache, getStoreSizeBytes } from '../../lib/app-state-store';
 import ConnectionTransferDialog from '../connections/connection-transfer-dialog';
 import { LocalModelPanel } from '../ai-chat/local-model-panel';
 import { Row, Toggle, DataRow } from './settings-controls';
@@ -589,7 +591,34 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
   const handleNullDisplayChange = useCallback((v: string) => saveSettings({ nullDisplay: v as NullDisplay }), []);
   const handleConfirmDestructiveChange = useCallback((v: boolean) => saveSettings({ confirmDestructive: v }), []);
   const handleRestoreOnStartupChange = useCallback((v: boolean) => saveSettings({ restoreOnStartup: v }), []);
+  const handleCacheThresholdChange = useCallback((v: string) => saveSettings({ cacheMaxThresholdMb: Number(v) }), []);
+  const handleAutoClearCacheChange = useCallback((v: boolean) => saveSettings({ autoClearCacheOnBoot: v }), []);
   const handleAiEffortChange = useCallback((v: string) => saveSettings({ aiEffort: v as EffortLevel }), []);
+
+  const [storeSizeBytes, setStoreSizeBytes] = useState<number | null>(null);
+  const [purgingCache, setPurgingCache] = useState(false);
+
+  useEffect(() => {
+    if (open && (section === 'general' || section === 'data')) {
+      void getStoreSizeBytes().then(setStoreSizeBytes).catch(() => {});
+    }
+  }, [open, section]);
+
+  const handlePurgeCache = async () => {
+    setPurgingCache(true);
+    try {
+      const res = await purgeCache();
+      setStoreSizeBytes(res.storeSizeBytes);
+      const sizeFmt = res.storeSizeBytes > 1024 * 1024
+        ? `${(res.storeSizeBytes / (1024 * 1024)).toFixed(2)} MB`
+        : `${(res.storeSizeBytes / 1024).toFixed(1)} KB`;
+      toast.success(`Cache purged and database compacted! (Store size: ${sizeFmt})`);
+    } catch (e) {
+      toast.error(`Failed to purge cache: ${String(e)}`);
+    } finally {
+      setPurgingCache(false);
+    }
+  };
 
   const handleExportConnections = useCallback(() => setConnTransfer('export'), []);
   const handleImportConnections = useCallback(() => setConnTransfer('import'), []);
@@ -707,6 +736,51 @@ export default function SettingsDialog({ open, onOpenChange, initialSection }: S
 
                 <Row title="Restore session on startup" desc="Reconnect to pinned databases when the app launches.">
                   <Toggle checked={settings.restoreOnStartup} onChange={handleRestoreOnStartupChange} />
+                </Row>
+
+                <Row title="Clear cache on startup" desc="Purge cached tabs, query history buffers and reclaim disk space on boot.">
+                  <Toggle checked={settings.autoClearCacheOnBoot ?? true} onChange={handleAutoClearCacheChange} />
+                </Row>
+
+                <Row title="Cache size limit" desc="Queries/tabs exceeding this threshold stay in-memory and are not saved to disk.">
+                  <Select
+                    value={String(settings.cacheMaxThresholdMb ?? 2)}
+                    onValueChange={handleCacheThresholdChange}
+                  >
+                    <SelectTrigger className="h-8 text-xs w-28"><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      {CACHE_THRESHOLD_OPTIONS.map(n => (
+                        <SelectItem key={n} value={String(n)} className="text-xs">{n} MB</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Row>
+
+                <Row
+                  title="Purge cache now"
+                  desc={storeSizeBytes !== null
+                    ? `Clear tab/query caches and compact database (Current store: ${storeSizeBytes > 1024 * 1024 ? `${(storeSizeBytes / (1024 * 1024)).toFixed(2)} MB` : `${(storeSizeBytes / 1024).toFixed(1)} KB`}).`
+                    : 'Clear tab/query caches and compact SQLite database.'}
+                >
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs gap-1.5"
+                    onClick={handlePurgeCache}
+                    disabled={purgingCache}
+                  >
+                    {purgingCache ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        Purging…
+                      </>
+                    ) : (
+                      <>
+                        <Trash2 className="w-3.5 h-3.5" />
+                        Purge Cache
+                      </>
+                    )}
+                  </Button>
                 </Row>
 
                 <div className="flex justify-end pt-4 mt-2 border-t border-border">
