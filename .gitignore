@@ -1,34 +1,3 @@
-node_modules/
-build/
-dist/
-coverage/
+# Repo-wide ignores. Each app keeps its own .gitignore (desktop/.gitignore, mobile/.gitignore).
 .DS_Store
-*.log
-.env*
-*.env
-!.env.example
-
-# Tauri
-src-tauri/target/
-src-tauri/gen/
-
-# Tauri updater signing keys / credentials — never commit
-workspace/credentials/*
-!workspace/credentials/README.md
-
-# Downloaded AI model weights (M8.1). See ai-plan.md.
-ai-models/
-target
 .claude
-./*.md
-!./README.md
-workspace/*.md
-.kilo
-react-source
-AUDIT.md
-
-# Locally built macOS installers (scripts/make-dmg.sh writes to repo root)
-*.dmg
-# Anchor these to the repo root so they don't also ignore nested dirs like
-# src/features/workspace (a bare `workspace` matches any path component).
-/workspace

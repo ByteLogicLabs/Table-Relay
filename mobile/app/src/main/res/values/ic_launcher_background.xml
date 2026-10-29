@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The cream of Table Relay's logo, behind the adaptive icon's artwork. -->
+    <color name="ic_launcher_background">#FFF0E0</color>
+</resources>
