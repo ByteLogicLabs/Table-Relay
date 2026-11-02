@@ -6,12 +6,35 @@ use std::sync::Arc;
 use futures::StreamExt;
 use tauri::{Emitter, State};
 
+use crate::ai::cancel::CancelToken;
 use crate::ai::openai::{ToolStreamEvent, ToolTurn};
 use crate::ai::session::SessionSlot;
 use crate::ai::tools::ToolDef;
 use crate::ai::{AiError, AiProvider, ChatMessage, ChatRole};
 
-use super::chat::{ChunkEvent, DoneEvent};
+use super::chat::{emit_done, ChunkEvent, DoneEvent};
+
+/// End a stopped turn. Text the user already saw is kept in the transcript so
+/// the model's memory matches the panel; `done` carries no content so the
+/// panel keeps what it rendered.
+async fn finish_canceled(
+    app: &tauri::AppHandle,
+    slot: &State<'_, SessionSlot>,
+    request_id: &str,
+    partial: &str,
+) -> Result<(), AiError> {
+    crate::log_chat!("assistant", "(canceled) {}", partial);
+    if !partial.trim().is_empty() {
+        let mut guard = slot.write().await;
+        if let Some(session) = guard.as_mut() {
+            session
+                .messages
+                .push(ChatMessage::text(ChatRole::Assistant, partial.to_string()));
+        }
+    }
+    emit_done(app, request_id.to_string(), String::new(), "canceled");
+    Ok(())
+}
 
 /// A tool call the user shouldn't see as a card because it's a malformed model
 /// mistake, not real work. Today: a query call (`call_query` / `run_query` /
@@ -96,6 +119,7 @@ pub(super) async fn run_tool_loop(
     max_iterations: u32,
     max_repeat_calls: u32,
     turn_opts: crate::ai::TurnOptions,
+    cancel: CancelToken,
 ) -> Result<(), AiError> {
     use crate::ai::tools;
     // Filter the tool catalog by the current scope: when cross-database access
@@ -120,6 +144,8 @@ pub(super) async fn run_tool_loop(
     let tool_ctx = tools::ToolContext {
         connection_id: connection_id.clone(),
         default_schema: schema.clone(),
+        request_id: Some(request_id.clone()),
+        cancel: Some(cancel.clone()),
     };
 
     // Loop-guard: some models retry a tool with identical args over and over —
@@ -144,6 +170,9 @@ pub(super) async fn run_tool_loop(
         matches!(name, "list_schemas" | "list_tables" | "describe_table")
     }
     for _iter in 0..max_iterations {
+        if cancel.is_cancelled() {
+            return finish_canceled(&app, &slot, &request_id, "").await;
+        }
         // Snapshot history under a read lock. We re-snapshot every
         // iteration because tool results append new messages.
         let history = {
@@ -153,10 +182,11 @@ pub(super) async fn run_tool_loop(
             };
             with_system_prompt(
                 &session.messages,
-                session.provider_kind.as_str(),
+                session.provider_kind,
                 &session.model,
                 session.current_context.as_deref(),
                 session.recent_activity.as_deref(),
+                true,
             )
         };
 
@@ -175,23 +205,34 @@ pub(super) async fn run_tool_loop(
         // (the non-streaming branch below). `Ok(None)` makes the match fall
         // through to `complete_once_with_retry` exactly like a provider that
         // can't stream tool turns.
+        //
+        // Every wait below races the turn's cancel token, so Stop ends the
+        // turn at once instead of after the model (or a retry backoff) finishes.
         let stream_attempt = if turn_opts.stream {
-            provider
-                .complete_once_stream(&history, Some(&tools_catalog), turn_opts)
-                .await
+            let setup = provider.complete_once_stream(&history, Some(&tools_catalog), turn_opts);
+            match cancel.run(setup).await {
+                Some(r) => r,
+                None => return finish_canceled(&app, &slot, &request_id, "").await,
+            }
         } else {
             Ok(None)
         };
-        let turn = match stream_attempt {
+        let turn_result = match stream_attempt {
             Ok(Some(mut stream)) => {
                 let mut done_turn: Option<ToolTurn> = None;
-                let mut emitted = false;
                 let mut stream_err: Option<AiError> = None;
-                while let Some(item) = stream.next().await {
+                // What this round showed the user so far.
+                let mut shown = String::new();
+                loop {
+                    let Some(item) = cancel.run(stream.next()).await else {
+                        drop(stream);
+                        return finish_canceled(&app, &slot, &request_id, &shown).await;
+                    };
+                    let Some(item) = item else { break };
                     match item {
                         Ok(ToolStreamEvent::Delta(delta)) => {
                             if !delta.is_empty() {
-                                emitted = true;
+                                shown.push_str(&delta);
                                 let _ = app.emit(
                                     "ai://chat/chunk",
                                     ChunkEvent {
@@ -201,24 +242,30 @@ pub(super) async fn run_tool_loop(
                                 );
                             }
                         }
-                        Ok(ToolStreamEvent::Done(t)) => done_turn = Some(t),
+                        Ok(ToolStreamEvent::Done(t)) => {
+                            done_turn = Some(t);
+                            break;
+                        }
                         Err(e) => {
                             stream_err = Some(e);
                             break;
                         }
                     }
                 }
+                // Release the connection before any fallback request opens a
+                // second one.
+                drop(stream);
                 // A stream is only trustworthy if it produced a real turn:
                 // some content, or a tool call. A `Done` with nothing AND no
                 // deltas means the endpoint accepted `stream:true` but returned
                 // an empty/non-SSE body (some "OpenAI-compatible" proxies do
                 // this) — treat it like an unsupported stream and fall back.
                 let usable = done_turn.as_ref().is_some_and(|t| {
-                    emitted || !t.content.is_empty() || !t.tool_calls.is_empty()
+                    !shown.is_empty() || !t.content.is_empty() || !t.tool_calls.is_empty()
                 });
                 if usable {
                     streamed = true;
-                    done_turn.expect("usable implies Some")
+                    Ok(done_turn.expect("usable implies Some"))
                 } else {
                     if let Some(e) = &stream_err {
                         crate::log_chat!("error", "stream failed ({e}); falling back to non-streaming");
@@ -230,28 +277,47 @@ pub(super) async fn run_tool_loop(
                     // finalizes cleanly on error), so a transient partial never
                     // persists. Falling back keeps a flaky/incompatible stream
                     // from failing a turn the non-streaming path can complete.
-                    complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts).await?
+                    match cancel.run(complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts)).await {
+                        Some(r) => r,
+                        None => return finish_canceled(&app, &slot, &request_id, "").await,
+                    }
                 }
             }
             // Provider doesn't stream tool turns → non-streaming with retry.
-            Ok(None) => complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts).await?,
+            Ok(None) => {
+                match cancel.run(complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts)).await {
+                    Some(r) => r,
+                    None => return finish_canceled(&app, &slot, &request_id, "").await,
+                }
+            }
             // Pre-stream failure (auth/HTTP/etc.) → degrade to the non-streaming
             // path, which applies retry for transient errors and surfaces the
             // rest unchanged.
             Err(e) => {
                 crate::log_chat!("error", "stream setup failed, falling back to non-streaming: {e}");
-                complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts).await?
+                match cancel.run(complete_once_with_retry(&provider, &history, &tools_catalog, turn_opts)).await {
+                    Some(r) => r,
+                    None => return finish_canceled(&app, &slot, &request_id, "").await,
+                }
             }
         };
+        let turn = turn_result?;
 
         if turn.tool_calls.is_empty() {
             // Final answer. Commit + emit done. If we streamed the content as
             // deltas already, skip the one-shot chunk (the frontend reconciles
             // the bubble to `done.content` regardless); otherwise emit it as a
             // single chunk so the non-streaming path still renders.
-            let content = turn.content.clone();
+            let mut content = turn.content.clone();
+            let mut finish_reason = "stop";
             crate::log_chat!("assistant", "{}", content);
-            {
+            if content.trim().is_empty() {
+                finish_reason = "error";
+                // Say so rather than leave a blank bubble; nothing is committed
+                // (an empty assistant message is rejected by some providers).
+                content = "(The model returned an empty reply. Try again, or rephrase the request.)".into();
+                streamed = false;
+            } else {
                 let mut guard = slot.write().await;
                 if let Some(session) = guard.as_mut() {
                     session
@@ -273,7 +339,7 @@ pub(super) async fn run_tool_loop(
                 DoneEvent {
                     request_id,
                     content,
-                    finish_reason: Some("stop"),
+                    finish_reason: Some(finish_reason),
                 },
             );
             return Ok(());
@@ -322,7 +388,7 @@ pub(super) async fn run_tool_loop(
 
         // Execute each tool call sequentially. Keeps the code simple and
         // makes the approval UI for `call_query` easier to reason about.
-        for tc in &turn.tool_calls {
+        for (call_idx, tc) in turn.tool_calls.iter().enumerate() {
             let sig = format!("{}::{}", tc.name, tc.arguments);
             // Short-circuit a repeated read-only shape call: the model already
             // got this exact result this turn, so hand back a directive instead
@@ -338,7 +404,7 @@ pub(super) async fn run_tool_loop(
                 let approvals_arc = approvals.inner().clone();
                 let auto_arc = auto_approvals.inner().clone();
                 let db_arc = db_registry.inner().clone();
-                let r = tools::dispatch(
+                let call = tools::dispatch(
                     &db_arc,
                     &approvals_arc,
                     &auto_arc,
@@ -347,8 +413,39 @@ pub(super) async fn run_tool_loop(
                     &tc.id,
                     &tc.name,
                     &tc.arguments,
-                )
-                .await;
+                );
+                // Stopping mid-call drops it (a running query is abandoned the
+                // same way the query timeout abandons it). Every call of this
+                // round still gets a reply so the history stays wire-valid.
+                let Some(r) = cancel.run(call).await else {
+                    let stopped = tools::ToolResult::error("Stopped by the user before this call finished.");
+                    {
+                        let mut guard = slot.write().await;
+                        if let Some(session) = guard.as_mut() {
+                            for rest in &turn.tool_calls[call_idx..] {
+                                session.messages.push(crate::ai::ChatMessage {
+                                    role: ChatRole::Tool,
+                                    content: stopped.content.clone(),
+                                    tool_calls: Vec::new(),
+                                    tool_call_id: Some(rest.id.clone()),
+                                });
+                            }
+                        }
+                    }
+                    for rest in &turn.tool_calls[call_idx..] {
+                        if !unrenderable_tool_call(&rest.name, &rest.arguments) {
+                            let _ = app.emit(
+                                "ai://tool/call_finished",
+                                serde_json::json!({
+                                    "request_id": request_id,
+                                    "tool_call_id": rest.id,
+                                    "result": stopped.content,
+                                }),
+                            );
+                        }
+                    }
+                    return finish_canceled(&app, &slot, &request_id, "").await;
+                };
                 // Remember successful shape calls so the next identical one is
                 // short-circuited above. Errors aren't cached — a retry might
                 // legitimately succeed.
@@ -521,17 +618,22 @@ pub(super) async fn run_tool_loop(
 /// re-injecting it on every turn via this helper keeps the stored
 /// transcript clean (no ~1KB of rules per user turn in the chat log) and
 /// always ships the latest rules to the model even if we tweak them.
+///
+/// `tools` says whether the model can call the DB tools this turn; the prompt
+/// only teaches tools it can actually use. The history is trimmed to what the
+/// provider can take (see [`fit_history`]).
 pub(super) fn with_system_prompt(
     history: &[ChatMessage],
-    provider: &str,
+    provider: crate::ai::ProviderKind,
     model: &str,
     context: Option<&str>,
     recent_activity: Option<&str>,
+    tools: bool,
 ) -> Vec<ChatMessage> {
-    let mut out = Vec::with_capacity(history.len() + 3);
+    let mut out = Vec::with_capacity(history.len() + 4);
     out.push(ChatMessage::text(
         ChatRole::System,
-        crate::ai::context::system_prompt(provider, model),
+        crate::ai::context::system_prompt(provider.as_str(), model, tools),
     ));
     // Schema context as a SECOND system message, re-added every turn so it stays
     // adjacent to the prompt + the latest user turn (not lost deep in history).
@@ -544,13 +646,101 @@ pub(super) fn with_system_prompt(
         out.push(ChatMessage::text(
             ChatRole::System,
             format!(
-                "Recent queries run in this connection (most recent last). Use this to \
-                 diagnose failures and offer a corrected query or retry when one errored:\n\n{act}"
+                "Queries the user recently ran in this connection (most recent last). Use \
+                 this to diagnose failures and offer a corrected query or retry when one \
+                 errored:\n\n{act}"
             ),
         ));
     }
-    out.extend(repair_orphan_tool_calls(history));
+    let fixed: usize = out.iter().map(|m| m.content.len()).sum();
+    let budget = prompt_budget_chars(provider).saturating_sub(fixed).max(MIN_HISTORY_CHARS);
+    let (history, trimmed) = fit_history(&repair_orphan_tool_calls(history), budget);
+    if trimmed {
+        out.push(ChatMessage::text(
+            ChatRole::System,
+            "Earlier messages of this conversation were left out to fit the model's context \
+             window. If the user refers to something you can't see, ask them to restate it.",
+        ));
+    }
+    out.extend(history);
     out
+}
+
+/// History kept even when the prompt and context alone use up the budget.
+const MIN_HISTORY_CHARS: usize = 4_000;
+
+/// Rough character budget for a whole request (prompt, context and history).
+/// Sending the full transcript every turn eventually overflowed small context
+/// windows — a hard error from llama-server ("exceeds the available context
+/// size") on every later message of a long chat.
+fn prompt_budget_chars(provider: crate::ai::ProviderKind) -> usize {
+    use crate::ai::ProviderKind;
+    match provider {
+        // llama-server runs with an 8k-token window; leave room for the reply.
+        ProviderKind::LlamaLocal => 20_000,
+        // The CLIs get the flattened transcript as ONE argv string: Windows
+        // caps a whole command line at 32,767 chars (spawn fails past it),
+        // Linux a single argument at 128 KiB.
+        k if k.is_cli() => {
+            if cfg!(windows) {
+                28_000
+            } else {
+                120_000
+            }
+        }
+        // Usually small local models behind Ollama & co.
+        ProviderKind::OpenaiCompatible => 60_000,
+        _ => 200_000,
+    }
+}
+
+/// The most recent part of `history` that fits in `max_chars`, cut at a user
+/// turn so tool calls stay with their results. Older tool results are
+/// shortened first — they are the bulk of a long session, and the model rarely
+/// needs a stale result set verbatim. Returns whether anything was dropped.
+fn fit_history(history: &[ChatMessage], max_chars: usize) -> (Vec<ChatMessage>, bool) {
+    const KEEP_FULL_TOOL_RESULTS: usize = 6;
+    const OLD_TOOL_RESULT_CHARS: usize = 1_500;
+    let mut msgs = history.to_vec();
+    let tool_idx: Vec<usize> = msgs
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| matches!(m.role, ChatRole::Tool))
+        .map(|(i, _)| i)
+        .collect();
+    if tool_idx.len() > KEEP_FULL_TOOL_RESULTS {
+        for &i in &tool_idx[..tool_idx.len() - KEEP_FULL_TOOL_RESULTS] {
+            if msgs[i].content.len() > OLD_TOOL_RESULT_CHARS {
+                let short = crate::ai::clip_str(&msgs[i].content, OLD_TOOL_RESULT_CHARS);
+                msgs[i].content = format!("{short}… (older result shortened)");
+            }
+        }
+    }
+    let size = |m: &ChatMessage| {
+        m.content.len() + m.tool_calls.iter().map(|c| c.name.len() + c.arguments.len()).sum::<usize>() + 16
+    };
+    if msgs.iter().map(size).sum::<usize>() <= max_chars {
+        return (msgs, false);
+    }
+    // Earliest user turn whose suffix still fits.
+    let mut acc = 0usize;
+    let mut cut: Option<usize> = None;
+    for i in (0..msgs.len()).rev() {
+        acc += size(&msgs[i]);
+        if matches!(msgs[i].role, ChatRole::User) {
+            if acc > max_chars {
+                break;
+            }
+            cut = Some(i);
+        }
+    }
+    // Not even the current turn fits: send it anyway — dropping the user's own
+    // question would be worse than a provider error.
+    let cut = cut
+        .or_else(|| msgs.iter().rposition(|m| matches!(m.role, ChatRole::User)))
+        .unwrap_or(0);
+    let kept = msgs.split_off(cut);
+    (kept, cut > 0)
 }
 
 /// Defensive history sanitizer. OpenAI (and compatible APIs) reject any
@@ -723,6 +913,72 @@ mod history_sanitizer_tests {
         assert_eq!(out.len(), 2);
         assert!(matches!(out[0].role, ChatRole::User));
         assert!(matches!(out[1].role, ChatRole::Assistant));
+    }
+
+    #[test]
+    fn history_within_budget_is_untouched() {
+        let h = vec![
+            ChatMessage::text(ChatRole::User, "hi"),
+            ChatMessage::text(ChatRole::Assistant, "hello"),
+        ];
+        let (out, trimmed) = fit_history(&h, 10_000);
+        assert!(!trimmed);
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn long_history_is_cut_at_a_user_turn() {
+        let big = "x".repeat(400);
+        let mut h = Vec::new();
+        for _ in 0..10 {
+            h.push(ChatMessage::text(ChatRole::User, big.clone()));
+            h.push(assistant_with_calls(&["a"]));
+            h.push(tool("a"));
+            h.push(ChatMessage::text(ChatRole::Assistant, big.clone()));
+        }
+        let (out, trimmed) = fit_history(&h, 2_000);
+        assert!(trimmed);
+        assert!(matches!(out[0].role, ChatRole::User), "starts at a user turn");
+        assert!(out.len() < h.len());
+        // The newest turn is always kept whole.
+        assert!(matches!(out.last().unwrap().role, ChatRole::Assistant));
+    }
+
+    #[test]
+    fn current_turn_is_kept_even_over_budget() {
+        let h = vec![
+            ChatMessage::text(ChatRole::User, "old"),
+            ChatMessage::text(ChatRole::Assistant, "old reply"),
+            ChatMessage::text(ChatRole::User, "y".repeat(5_000)),
+        ];
+        let (out, trimmed) = fit_history(&h, 100);
+        assert!(trimmed);
+        assert_eq!(out.len(), 1);
+        assert!(matches!(out[0].role, ChatRole::User));
+    }
+
+    #[test]
+    fn old_tool_results_are_shortened_first() {
+        let mut h = vec![ChatMessage::text(ChatRole::User, "q")];
+        for i in 0..8 {
+            let id = format!("c{i}");
+            h.push(assistant_with_calls(&[id.as_str()]));
+            h.push(ChatMessage {
+                role: ChatRole::Tool,
+                content: "r".repeat(5_000),
+                tool_calls: Vec::new(),
+                tool_call_id: Some(id),
+            });
+        }
+        let (out, trimmed) = fit_history(&h, 1_000_000);
+        assert!(!trimmed);
+        let tool_lens: Vec<usize> = out
+            .iter()
+            .filter(|m| matches!(m.role, ChatRole::Tool))
+            .map(|m| m.content.len())
+            .collect();
+        assert!(tool_lens[0] < 2_000 && tool_lens[1] < 2_000, "{tool_lens:?}");
+        assert!(tool_lens[2..].iter().all(|&n| n == 5_000), "{tool_lens:?}");
     }
 
     #[test]

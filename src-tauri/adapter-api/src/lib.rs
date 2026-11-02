@@ -14,6 +14,7 @@ pub mod intent;
 pub mod log;
 pub mod manifest;
 pub mod query_cap;
+pub mod sql_lex;
 pub mod ssh_hosts;
 pub mod template;
 pub mod types;
@@ -81,6 +82,10 @@ pub use types::{
     MAX_RESULT_ROWS,
 };
 pub use query_cap::prepare_capped_query;
+pub use sql_lex::{
+    code_words, has_top_level_keyword, leading_keyword, mask_strings_and_comments,
+    split_sql_statements,
+};
 
 /// Contract every built-in adapter implements.
 ///

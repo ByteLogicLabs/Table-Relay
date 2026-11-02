@@ -70,7 +70,7 @@ export interface AppSettings {
   editorAutocomplete: boolean;
 
   // AI
-  aiStreamMode: boolean;          // stream the chat reply token-by-token (default off)
+  aiStreamMode: boolean;          // stream the chat reply token-by-token (default on)
   persistAiApprovals: boolean;    // remember auto-approval flags across restarts
   aiMaxToolIterations: number;    // superseded by aiEffort/EFFORT_PRESETS; kept for back-compat
   aiMaxRepeatCalls: number;       // superseded by aiEffort/EFFORT_PRESETS; kept for back-compat
@@ -99,7 +99,7 @@ export const DEFAULTS: AppSettings = {
   editorWordWrap: true,
   editorMinimap: false,
   editorAutocomplete: true,
-  aiStreamMode: false,
+  aiStreamMode: true,
   persistAiApprovals: false,
   aiMaxToolIterations: 50,
   aiMaxRepeatCalls: 50,

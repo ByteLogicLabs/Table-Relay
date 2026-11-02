@@ -1,26 +1,79 @@
 //! Shared HTTP helpers for hosted AI providers.
 
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::ai::AiError;
 
+/// Longest a hosted provider may stay completely silent — no response head,
+/// no stream bytes — before the request fails as a network timeout (which the
+/// tool loop retries). Generous because reasoning models can think for minutes
+/// before the first byte; without any read timeout a dropped connection (sleep
+/// / resume, Wi-Fi change, a proxy closing an idle socket) left the turn
+/// waiting forever and every later message queued behind it.
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Idle limit for a model served from this machine (llama-server, Ollama, LM
+/// Studio). Prompt processing on a CPU can take many minutes before the first
+/// byte, and there is no network in between to drop the connection.
+const LOCAL_READ_IDLE_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Overall cap for a non-streaming round-trip (`complete_once`) to a hosted
+/// provider, whose whole body only arrives once generation finishes.
+pub const NON_STREAMING_TIMEOUT: Duration = Duration::from_secs(600);
+
+static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+static LOCAL_CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+
+/// Whether `url` points at a server on this machine.
+pub fn is_local_url(url: &str) -> bool {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let host = rest.split(['/', '?']).next().unwrap_or("");
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    // Drop the port; keep a bracketed IPv6 literal whole.
+    let name = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or(""),
+        None => host.split(':').next().unwrap_or(""),
+    };
+    let name = name.to_ascii_lowercase();
+    name == "localhost" || name == "::1" || name == "0.0.0.0" || name.starts_with("127.")
+}
+
+/// Client for `url`: the shared hosted-provider client, or one with a much
+/// longer idle limit for models served locally.
+pub fn client_for_url(url: &str) -> Result<reqwest::Client, AiError> {
+    if is_local_url(url) {
+        build_cached(&LOCAL_CLIENT, LOCAL_READ_IDLE_TIMEOUT)
+    } else {
+        client()
+    }
+}
+
 /// The global shared reqwest client for AI calls. Re-used so TLS sessions
 /// and connection pools are amortised across turns.
-///
-/// Timeout is set per-request (long for streaming responses), but we still
-/// cap the initial TCP + TLS handshake so dead networks fail fast.
 pub fn client() -> Result<reqwest::Client, AiError> {
-    reqwest::Client::builder()
+    build_cached(&CLIENT, READ_IDLE_TIMEOUT)
+}
+
+fn build_cached(cell: &OnceLock<reqwest::Client>, read_idle: Duration) -> Result<reqwest::Client, AiError> {
+    if let Some(c) = cell.get() {
+        return Ok(c.clone());
+    }
+    let built = reqwest::Client::builder()
         // Cap the TCP+TLS handshake so a dead network fails fast, but keep it
         // generous: 15s was tight enough that a momentarily slow provider or
         // congested link surfaced as a spurious "network timeout" mid-chat.
         // 30s tolerates a slow handshake without making a truly dead host hang.
         .connect_timeout(Duration::from_secs(30))
-        // No overall `timeout()` — the body of a streaming response takes
-        // minutes on long completions. Each provider sets a read-level
-        // timeout via `read_timeout` below on the response.
+        // No overall `timeout()` here — a streaming body legitimately takes
+        // minutes. Instead every read (response head and each stream chunk)
+        // must make progress within `read_idle`, and TCP keepalive notices a
+        // peer that vanished without closing the socket.
+        .read_timeout(read_idle)
+        .tcp_keepalive(Duration::from_secs(30))
         .build()
-        .map_err(|e| AiError::Other(format!("http client: {e}")))
+        .map_err(|e| AiError::Other(format!("http client: {e}")))?;
+    Ok(cell.get_or_init(|| built).clone())
 }
 
 /// Map `reqwest::Error` + HTTP status into the unified `AiError`.
@@ -57,7 +110,7 @@ fn extract_error_message(body: &str) -> String {
     }
     let trimmed = body.trim();
     if trimmed.len() > 240 {
-        format!("{}…", &trimmed[..240])
+        format!("{}…", crate::ai::clip_str(trimmed, 240))
     } else {
         trimmed.to_string()
     }
@@ -67,7 +120,21 @@ pub fn map_reqwest(err: reqwest::Error) -> AiError {
     if err.is_timeout() {
         return AiError::NetworkTimeout;
     }
-    AiError::Upstream(err.to_string())
+    // reqwest's message embeds the request URL, which can carry credentials
+    // (query-string keys, userinfo); the message goes to the UI and logs. Keep
+    // the endpoint itself — "connection refused" is useless without it.
+    let target = err.url().map(|u| {
+        let mut u = u.clone();
+        u.set_query(None);
+        let _ = u.set_username("");
+        let _ = u.set_password(None);
+        u.to_string()
+    });
+    let msg = err.without_url().to_string();
+    AiError::Upstream(redact(&match target {
+        Some(t) => format!("{msg} ({t})"),
+        None => msg,
+    }))
 }
 
 fn looks_like_context_overflow(body: &str) -> bool {
@@ -156,6 +223,26 @@ mod tests {
         let r = redact(s);
         assert!(!r.contains("abcdef123"));
         assert!(r.contains("Bearer"));
+    }
+
+    #[test]
+    fn local_urls_are_detected() {
+        assert!(is_local_url("http://localhost:8080/v1"));
+        assert!(is_local_url("http://127.0.0.1:11434/v1"));
+        assert!(is_local_url("http://[::1]:1234/v1"));
+        assert!(is_local_url("http://user:pw@localhost/v1"));
+        assert!(!is_local_url("https://api.openai.com/v1"));
+        assert!(!is_local_url("https://localhost.example.com/v1"));
+        assert!(!is_local_url("https://api.groq.com/openai/v1?x=localhost"));
+    }
+
+    #[test]
+    fn long_non_json_error_body_is_clipped_on_a_char_boundary() {
+        // 239 ASCII bytes then a 3-byte em-dash straddling byte 240.
+        let body = format!("{}—tail", "x".repeat(239));
+        let msg = extract_error_message(&body);
+        assert!(msg.ends_with('…'));
+        assert!(msg.starts_with(&"x".repeat(239)));
     }
 
     #[test]

@@ -43,7 +43,8 @@ export interface QueryLogEntry {
   timestamp: number;
   connectionId: string;
   statement: string;
-  source: 'editor' | 'grid' | 'system';
+  /** `ai`: run by the AI assistant's `call_query` tool. */
+  source: 'editor' | 'grid' | 'system' | 'ai';
   durationMs?: number;
   status: 'ok' | 'error';
   message?: string;

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import Editor from '@monaco-editor/react';
+import { useEditorCompletion } from '../../lib/query-completion/use-editor-completion';
 import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
@@ -145,6 +146,15 @@ export default function RoutineView({
   // Manifest Monaco language id for accurate highlighting, matching the query
   // editor; generic SQL fallback.
   const editorLanguage = activeManifest?.queryEditor?.language?.trim() || 'sql';
+  // Table/column suggestions for this editor (the query tabs' providers only
+  // answer for their own editors).
+  const handleEditorMount = useEditorCompletion({
+    connectionId: connection.id,
+    adapterKey: activeManifest?.adapter.key,
+    dialect,
+    language: editorLanguage,
+    defaultSchema: schema,
+  });
 
   // Follow the app's active Monaco theme (same as the query editor) rather than
   // hardcoding vs-dark, so the routine editor matches light/dark/monokai.
@@ -433,6 +443,7 @@ export default function RoutineView({
         <Editor
           language={editorLanguage}
           value={draft}
+          onMount={handleEditorMount}
           onChange={handleDraftChange}
           theme={theme}
           options={ddlEditorOptions({

@@ -189,6 +189,8 @@ export interface AutoApprovalFlags {
 
 export interface ApprovalRequestEvent {
   toolCallId: string;
+  /** The chat turn asking. Lets the UI drop a card whose turn was stopped. */
+  requestId?: string;
   name: string;
   /** SQL / native command the tool wants to run. Undefined for read-only
    *  shape tools (`list_schemas` / `list_tables` / `describe_table`); those
@@ -376,7 +378,9 @@ export const ai = {
   setAutoApprovals: (flags: AutoApprovalFlags): Promise<void> =>
     invoke<void>('ai_set_auto_approvals', { flags }),
 
-  newChat: () => invoke<void>('ai_new_chat'),
+  /** Resolves to whether the backend cleared its transcript (it declines
+   *  while another chat's turn is still running). */
+  newChat: () => invoke<boolean>('ai_new_chat'),
 
   listModels: (kind: AiProviderKind, opts?: { apiKey?: string; baseUrl?: string }): Promise<string[]> =>
     invoke<string[]>('ai_list_models', {
@@ -439,11 +443,12 @@ export const ai = {
     ),
 
   onApprovalRequest: (cb: (e: ApprovalRequestEvent) => void): Promise<UnlistenFn> =>
-    listen<{ tool_call_id: string; name: string; sql?: string; summary?: string; mode?: 'new' | 'replace'; title?: string; tier?: QueryTier; object?: 'trigger' | 'table'; objectName?: string | null }>(
+    listen<{ tool_call_id: string; request_id?: string; name: string; sql?: string; summary?: string; mode?: 'new' | 'replace'; title?: string; tier?: QueryTier; object?: 'trigger' | 'table'; objectName?: string | null }>(
       'ai://tool/approval_request',
       (ev) => {
         cb({
           toolCallId: ev.payload.tool_call_id,
+          requestId: ev.payload.request_id,
           name: ev.payload.name,
           sql: ev.payload.sql,
           summary: ev.payload.summary,
@@ -567,6 +572,9 @@ export const ai = {
       /** Stream tokens live (true) or deliver the reply once complete (false).
        *  Defaults to true on the backend when omitted. */
       stream?: boolean;
+      /** Replaces the backend transcript before this turn — sent when the
+       *  turn comes from a different connection's chat than the last one. */
+      history?: Array<{ role: string; content: string }>;
     },
   ) =>
     invoke<void>('ai_chat_send', {
@@ -585,6 +593,7 @@ export const ai = {
         reasoning_effort: opts?.reasoningEffort,
         recent_query_log: opts?.recentQueryLog,
         stream: opts?.stream ?? true,
+        history: opts?.history,
       },
     }),
 
@@ -592,9 +601,10 @@ export const ai = {
     invoke<void>('ai_chat_stop', { requestId }),
 
   /** Repopulate the backend session transcript when a saved conversation is
-   *  reopened, so continuing it keeps full context (all providers + CLIs). */
+   *  reopened, so continuing it keeps full context (all providers + CLIs).
+   *  Resolves to whether it was replaced (declined while a turn is running). */
   restoreMessages: (messages: Array<{ role: string; content: string }>) =>
-    invoke<void>('ai_restore_messages', { messages }),
+    invoke<boolean>('ai_restore_messages', { messages }),
 
   onChunk: (cb: (e: ChatChunkEvent) => void): Promise<UnlistenFn> =>
     listen<{ request_id: string; delta: string }>('ai://chat/chunk', (ev) => {

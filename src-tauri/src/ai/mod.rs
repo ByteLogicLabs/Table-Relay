@@ -3,8 +3,11 @@
 //! types). Provider implementations live in sibling files.
 
 pub mod anthropic;
+pub mod cancel;
 pub mod cli_provider;
 pub mod cli_specs;
+#[cfg(windows)]
+pub mod conpty;
 pub mod context;
 pub mod download;
 pub mod echo;
@@ -24,6 +27,21 @@ pub mod tools;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
+
+/// `s` cut to at most `max` bytes without splitting a character. Byte-index
+/// slicing (`&s[..n]`) panics when `n` lands inside a multibyte character —
+/// an em-dash, accented letter or emoji in a long query was enough to crash
+/// a chat turn.
+pub(crate) fn clip_str(s: &str, max: usize) -> &str {
+    if s.len() <= max {
+        return s;
+    }
+    let mut end = max;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
 
 /// What kind of backend powers a session. The UI uses this tag; Rust uses it
 /// to pick the right provider struct on `ai_start`.
@@ -158,6 +176,11 @@ pub struct TurnOptions {
     /// When false, do one buffered round-trip and emit the reply once it's
     /// complete. Default true (the historical behaviour).
     pub stream: bool,
+    /// Let a reply that is just a read-only ```sql block stand in for a
+    /// `call_query` call, for weak local models that never use the tool
+    /// channel. Only for plain chat turns — Fix / Explain / Generate ask for
+    /// a SQL block to *show*, never to run.
+    pub sql_fence_fallback: bool,
 }
 
 impl Default for TurnOptions {
@@ -166,6 +189,7 @@ impl Default for TurnOptions {
             max_tokens: None,
             reasoning_effort: None,
             stream: true,
+            sql_fence_fallback: false,
         }
     }
 }
@@ -193,6 +217,17 @@ pub struct TokenChunk {
     pub delta: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<FinishReason>,
+}
+
+/// Last chunk of a stream that broke off. The reason is appended to the reply
+/// so the user sees why it ended (a silent stop often left an empty bubble),
+/// and the turn ends as an error.
+pub(crate) fn stream_failure(request_id: &str, reason: &str) -> TokenChunk {
+    TokenChunk {
+        request_id: request_id.to_string(),
+        delta: format!("\n\n⚠ {reason}"),
+        finish_reason: Some(FinishReason::Error),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

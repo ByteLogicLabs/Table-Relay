@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from 'react';
+import { useCallback, useRef, useSyncExternalStore } from 'react';
 import { db, type ConnectionMeta, type SchemaInfo, type TableStructure, isDbError } from '../lib/db';
 
 interface State {
@@ -63,6 +63,26 @@ function mutate(fn: (s: State) => State) {
 
 export function useConnections() {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+/**
+ * Subscribe to one slice of the store. The component re-renders only when
+ * `selector`'s result changes (`Object.is`) — every slice is replaced only when
+ * it actually changes. Prefer this to `useConnections()`: the whole-store hook
+ * re-rendered every subscriber on any change, so each `describe_table` landing
+ * in the structure cache (autocomplete, opening a tab, the AI) re-rendered the
+ * app root and every open data grid and SQL editor.
+ *
+ * `selector` must return something already in the store (a slice, an entry)
+ * — not a freshly built object, which would differ on every call.
+ */
+export function useConnectionsSelector<T>(selector: (s: State) => T): T {
+  // The selector may close over props (a connection id); the ref makes the
+  // latest one apply on this very render.
+  const selectorRef = useRef(selector);
+  selectorRef.current = selector;
+  const getSelected = useCallback(() => selectorRef.current(state), []);
+  return useSyncExternalStore(subscribe, getSelected, getSelected);
 }
 
 export async function connectAndLoad(connectionId: string, force?: boolean): Promise<ConnectionMeta | null> {

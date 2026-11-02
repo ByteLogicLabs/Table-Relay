@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertCircle,
   Database,
@@ -46,7 +46,7 @@ import { ConnectionProfile } from "../../types";
 import {
   connectAndLoad,
   refreshSchemas,
-  useConnections,
+  useConnectionsSelector,
 } from "../../state/connections";
 import {
   useAdapterManifests,
@@ -167,7 +167,7 @@ interface SidebarProps {
   } | null;
 }
 
-export default function Sidebar({
+function Sidebar({
   focusedConnection,
   focusedDatabase,
   connections,
@@ -242,8 +242,16 @@ export default function Sidebar({
   // effect can reference it without closure ordering issues.
   const fetchedExtrasRef = useRef(new Set<string>());
 
-  const connState = useConnections();
   const conn = focusedConnection;
+  // Only the focused connection's entries — not the whole store, which also
+  // changes whenever any table structure is cached.
+  const connKey = conn?.id ?? "";
+  const connSchemas = useConnectionsSelector((s) => s.schemasById.get(connKey));
+  const connLoadingSchemas = useConnectionsSelector((s) => s.loadingSchemasById.has(connKey));
+  const connLoadedSchemas = useConnectionsSelector((s) => s.loadedSchemasById.has(connKey));
+  const connActive = useConnectionsSelector((s) => s.activeById.has(connKey));
+  const connConnecting = useConnectionsSelector((s) => s.connectingIds.has(connKey));
+  const connLastError = useConnectionsSelector((s) => s.lastErrorById.get(connKey) ?? null);
 
   // Reset the table-list search whenever the focused connection changes. The
   // sidebar is never unmounted across connection switches (e.g. ⌘K to another
@@ -254,12 +262,12 @@ export default function Sidebar({
     setFilter("");
   }, [conn?.id]);
 
-  const schemas = conn ? (connState.schemasById.get(conn.id) ?? []) : [];
+  const schemas = useMemo(() => (conn ? (connSchemas ?? []) : []), [conn, connSchemas]);
   const isLoadingSchemas = conn
-    ? connState.loadingSchemasById.has(conn.id)
+    ? connLoadingSchemas
     : false;
   const hasLoadedSchemas = conn
-    ? connState.loadedSchemasById.has(conn.id)
+    ? connLoadedSchemas
     : false;
 
   // Capability gates — pulled from the adapter manifest so we don't
@@ -313,10 +321,10 @@ export default function Sidebar({
   // a connect attempt fails we still have `conn` (the profile) but no active
   // driver — this is what the sidebar checks to swap in a clear "failed"
   // state instead of silently rendering an empty table list.
-  const isConnected = conn ? connState.activeById.has(conn.id) : false;
-  const isConnecting = conn ? connState.connectingIds.has(conn.id) : false;
+  const isConnected = conn ? connActive : false;
+  const isConnecting = conn ? connConnecting : false;
   const connectError = conn
-    ? (connState.lastErrorById.get(conn.id) ?? null)
+    ? connLastError
     : null;
   const [retrying, setRetrying] = useState(false);
   const [processListOpen, setProcessListOpen] = useState(false);
@@ -2279,3 +2287,7 @@ function TriggerRow({
     </ContextMenu>
   );
 }
+
+// Re-renders only when its own props change (they're stable from the
+// workspace), not on every workspace update.
+export default memo(Sidebar);

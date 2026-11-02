@@ -32,6 +32,10 @@ pub struct AiSession {
     /// ("I need more context" despite the schema being in the prompt). Updated
     /// whenever the focus fingerprint (`last_context_key`) changes.
     pub current_context: Option<String>,
+    /// When `current_context` was built. A context older than
+    /// `context::SCHEMA_CONTEXT_TTL` is rebuilt even if the focus didn't change,
+    /// so tables created or dropped outside the chat show up eventually.
+    pub context_built_at: Option<Instant>,
     /// Compact recent query-log (ok + errors) for the focused connection,
     /// refreshed every turn from the request. Re-prepended like `current_context`
     /// so the model can see what just ran and fix/retry a failed query.
@@ -55,6 +59,28 @@ pub async fn require_provider(slot: &SessionSlot) -> Result<Arc<dyn AiProvider>,
         .as_ref()
         .map(|s| s.provider.clone())
         .ok_or(AiError::NoActiveSession)
+}
+
+/// Wait — briefly — for the running turn, if any, to finish, and hold the
+/// session's send lock while the caller replaces the transcript. The UI stops
+/// a turn before starting a new chat or loading a saved one; without this the
+/// stopped turn could still commit its reply into the replacement transcript.
+/// `Ok(None)` when a turn is still running after a short wait — possibly
+/// another connection's chat, which the UI didn't stop. The caller must then
+/// leave the transcript alone rather than mix the two chats.
+pub async fn settle_turn(
+    slot: &SessionSlot,
+) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, AiError> {
+    let lock = slot
+        .read()
+        .await
+        .as_ref()
+        .ok_or(AiError::NoActiveSession)?
+        .send_lock
+        .clone();
+    Ok(tokio::time::timeout(std::time::Duration::from_secs(3), lock.lock_owned())
+        .await
+        .ok())
 }
 
 /// Install a fresh session. Errors if one is already active so the caller
@@ -102,6 +128,7 @@ mod tests {
             started_at: Instant::now(),
             last_context_key: None,
             current_context: None,
+            context_built_at: None,
             recent_activity: None,
             send_lock: Arc::new(tokio::sync::Mutex::new(())),
         }

@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use zeroize::{Zeroize, Zeroizing};
 
-use super::http::{client, map_reqwest, map_status};
+use super::http::{client_for_url, is_local_url, map_reqwest, map_status, NON_STREAMING_TIMEOUT};
 use super::sse::data_lines;
 use super::{
     AiError, AiProvider, ChatRole, CompletionRequest, FinishReason, ProviderKind, TokenChunk,
@@ -86,7 +86,7 @@ impl OpenAiProvider {
             id: String,
         }
         let url = format!("{}/models", base_url.trim_end_matches('/'));
-        let mut req = client()?.get(url);
+        let mut req = client_for_url(&url)?.get(&url);
         if let Some(k) = api_key {
             req = req.bearer_auth(k);
         }
@@ -121,7 +121,7 @@ impl OpenAiProvider {
             reasoning_effort: None,
         };
         let key = self.api_key.lock().await.to_string();
-        let http = client()?;
+        let http = self.http()?;
         let res = http
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&key)
@@ -214,10 +214,8 @@ impl OpenAiProvider {
         );
 
         let key = self.api_key.lock().await.to_string();
-        let res = client()?
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(&key)
-            .json(&body)
+        let res = self
+            .post_once(&key, &body)?
             .send()
             .await
             .map_err(map_reqwest)?;
@@ -231,16 +229,14 @@ impl OpenAiProvider {
                     obj.remove("max_tokens");
                 }
                 retry_body["max_completion_tokens"] = serde_json::json!(DEFAULT_TOOL_MAX_TOKENS);
-                let retry = client()?
-                    .post(format!("{}/chat/completions", self.base_url))
-                    .bearer_auth(&key)
-                    .json(&retry_body)
+                let retry = self
+                    .post_once(&key, &retry_body)?
                     .send()
                     .await
                     .map_err(map_reqwest)?;
                 let retry_status = retry.status();
                 if retry_status.is_success() {
-                    return parse_tool_turn_response(retry, tools).await;
+                    return parse_tool_turn_response(retry, tools, opts.sql_fence_fallback).await;
                 }
                 let retry_body = retry.text().await.unwrap_or_default();
                 log_upstream_error("tool_once_retry", &self.model, &self.base_url, retry_status, &retry_body);
@@ -249,7 +245,7 @@ impl OpenAiProvider {
             return Err(map_status(status, &error_body));
         }
 
-        parse_tool_turn_response(res, tools).await
+        parse_tool_turn_response(res, tools, opts.sql_fence_fallback).await
     }
 
     /// Streaming sibling of `complete_once`. Same request shape with
@@ -291,7 +287,8 @@ impl OpenAiProvider {
 
         let key = self.api_key.lock().await.to_string();
         let url = format!("{}/chat/completions", self.base_url);
-        let res = client()?
+        let res = self
+            .http()?
             .post(&url)
             .bearer_auth(&key)
             .json(&body)
@@ -308,7 +305,8 @@ impl OpenAiProvider {
                     obj.remove("max_tokens");
                 }
                 retry_body["max_completion_tokens"] = serde_json::json!(DEFAULT_TOOL_MAX_TOKENS);
-                let retry = client()?
+                let retry = self
+                    .http()?
                     .post(&url)
                     .bearer_auth(&key)
                     .json(&retry_body)
@@ -317,7 +315,7 @@ impl OpenAiProvider {
                     .map_err(map_reqwest)?;
                 let retry_status = retry.status();
                 if retry_status.is_success() {
-                    return Ok(build_tool_stream(retry, tools.map(|t| t.to_vec())));
+                    return Ok(build_tool_stream(retry, tools.map(|t| t.to_vec()), opts.sql_fence_fallback));
                 }
                 let retry_body = retry.text().await.unwrap_or_default();
                 log_upstream_error("tool_stream_retry", &self.model, &self.base_url, retry_status, &retry_body);
@@ -326,7 +324,7 @@ impl OpenAiProvider {
             return Err(map_status(status, &error_body));
         }
 
-        Ok(build_tool_stream(res, tools.map(|t| t.to_vec())))
+        Ok(build_tool_stream(res, tools.map(|t| t.to_vec()), opts.sql_fence_fallback))
     }
 
     /// Reasoning-era OpenAI models (o1 / o3 / o4 / gpt-5 family) replaced
@@ -343,6 +341,26 @@ impl OpenAiProvider {
             || m.starts_with("o3")
             || m.starts_with("o4")
             || m.starts_with("gpt-5")
+    }
+
+    /// HTTP client for this endpoint (local servers get a longer idle limit).
+    fn http(&self) -> Result<reqwest::Client, AiError> {
+        client_for_url(&self.base_url)
+    }
+
+    /// A non-streaming `chat/completions` POST. Hosted endpoints get an overall
+    /// deadline — the body only arrives once generation finishes, so a stuck
+    /// request would otherwise hold the turn (and its send lock) indefinitely.
+    fn post_once(&self, key: &str, body: &serde_json::Value) -> Result<reqwest::RequestBuilder, AiError> {
+        let mut req = self
+            .http()?
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(key)
+            .json(body);
+        if !is_local_url(&self.base_url) {
+            req = req.timeout(NON_STREAMING_TIMEOUT);
+        }
+        Ok(req)
     }
 
     fn is_real_openai_endpoint(&self) -> bool {
@@ -495,6 +513,7 @@ struct StreamToolCallFn {
 fn build_tool_stream(
     res: reqwest::Response,
     tools_owned: Option<Vec<crate::ai::tools::ToolDef>>,
+    sql_fence_fallback: bool,
 ) -> BoxStream<'static, Result<ToolStreamEvent, AiError>> {
     #[derive(Default)]
     struct AccCall {
@@ -510,6 +529,11 @@ fn build_tool_stream(
         let mut lines = std::pin::pin!(super::sse::data_lines(bytes));
         while let Some(payload) = lines.next().await {
             let payload = payload.map_err(AiError::Upstream)?;
+            // A mid-stream error frame (overloaded, context overflow…) ends the
+            // turn as an error instead of passing for an empty reply.
+            if let Some(msg) = stream_error_message(&payload) {
+                Err(AiError::Upstream(msg))?;
+            }
             let p: StreamToolPayload = match serde_json::from_str(&payload) {
                 Ok(v) => v,
                 Err(_) => continue, // tolerate keep-alive / non-JSON frames
@@ -526,12 +550,21 @@ fn build_tool_stream(
             }
             if let Some(deltas) = choice.delta.tool_calls {
                 for d in deltas {
-                    let idx = d.index.unwrap_or(0) as usize;
+                    let id = d.id.filter(|id| !id.is_empty());
+                    // OpenAI sends `index` on every fragment. Some compatible
+                    // servers omit it: a fragment carrying a new id then starts
+                    // a new call instead of being glued onto the previous one.
+                    let idx = match d.index {
+                        Some(i) => i as usize,
+                        None => match (&id, acc.last()) {
+                            (Some(id), Some(last)) if !last.id.is_empty() && &last.id != id => acc.len(),
+                            (_, None) => 0,
+                            _ => acc.len() - 1,
+                        },
+                    };
                     while acc.len() <= idx { acc.push(AccCall::default()); }
                     let slot = &mut acc[idx];
-                    if let Some(id) = d.id {
-                        if !id.is_empty() { slot.id = id; }
-                    }
+                    if let Some(id) = id { slot.id = id; }
                     if let Some(f) = d.function {
                         if let Some(n) = f.name {
                             if !n.is_empty() { slot.name = n; }
@@ -546,13 +579,14 @@ fn build_tool_stream(
             .filter(|c| !c.name.is_empty())
             .map(|c| crate::ai::ToolCall { id: c.id, name: c.name, arguments: c.arguments })
             .collect();
+        ensure_unique_tool_ids(&mut tool_calls);
         let mut final_content = content;
         // Same text-fallback as the non-streaming path: small local models that
         // print a tool call as JSON text instead of using the structured
         // channel still get parsed into a real tool call.
         if tool_calls.is_empty() {
             if let Some(ts) = tools_owned.as_ref() {
-                if let Some(extracted) = extract_text_tool_call(&final_content, ts) {
+                if let Some(extracted) = extract_text_tool_call(&final_content, ts, sql_fence_fallback) {
                     tool_calls.push(extracted);
                     final_content.clear();
                 }
@@ -573,9 +607,40 @@ fn build_tool_stream(
     Box::pin(s)
 }
 
+/// The message of an `{"error": …}` frame some servers send mid-stream
+/// (OpenAI-compatible proxies, llama-server), or `None` for a normal chunk.
+fn stream_error_message(payload: &str) -> Option<String> {
+    if !payload.contains("\"error\"") {
+        return None;
+    }
+    let v: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let err = v.get("error").filter(|e| !e.is_null())?;
+    let msg = err
+        .get("message")
+        .and_then(|m| m.as_str())
+        .or_else(|| err.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| err.to_string());
+    Some(super::http::redact(&msg))
+}
+
+/// Give every tool call a usable, unique id. Some servers send empty ids or
+/// repeat one across parallel calls; the history sanitizer and the UI both key
+/// on the id, so a duplicate silently dropped the second call's result.
+fn ensure_unique_tool_ids(calls: &mut [crate::ai::ToolCall]) {
+    let mut seen = std::collections::HashSet::new();
+    for c in calls.iter_mut() {
+        if c.id.is_empty() || !seen.insert(c.id.clone()) {
+            c.id = format!("call_{}", uuid::Uuid::new_v4().simple());
+            seen.insert(c.id.clone());
+        }
+    }
+}
+
 async fn parse_tool_turn_response(
     res: reqwest::Response,
     tools: Option<&[crate::ai::tools::ToolDef]>,
+    sql_fence_fallback: bool,
 ) -> Result<ToolTurn, AiError> {
         // Read the body as raw bytes first — some OpenAI-compatible
         // endpoints return SSE even when stream=false, or send gzip
@@ -634,6 +699,7 @@ async fn parse_tool_turn_response(
         }
         #[derive(Deserialize)]
         struct RespToolCall {
+            #[serde(default)]
             id: String,
             function: RespToolCallFn,
         }
@@ -645,7 +711,7 @@ async fn parse_tool_turn_response(
         }
 
         let parsed: Resp = serde_json::from_str(&json_text).map_err(|e| {
-            crate::log_line!("ai_tools_resp", "body_len={} first200={}", json_text.len(), &json_text[..json_text.len().min(200)]);
+            crate::log_line!("ai_tools_resp", "body_len={} first200={}", json_text.len(), crate::ai::clip_str(&json_text, 200));
             AiError::Upstream(format!("parse response: {e}"))
         })?;
         let Some(choice) = parsed.choices.into_iter().next() else {
@@ -662,6 +728,7 @@ async fn parse_tool_turn_response(
                 arguments: c.function.arguments,
             })
             .collect();
+        ensure_unique_tool_ids(&mut tool_calls);
         let mut content = choice.message.content.unwrap_or_default();
 
         // Fallback extractor for small/unpatched local models that emit the
@@ -676,7 +743,7 @@ async fn parse_tool_turn_response(
         // ToolCall and clear the content so the UI doesn't render both.
         if tool_calls.is_empty() {
             if let Some(tools_slice) = tools {
-                if let Some(extracted) = extract_text_tool_call(&content, tools_slice) {
+                if let Some(extracted) = extract_text_tool_call(&content, tools_slice, sql_fence_fallback) {
                     crate::log_line!(
                         "ai_tools_resp",
                         "text-fallback extracted tool_call: {} args={}",
@@ -808,7 +875,7 @@ impl AiProvider for OpenAiProvider {
             reasoning_effort: effort,
         };
         let key = self.api_key.lock().await.to_string();
-        let http = client()?;
+        let http = self.http()?;
         let res = http
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(&key)
@@ -852,9 +919,9 @@ impl AiProvider for OpenAiProvider {
     }
 
     async fn cancel(&self, _request_id: &str) {
-        // OpenAI doesn't offer mid-stream cancel; dropping the response future
-        // on the client side is effectively the cancel. The frontend already
-        // stops displaying chunks the moment `pendingRequestId` clears.
+        // OpenAI has no cancel endpoint; dropping the response stream closes
+        // the connection, which stops generation server-side. The chat
+        // command's cancel token does that (see `ai::cancel`).
     }
 
     async fn unload(&self) {
@@ -900,9 +967,13 @@ impl AiProvider for OpenAiProvider {
 ///   {"name": "foo", "arguments": {...}}
 ///   ```
 /// or the same without fences, or with extra prose around it.
+///
+/// With `sql_fence_fallback`, a reply that is essentially just a read-only
+/// ```sql block is also turned into a `call_query` (see below).
 fn extract_text_tool_call(
     content: &str,
     tools: &[crate::ai::tools::ToolDef],
+    sql_fence_fallback: bool,
 ) -> Option<crate::ai::ToolCall> {
     // Find the first balanced `{...}` object in the content. We walk the
     // string char-by-char tracking brace depth; cheaper + more forgiving
@@ -949,34 +1020,44 @@ fn extract_text_tool_call(
 
     // Second fallback: weaker local models (Qwen-Coder, small Llamas) often
     // ignore the tool-call channel entirely and just answer "here's the query"
-    // with a ```sql fenced block. When `call_query` is available, treat a lone
-    // SQL fence as intent to run it — otherwise the chat loops forever ("run
-    // it" → model re-pastes the SQL → never executes). Only fires when a
-    // query tool exists in the catalog.
-    if let Some(sql) = extract_sql_fence(content) {
-        let query_tool = tools.iter().find_map(|t| {
-            let n = t.function.name;
-            if n == "call_query" || n == "run_query" || n == "call_sql" {
-                Some(n.to_string())
-            } else {
-                None
-            }
-        });
-        if let Some(name) = query_tool {
-            return Some(crate::ai::ToolCall {
-                id: format!("textsql-{}", sql.len()),
-                name,
-                arguments: serde_json::json!({ "sql": sql }).to_string(),
-            });
-        }
+    // with a ```sql fenced block — without this the chat loops ("run it" →
+    // model re-pastes the SQL → never executes).
+    //
+    // It used to fire on ANY reply with a SQL fence, which hijacked ordinary
+    // answers: an explanation quoting a WHERE clause ran that fragment, a Fix
+    // reply's corrected UPDATE was executed, and the prose was thrown away.
+    // Now it only fires when the caller allows it (plain chat turns), the
+    // reply is little more than the fence, and the SQL is read-only.
+    if !sql_fence_fallback {
+        return None;
     }
-    None
+    let (sql, prose_len) = extract_sql_fence(content)?;
+    let lang = crate::ai::tools::CommandLanguage::Sql(adapter_api::SqlDialect::Generic);
+    if prose_len > MAX_PROSE_AROUND_SQL_FENCE
+        || crate::ai::tools::classify_batch(&sql, lang) != crate::ai::tools::QueryTier::Read
+    {
+        return None;
+    }
+    let name = tools.iter().find_map(|t| {
+        let n = t.function.name;
+        matches!(n, "call_query" | "run_query" | "call_sql").then(|| n.to_string())
+    })?;
+    Some(crate::ai::ToolCall {
+        id: format!("textsql-{}", uuid::Uuid::new_v4().simple()),
+        name,
+        arguments: serde_json::json!({ "sql": sql }).to_string(),
+    })
 }
 
+/// How much text may surround a ```sql fence for the reply to still count as
+/// "here's the query" rather than an answer that merely quotes SQL.
+const MAX_PROSE_AROUND_SQL_FENCE: usize = 160;
+
 /// Pull the first ```sql … ``` fenced block out of model prose. Returns the
-/// trimmed SQL, or None if there's no SQL fence. Accepts ```sql and a bare ```
-/// fence that contains an obvious SQL statement.
-fn extract_sql_fence(content: &str) -> Option<String> {
+/// trimmed SQL plus how many bytes of non-whitespace text surround the fence,
+/// or None if there's no SQL fence. Accepts ```sql and a bare ``` fence that
+/// contains an obvious SQL statement.
+fn extract_sql_fence(content: &str) -> Option<(String, usize)> {
     let lower = content.to_ascii_lowercase();
     // Locate a fence opening: prefer an explicit ```sql.
     let fence_start = lower.find("```sql").map(|i| i + 6).or_else(|| {
@@ -994,10 +1075,14 @@ fn extract_sql_fence(content: &str) -> Option<String> {
     let end = rest.find("```").unwrap_or(rest.len());
     let sql = rest[..end].trim().trim_start_matches('\n').trim();
     if sql.is_empty() {
-        None
-    } else {
-        Some(sql.to_string())
+        return None;
     }
+    // Text before the opening fence (minus the ``` / ```sql marker) and after
+    // the closing one.
+    let opening = content[..fence_start].rfind("```").unwrap_or(fence_start);
+    let after = (fence_start + end + 3).min(content.len());
+    let prose_len = content[..opening].trim().len() + content[after..].trim().len();
+    Some((sql.to_string(), prose_len))
 }
 
 fn try_match_tool(
@@ -1047,15 +1132,16 @@ async fn stream_openai_response(
         while let Some(line) = lines.next().await {
             match line {
                 Err(e) => {
-                    yield TokenChunk {
-                        request_id: request_id.clone(),
-                        delta: String::new(),
-                        finish_reason: Some(FinishReason::Error),
-                    };
                     tracing_fallback(&e);
+                    yield super::stream_failure(&request_id, &e.to_string());
                     return;
                 }
                 Ok(json) => {
+                    if let Some(msg) = stream_error_message(&json) {
+                        tracing_fallback(&format!("openai stream error frame: {msg}"));
+                        yield super::stream_failure(&request_id, &msg);
+                        return;
+                    }
                     match serde_json::from_str::<StreamPayload>(&json) {
                         Ok(p) => {
                             for choice in p.choices {
@@ -1128,30 +1214,33 @@ mod sql_fence_tests {
     use super::*;
     use crate::ai::tools::catalog_scoped;
 
+    fn fence_sql(c: &str) -> Option<String> {
+        extract_sql_fence(c).map(|(sql, _)| sql)
+    }
+
     #[test]
     fn extracts_explicit_sql_fence() {
         let c = "Here you go:\n```sql\nSELECT COUNT(*) FROM film_genres;\n```\nDone.";
-        assert_eq!(
-            extract_sql_fence(c).as_deref(),
-            Some("SELECT COUNT(*) FROM film_genres;")
-        );
+        assert_eq!(fence_sql(c).as_deref(), Some("SELECT COUNT(*) FROM film_genres;"));
+        // "Here you go:" + "Done."
+        assert_eq!(extract_sql_fence(c).map(|(_, prose)| prose), Some(17));
     }
 
     #[test]
     fn extracts_bare_fence_with_sql_verb() {
         let c = "```\nSELECT 1\n```";
-        assert_eq!(extract_sql_fence(c).as_deref(), Some("SELECT 1"));
+        assert_eq!(fence_sql(c).as_deref(), Some("SELECT 1"));
     }
 
     #[test]
     fn ignores_non_sql_bare_fence() {
         let c = "```\nnpm install foo\n```";
-        assert_eq!(extract_sql_fence(c), None);
+        assert_eq!(fence_sql(c), None);
     }
 
     #[test]
     fn no_fence_returns_none() {
-        assert_eq!(extract_sql_fence("just talking, no code"), None);
+        assert_eq!(fence_sql("just talking, no code"), None);
     }
 
     #[test]
@@ -1160,8 +1249,64 @@ mod sql_fence_tests {
         // tool call. With call_query in the catalog, we synthesize the call.
         let tools = catalog_scoped(false, true);
         let content = "To count rows:\n```sql\nSELECT COUNT(DISTINCT actor_id) FROM film_actors;\n```";
-        let call = extract_text_tool_call(content, &tools).expect("should synthesize a call");
+        let call = extract_text_tool_call(content, &tools, true).expect("should synthesize a call");
         assert!(call.name == "call_query" || call.name == "run_query" || call.name == "call_sql");
         assert!(call.arguments.contains("actor_id"));
+    }
+
+    #[test]
+    fn sql_fence_is_not_run_outside_plain_chat() {
+        // Fix / Explain / Generate turns ask for a SQL block to show.
+        let tools = catalog_scoped(false, true);
+        let content = "```sql\nSELECT 1\n```";
+        assert!(extract_text_tool_call(content, &tools, false).is_none());
+    }
+
+    #[test]
+    fn sql_fence_in_an_explanation_is_not_run() {
+        let tools = catalog_scoped(false, true);
+        let content = "This query joins orders to users and keeps only this year's rows:\n\
+                       ```sql\nWHERE o.created_at >= '2024-01-01'\n```\n\
+                       The filter runs before the aggregation, so the index on created_at is used. \
+                       Watch out for the implicit cast if created_at is a DATETIME.";
+        assert!(extract_text_tool_call(content, &tools, true).is_none());
+    }
+
+    #[test]
+    fn writing_sql_in_a_fence_is_never_run() {
+        let tools = catalog_scoped(false, true);
+        for sql in ["UPDATE orders SET status='paid' WHERE user_id=42;", "CREATE INDEX i ON t(a)", "DELETE FROM t"] {
+            let content = format!("```sql\n{sql}\n```");
+            assert!(extract_text_tool_call(&content, &tools, true).is_none(), "{sql}");
+        }
+    }
+
+    #[test]
+    fn synthesized_ids_are_unique() {
+        let tools = catalog_scoped(false, true);
+        let a = extract_text_tool_call("```sql\nSELECT 1\n```", &tools, true).unwrap();
+        let b = extract_text_tool_call("```sql\nSELECT 2\n```", &tools, true).unwrap();
+        assert_ne!(a.id, b.id);
+    }
+
+    #[test]
+    fn empty_and_duplicate_tool_ids_are_replaced() {
+        let call = |id: &str| crate::ai::ToolCall { id: id.into(), name: "x".into(), arguments: "{}".into() };
+        let mut calls = vec![call(""), call("a"), call("a"), call("")];
+        ensure_unique_tool_ids(&mut calls);
+        let ids: std::collections::HashSet<_> = calls.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(ids.len(), 4);
+        assert_eq!(calls[1].id, "a");
+        assert!(calls.iter().all(|c| !c.id.is_empty()));
+    }
+
+    #[test]
+    fn error_frames_are_recognised() {
+        assert_eq!(
+            stream_error_message(r#"{"error":{"message":"Overloaded","type":"overloaded_error"}}"#).as_deref(),
+            Some("Overloaded")
+        );
+        assert_eq!(stream_error_message(r#"{"error":"context length exceeded"}"#).as_deref(), Some("context length exceeded"));
+        assert_eq!(stream_error_message(r#"{"choices":[{"delta":{"content":"the \"error\" column"}}]}"#), None);
     }
 }

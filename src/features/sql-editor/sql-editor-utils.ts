@@ -1,5 +1,7 @@
 import type { editor as MonacoEditorNs } from 'monaco-editor';
+import type { SqlDialect } from '../../lib/db';
 import { getMonacoThemeId } from '../../lib/monaco-setup';
+import { type LexRules, lexRules, splitStatementRanges, stripSqlComments } from './sql-lexer';
 
 export function pickMonacoTheme(): string {
   return getMonacoThemeId(document.documentElement.dataset.theme ?? 'monokai');
@@ -63,66 +65,28 @@ export const SAVE_SHORTCUT = IS_MAC ? '⌘S' : 'Ctrl+S';
 export const SAVE_AS_SHORTCUT = IS_MAC ? '⌘⇧S' : 'Ctrl+Shift+S';
 export const LOAD_SHORTCUT = IS_MAC ? '⌘I' : 'Ctrl+I';
 
-/** Split a multi-statement SQL string on `;` respecting quotes and comments. */
-export function splitSqlStatements(sql: string): string[] {
-  const parts: string[] = [];
-  let current = '';
-  let inSingle = false;
-  let inDouble = false;
-  let inBack = false;
-  let inLineComment = false;
-  let inBlockComment = false;
-
-  for (let i = 0; i < sql.length; i++) {
-    const ch = sql[i];
-    const next = sql[i + 1];
-
-    if (inLineComment) {
-      current += ch;
-      if (ch === '\n') inLineComment = false;
-      continue;
-    }
-    if (inBlockComment) {
-      current += ch;
-      if (ch === '*' && next === '/') { current += '/'; i++; inBlockComment = false; }
-      continue;
-    }
-    if (inSingle) {
-      current += ch;
-      if (ch === "'" && sql[i - 1] !== '\\') inSingle = false;
-      continue;
-    }
-    if (inDouble) {
-      current += ch;
-      if (ch === '"' && sql[i - 1] !== '\\') inDouble = false;
-      continue;
-    }
-    if (inBack) {
-      current += ch;
-      if (ch === '`') inBack = false;
-      continue;
-    }
-
-    if (ch === '-' && next === '-') { inLineComment = true; current += ch; continue; }
-    if (ch === '/' && next === '*') { inBlockComment = true; current += ch; current += '/'; i++; continue; }
-    if (ch === "'") { inSingle = true; current += ch; continue; }
-    if (ch === '"') { inDouble = true; current += ch; continue; }
-    if (ch === '`') { inBack = true; current += ch; continue; }
-
-    if (ch === ';') {
-      const trimmed = current.trim();
-      if (trimmed) parts.push(trimmed);
-      current = '';
-    } else {
-      current += ch;
-    }
-  }
-  const trimmed = current.trim();
-  if (trimmed) parts.push(trimmed);
-  return parts;
+/**
+ * Lexer rules for editor text: the dialect's own, plus `#` line comments when
+ * the adapter's manifest declares them (SQLite) — the editor strips those
+ * before the SQL is sent, so they must read as comments here too.
+ */
+function editorLexRules(dialect: SqlDialect, commentTags?: string[]): LexRules {
+  const rules = lexRules(dialect);
+  const hashTag = (commentTags ?? []).some(t => t.trim() === '#');
+  return { ...rules, hashComment: rules.hashComment || hashTag };
 }
 
-export function statementAtCursor(source: string, cursorOffset: number): string {
+export function statementAtCursor(source: string, cursorOffset: number, dialect?: SqlDialect, commentTags?: string[]): string {
+  // SQL dialects split the way the server does: `;` inside strings, comments
+  // or dollar quotes doesn't count, and MySQL DELIMITER / SQLite trigger
+  // bodies are honoured. A cursor right after a `;` still belongs to the
+  // statement that `;` ends.
+  if (dialect && dialect !== 'none') {
+    const range = splitStatementRanges(source, dialect, editorLexRules(dialect, commentTags))
+      .find(r => cursorOffset >= r.start && cursorOffset <= r.next);
+    return range ? source.slice(range.start, range.end).trim() : '';
+  }
+
   const chars = Array.from(source);
   let start = 0;
   let depthParen = 0;
@@ -177,7 +141,17 @@ export function statementAtCursor(source: string, cursorOffset: number): string 
   return chars.slice(activeStart, activeEnd).join('').trim();
 }
 
-export function stripCodeComments(source: string, language: string, commentTags?: string[]): string {
+export function stripCodeComments(source: string, language: string, commentTags?: string[], dialect?: SqlDialect): string {
+  // SQL dialects get the same lexer the server uses (escape rules, dollar
+  // quotes, nested comments, executable comments). Everything else — Mongo's
+  // `//`, Redis' `#` — falls through to the manifest's comment tags.
+  if (dialect && dialect !== 'none') return stripSqlComments(source, editorLexRules(dialect, commentTags));
+
+  const configured = (commentTags ?? []).map(t => t.trim()).filter(Boolean);
+  const lineTokens = configured
+    .filter(t => !t.includes(' '))
+    .filter((t, idx, arr) => arr.indexOf(t) === idx);
+
   const fallbackLineTokens = (() => {
     const lang = language.toLowerCase();
     if (lang === 'mongo') return ['//'];
@@ -186,10 +160,6 @@ export function stripCodeComments(source: string, language: string, commentTags?
     return ['--', '#'];
   })();
   const fallbackBlockPairs: Array<[string, string]> = [['/*', '*/']];
-  const configured = (commentTags ?? []).map(t => t.trim()).filter(Boolean);
-  const lineTokens = configured
-    .filter(t => !t.includes(' '))
-    .filter((t, idx, arr) => arr.indexOf(t) === idx);
   const blockPairs = configured
     .filter(t => t.includes(' '))
     .map((t) => {

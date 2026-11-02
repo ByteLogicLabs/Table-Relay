@@ -444,17 +444,34 @@ impl CliSpec for CodexCliSpec {
             // Some Codex builds emit a terminal `thread.completed` / `session.…`
             // wrapper when the whole exec finishes. Honour that as the end.
             Some("thread.completed") | Some("session.completed") => LineEvent::Done(None),
-            Some("error") => {
-                let msg = v
-                    .get("message")
-                    .and_then(|m| m.as_str())
-                    .unwrap_or("Codex reported an error")
-                    .to_string();
-                LineEvent::Failed(msg)
-            }
+            Some("error") => LineEvent::Failed(codex_error_message(
+                v.get("message").and_then(|m| m.as_str()),
+            )),
+            // A failed turn ends the run; usually right after an `error` event.
+            Some("turn.failed") => LineEvent::Failed(codex_error_message(
+                v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()),
+            )),
             _ => LineEvent::Ignore,
         }
     }
+}
+
+/// Codex passes the provider's error through as a JSON string
+/// (`{"type":"error","status":400,"error":{"message":"…"}}`); show the
+/// message inside rather than the raw JSON.
+fn codex_error_message(raw: Option<&str>) -> String {
+    let Some(raw) = raw.map(str::trim).filter(|r| !r.is_empty()) else {
+        return "Codex reported an error".to_string();
+    };
+    serde_json::from_str::<Value>(raw)
+        .ok()
+        .and_then(|v| {
+            v.get("error")
+                .and_then(|e| e.get("message").or(Some(e)))
+                .or_else(|| v.get("message"))
+                .and_then(|m| m.as_str().map(str::to_string))
+        })
+        .unwrap_or_else(|| raw.to_string())
 }
 
 // ── Gemini CLI ───────────────────────────────────────────────────────────────
@@ -506,9 +523,13 @@ impl CliSpec for GeminiCliSpec {
         }
         a
     }
+    fn whole_output_json(&self) -> bool {
+        true
+    }
     fn parse_line(&self, line: &str) -> LineEvent {
-        // `--output-format json` prints a single object (possibly across lines).
-        // Try to parse the line as the full object; ignore until it parses.
+        // `--output-format json` prints a single object (pretty-printed across
+        // lines); `line` is the document gathered so far — see
+        // `whole_output_json`. Ignore until it parses.
         let v: Value = match serde_json::from_str(line.trim()) {
             Ok(v) => v,
             Err(_) => return LineEvent::Ignore,
@@ -529,6 +550,15 @@ impl CliSpec for GeminiCliSpec {
 }
 
 // ── opencode ─────────────────────────────────────────────────────────────────
+
+/// `run --format json`, plus error logs on stderr: a provider failure is
+/// otherwise invisible — the run retries silently and prints nothing.
+fn opencode_run_args() -> Vec<String> {
+    ["run", "--format", "json", "--print-logs", "--log-level", "ERROR"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
 
 pub struct OpencodeSpec;
 
@@ -551,13 +581,16 @@ impl CliSpec for OpencodeSpec {
     fn build_args(&self, prompt: &str, model: &str, _mcp: Option<&str>) -> Vec<String> {
         // opencode reads MCP from opencode.json (out-of-band). JSONL events;
         // `text` parts carry the assistant text, `step_finish` ends the run.
-        let mut a = vec!["run".into(), "--format".into(), "json".into()];
+        let mut a = opencode_run_args();
         if !model.is_empty() {
             a.push("-m".into());
             a.push(model.into());
         }
         a.push(prompt.into());
         a
+    }
+    fn stalls_on_stderr_errors(&self) -> bool {
+        true
     }
     fn parse_line(&self, line: &str) -> LineEvent {
         let v: Value = match serde_json::from_str(line.trim()) {
@@ -622,13 +655,16 @@ impl CliSpec for KiloSpec {
         v
     }
     fn build_args(&self, prompt: &str, model: &str, _mcp: Option<&str>) -> Vec<String> {
-        let mut a = vec!["run".into(), "--format".into(), "json".into()];
+        let mut a = opencode_run_args();
         if !model.is_empty() {
             a.push("-m".into());
             a.push(model.into());
         }
         a.push(prompt.into());
         a
+    }
+    fn stalls_on_stderr_errors(&self) -> bool {
+        true
     }
     fn parse_line(&self, line: &str) -> LineEvent {
         // Identical event shapes to opencode (kilo is a fork).
@@ -639,8 +675,8 @@ impl CliSpec for KiloSpec {
 // ── antigravity (agy) ────────────────────────────────────────────────────────
 // `agy -p <prompt> [--model M]` runs one prompt and prints plain text; MCP comes
 // from ~/.gemini/antigravity/mcp_config.json (out-of-band). On Windows it writes
-// the answer only to its terminal UI, never to a piped stdout (and `agy models`
-// hangs), so we disable it there via `unsupported_reason`. macOS is unaffected.
+// the answer only to a console, never to a piped stdout, so there it runs under
+// a pseudo console (`needs_console`). macOS/Linux print to stdout.
 
 pub struct AgySpec;
 
@@ -682,21 +718,9 @@ impl CliSpec for AgySpec {
         // and chat). Once we've streamed output, don't surface that as an error.
         true
     }
-    fn unsupported_reason(&self) -> Option<String> {
-        // Windows only (see module note); macOS/Linux stream to stdout fine.
-        if cfg!(windows) {
-            Some(
-                "Antigravity's `agy` CLI can't be used as a chat provider on Windows: \
-                 it renders answers to its terminal UI and writes nothing to stdout \
-                 when run as a subprocess, so Table Relay can't capture its replies \
-                 (and `agy models` hangs without a terminal). Pick a different \
-                 provider — Claude Code, Codex, Gemini CLI, opencode, Kilo, a hosted \
-                 API, or the local model. (Antigravity works on macOS.)"
-                    .to_string(),
-            )
-        } else {
-            None
-        }
+    fn needs_console(&self) -> bool {
+        // Windows only (see module note); macOS/Linux print to stdout.
+        cfg!(windows)
     }
     fn parse_line(&self, line: &str) -> LineEvent {
         // Plain-text output: every stdout line is part of the answer. Keep the
@@ -756,6 +780,23 @@ mod tests {
             &s.parse_line(r#"{"type":"item.completed","item":{"type":"agent_message","text":"Hi there friend"}}"#),
             "Hi there friend"
         ));
+    }
+
+    #[test]
+    fn codex_errors_show_the_provider_message() {
+        let s = CodexCliSpec;
+        let raw = r#"{"type":"error","message":"{\"type\":\"error\",\"status\":400,\"error\":{\"type\":\"invalid_request_error\",\"message\":\"The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account.\"}}"}"#;
+        match s.parse_line(raw) {
+            LineEvent::Failed(m) => assert_eq!(
+                m,
+                "The 'gpt-5.5' model is not supported when using Codex with a ChatGPT account."
+            ),
+            _ => panic!("expected Failed"),
+        }
+        match s.parse_line(r#"{"type":"turn.failed","error":{"message":"plain reason"}}"#) {
+            LineEvent::Failed(m) => assert_eq!(m, "plain reason"),
+            _ => panic!("expected Failed"),
+        }
     }
 
     #[test]

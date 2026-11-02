@@ -1788,15 +1788,14 @@ fn strip_case_prefix<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
     }
 }
 
+/// Statements that return a result set, so their rows are fetched and shown.
+/// Leading comments and parens are skipped: `(SELECT …) UNION (SELECT …)`.
 fn is_query(sql: &str) -> bool {
-    let head = sql.trim_start().to_ascii_uppercase();
-    head.starts_with("SELECT")
-        || head.starts_with("SHOW")
-        || head.starts_with("EXPLAIN")
-        || head.starts_with("WITH")
-        || head.starts_with("VALUES")
-        || head.starts_with("TABLE ")
-        || head.contains("RETURNING")
+    use adapter_api::SqlDialect::Postgres;
+    matches!(
+        adapter_api::leading_keyword(sql, Postgres).as_str(),
+        "SELECT" | "SHOW" | "EXPLAIN" | "WITH" | "VALUES" | "TABLE"
+    ) || adapter_api::has_top_level_keyword(sql, Postgres, "RETURNING")
 }
 
 #[cfg(test)]
@@ -1836,143 +1835,11 @@ fn has_limit_clause(sql: &str) -> bool {
     false
 }
 
-/// Split a multi-statement script on `;` while respecting quoted
-/// literals, `"double"` identifiers, `$$dollar quoting$$`, and `--` /
-/// `/* */` comments. Postgres dollar-quoted strings make this more
-/// involved than MySQL's version because the delimiter is arbitrary
-/// (`$$`, `$tag$`, `$function$` …).
+/// Split a multi-statement script on `;` while respecting quoted literals,
+/// `"double"` identifiers, `$tag$ dollar quoting $tag$`, E-strings, and
+/// (nested) comments.
 pub(crate) fn split_statements(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-    // When `dollar_tag` is Some, we're inside a dollar-quoted string and
-    // break out only when we see the same tag again.
-    let mut dollar_tag: Option<String> = None;
-
-    let chars: Vec<char> = input.chars().collect();
-    let mut i = 0;
-    while i < chars.len() {
-        let ch = chars[i];
-
-        if in_line_comment {
-            buf.push(ch);
-            if ch == '\n' {
-                in_line_comment = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_block_comment {
-            buf.push(ch);
-            if ch == '*' && chars.get(i + 1) == Some(&'/') {
-                buf.push('/');
-                i += 2;
-                in_block_comment = false;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-        if let Some(tag) = &dollar_tag {
-            buf.push(ch);
-            if ch == '$' {
-                // Try to match `$tag$` starting here.
-                let closing: String = format!("${}$", tag);
-                let remaining: String = chars[i..].iter().collect();
-                if remaining.starts_with(&closing) {
-                    for c in closing.chars().skip(1) {
-                        buf.push(c);
-                    }
-                    i += closing.chars().count();
-                    dollar_tag = None;
-                    continue;
-                }
-            }
-            i += 1;
-            continue;
-        }
-        if in_single {
-            buf.push(ch);
-            if ch == '\'' {
-                in_single = false;
-            }
-            i += 1;
-            continue;
-        }
-        if in_double {
-            buf.push(ch);
-            if ch == '"' {
-                in_double = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Not in any quoting / commenting state.
-        match ch {
-            '\'' => {
-                in_single = true;
-                buf.push(ch);
-                i += 1;
-            }
-            '"' => {
-                in_double = true;
-                buf.push(ch);
-                i += 1;
-            }
-            '-' if chars.get(i + 1) == Some(&'-') => {
-                in_line_comment = true;
-                buf.push(ch);
-                i += 1;
-            }
-            '/' if chars.get(i + 1) == Some(&'*') => {
-                in_block_comment = true;
-                buf.push(ch);
-                buf.push('*');
-                i += 2;
-            }
-            '$' => {
-                // Try to read a dollar tag: `$<word>$` or `$$`.
-                let rest: String = chars[i + 1..].iter().collect();
-                if let Some(end) = rest.find('$') {
-                    let tag_content = &rest[..end];
-                    if tag_content.is_empty()
-                        || tag_content
-                            .chars()
-                            .all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    {
-                        dollar_tag = Some(tag_content.to_string());
-                        buf.push('$');
-                        for c in tag_content.chars() {
-                            buf.push(c);
-                        }
-                        buf.push('$');
-                        i += tag_content.chars().count() + 2;
-                        continue;
-                    }
-                }
-                buf.push(ch);
-                i += 1;
-            }
-            ';' => {
-                if !buf.trim().is_empty() {
-                    out.push(std::mem::take(&mut buf));
-                }
-                i += 1;
-            }
-            _ => {
-                buf.push(ch);
-                i += 1;
-            }
-        }
-    }
-    if !buf.trim().is_empty() {
-        out.push(buf);
-    }
-    out
+    adapter_api::split_sql_statements(input, adapter_api::SqlDialect::Postgres)
 }
 
 async fn execute_query(
@@ -1984,7 +1851,8 @@ async fn execute_query(
     // without existing limits are capped; SHOW, EXPLAIN, locking queries, and
     // queries with trailing semicolons or comments are executed cleanly without
     // illegal LIMIT injections.
-    let (effective, can_be_truncated) = adapter_api::prepare_capped_query(sql, row_limit);
+    let (effective, can_be_truncated) =
+        adapter_api::prepare_capped_query(sql, row_limit, adapter_api::SqlDialect::Postgres);
 
     let rows: Vec<PgRow> = sqlx::query(&effective).fetch_all(&mut *conn).await?;
     let cap = row_limit.unwrap_or(adapter_api::MAX_RESULT_ROWS);

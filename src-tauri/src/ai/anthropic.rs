@@ -17,8 +17,8 @@ use zeroize::{Zeroize, Zeroizing};
 use super::http::{client, map_reqwest, map_status};
 use super::sse::data_lines;
 use super::{
-    AiError, AiProvider, ChatMessage, ChatRole, CompletionRequest, FinishReason, ProviderKind,
-    TokenChunk,
+    stream_failure, AiError, AiProvider, ChatMessage, ChatRole, CompletionRequest, FinishReason,
+    ProviderKind, TokenChunk,
 };
 
 pub struct AnthropicProvider {
@@ -156,8 +156,21 @@ enum AnthropicEvent {
     ContentBlockDelta { delta: DeltaText },
     #[serde(rename = "message_delta")]
     MessageDelta { delta: MessageDeltaStop },
+    #[serde(rename = "message_stop")]
+    MessageStop,
+    /// Mid-stream failure (`overloaded_error`, …) after a 200 response.
+    #[serde(rename = "error")]
+    Error { error: StreamErrorBody },
     #[serde(other)]
     Other,
+}
+
+#[derive(Deserialize)]
+struct StreamErrorBody {
+    #[serde(default, rename = "type")]
+    kind: String,
+    #[serde(default)]
+    message: String,
 }
 
 #[derive(Deserialize)]
@@ -178,7 +191,9 @@ struct MessageDeltaStop {
 fn split_system(messages: &[ChatMessage]) -> (Option<String>, Vec<AnthropicMsg<'_>>) {
     let mut system_parts: Vec<&str> = Vec::new();
     let mut rest: Vec<AnthropicMsg<'_>> = Vec::new();
-    for m in messages {
+    // Anthropic rejects empty text content, so an empty turn (a stopped reply,
+    // a tool turn with no text) is left out rather than failing every request.
+    for m in messages.iter().filter(|m| !m.content.trim().is_empty()) {
         match m.role {
             ChatRole::System => system_parts.push(&m.content),
             ChatRole::User => rest.push(AnthropicMsg { role: "user", content: &m.content }),
@@ -260,15 +275,12 @@ impl AiProvider for AnthropicProvider {
         let out = async_stream::stream! {
             let mut lines = Box::pin(lines);
             let mut finish: Option<FinishReason> = None;
+            let mut stopped = false;
             while let Some(line) = lines.next().await {
                 match line {
                     Err(e) => {
                         crate::log_line!("ai_anthropic", "{e}");
-                        yield TokenChunk {
-                            request_id: request_id.clone(),
-                            delta: String::new(),
-                            finish_reason: Some(FinishReason::Error),
-                        };
+                        yield stream_failure(&request_id, &e.to_string());
                         return;
                     }
                     Ok(json) => {
@@ -291,6 +303,13 @@ impl AiProvider for AnthropicProvider {
                                     });
                                 }
                             }
+                            Ok(AnthropicEvent::MessageStop) => stopped = true,
+                            Ok(AnthropicEvent::Error { error }) => {
+                                crate::log_line!("ai_anthropic", "stream error: {} {}", error.kind, error.message);
+                                let msg = if error.message.is_empty() { error.kind } else { error.message };
+                                yield stream_failure(&request_id, &format!("Anthropic: {msg}"));
+                                return;
+                            }
                             Ok(AnthropicEvent::Other) => {}
                             Err(e) => {
                                 crate::log_line!("ai_anthropic", "parse: {e}");
@@ -299,11 +318,17 @@ impl AiProvider for AnthropicProvider {
                     }
                 }
             }
-            yield TokenChunk {
-                request_id,
-                delta: String::new(),
-                finish_reason: Some(finish.unwrap_or(FinishReason::Stop)),
-            };
+            // A complete reply ends with `message_stop` (after a stop_reason);
+            // without either the connection was cut mid-reply.
+            if stopped || finish.is_some() {
+                yield TokenChunk {
+                    request_id,
+                    delta: String::new(),
+                    finish_reason: Some(finish.unwrap_or(FinishReason::Stop)),
+                };
+            } else {
+                yield stream_failure(&request_id, "the connection closed before the reply finished");
+            }
         };
         Ok(out.boxed())
     }

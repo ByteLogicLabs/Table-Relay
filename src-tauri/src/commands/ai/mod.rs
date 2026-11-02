@@ -187,6 +187,7 @@ pub async fn ai_start(
         started_at: Instant::now(),
         last_context_key: None,
         current_context: None,
+        context_built_at: None,
         recent_activity: None,
         send_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
@@ -227,16 +228,25 @@ pub async fn ai_end(slot: State<'_, SessionSlot>) -> Result<(), AiError> {
 /// + model unchanged, but `messages` and the cached context fingerprint are
 /// cleared. Used by the "New chat" button. Cheap: no allocation, no network.
 #[tauri::command]
-pub async fn ai_new_chat(slot: State<'_, SessionSlot>) -> Result<(), AiError> {
+/// Returns whether the transcript was cleared: `false` while a turn is still
+/// running (see [`session::settle_turn`]) — the UI then sends the new chat's
+/// (empty) history with its next message instead.
+pub async fn ai_new_chat(slot: State<'_, SessionSlot>) -> Result<bool, AiError> {
+    let Some(_turn) = session::settle_turn(&slot).await? else {
+        return Ok(false);
+    };
     let mut guard = slot.write().await;
     let Some(session) = guard.as_mut() else {
         return Err(AiError::NoActiveSession);
     };
     session.messages.clear();
     // Clearing the key forces the next `ai_chat_send` to re-inject the
-    // schema context as though it were the first turn.
+    // schema context as though it were the first turn. The old context goes
+    // too, so a failed rebuild can't leave the previous chat's schema behind.
     session.last_context_key = None;
-    Ok(())
+    session.current_context = None;
+    session.recent_activity = None;
+    Ok(true)
 }
 
 #[derive(Debug, Deserialize)]
@@ -314,15 +324,8 @@ pub async fn ai_list_models(input: ListModelsInput) -> Result<Vec<String>, AiErr
         ProviderKind::Opencode => Ok(cli_models(ProviderKind::Opencode).await.unwrap_or_default()),
         // Kilo is opencode-compatible — `kilo models` prints provider/model ids.
         ProviderKind::Kilo => Ok(cli_models(ProviderKind::Kilo).await.unwrap_or_default()),
-        // `agy models` hangs on Windows (no TTY) and chat is disabled there
-        // anyway (see AgySpec), so return empty fast; list normally elsewhere.
-        ProviderKind::Antigravity => {
-            if cfg!(windows) {
-                Ok(Vec::new())
-            } else {
-                Ok(cli_models(ProviderKind::Antigravity).await.unwrap_or_default())
-            }
-        }
+        // `agy models` (run under a pseudo console on Windows, see AgySpec).
+        ProviderKind::Antigravity => Ok(cli_models(ProviderKind::Antigravity).await.unwrap_or_default()),
     }
 }
 
@@ -395,6 +398,15 @@ async fn cli_models(kind: ProviderKind) -> Option<Vec<String>> {
         crate::log_line!("cli", "{name}_models: binary not resolved");
         return None;
     };
+    // `agy` on Windows only writes to a console; without one `agy models`
+    // waited forever.
+    #[cfg(windows)]
+    if spec.needs_console() {
+        let text = console_output(&bin, &["models".to_string()]).await?;
+        let list = parse_model_lines(kind, &text);
+        crate::log_line!("cli", "{name}_models: {} models parsed (console)", list.len());
+        return (!list.is_empty()).then_some(list);
+    }
     // Route through the cross-platform builder so a Windows `.cmd` shim runs via
     // `cmd /C` instead of failing with ERROR_BAD_EXE_FORMAT. A GUI app launched
     // from Finder/Dock has a minimal PATH, so we give the child an augmented PATH
@@ -426,28 +438,7 @@ async fn cli_models(kind: ProviderKind) -> Option<Vec<String>> {
     // model list to stdout yet exit non-zero. Parse stdout regardless; only
     // treat it as a failure if nothing usable comes back.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // Per-CLI line shape:
-    //   • opencode / kilo → `provider/model` ids (single token, has a
-    //     separator) so we can skip ASCII banners/footers.
-    //   • antigravity (agy) → free-form display names with spaces, e.g.
-    //     "Gemini 3.5 Flash (Medium)", which is exactly what `--model` accepts.
-    let keep = |l: &str| -> bool {
-        if l.is_empty() || !l.chars().any(|c| c.is_ascii_alphanumeric()) {
-            return false;
-        }
-        match kind {
-            ProviderKind::Antigravity => true,
-            _ => {
-                !l.chars().any(char::is_whitespace)
-                    && l.chars().any(|c| c == '/' || c == '-' || c == '.')
-            }
-        }
-    };
-    let list: Vec<String> = stdout
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| keep(l))
-        .collect();
+    let list = parse_model_lines(kind, &stdout);
     if list.is_empty() {
         let err = String::from_utf8_lossy(&output.stderr);
         crate::log_line!(
@@ -460,6 +451,65 @@ async fn cli_models(kind: ProviderKind) -> Option<Vec<String>> {
     }
     crate::log_line!("cli", "{name}_models: {} models parsed", list.len());
     Some(list)
+}
+
+/// Model ids from a CLI's `models` output. Per-CLI line shape:
+///   • opencode / kilo → `provider/model` ids (single token, has a separator),
+///     so ASCII banners/footers are skipped.
+///   • antigravity (agy) → `id     Display Name` columns (current builds) or
+///     just a display name like "Gemini 3.5 Flash (Medium)" (older ones);
+///     `--model` takes either, so keep the first column.
+fn parse_model_lines(kind: ProviderKind, stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && l.chars().any(|c| c.is_ascii_alphanumeric()))
+        .filter_map(|l| match kind {
+            ProviderKind::Antigravity => {
+                // Progress lines ("Fetching available models...") aren't models.
+                if l.ends_with("...") || l.ends_with('…') {
+                    return None;
+                }
+                Some(l.split("  ").next().unwrap_or(l).trim().to_string())
+            }
+            _ => (!l.chars().any(char::is_whitespace)
+                && l.chars().any(|c| c == '/' || c == '-' || c == '.'))
+            .then(|| l.to_string()),
+        })
+        .collect()
+}
+
+/// Run a console-only CLI command (see `CliSpec::needs_console`) and return
+/// what it printed. Bounded like the piped listing.
+#[cfg(windows)]
+async fn console_output(bin: &std::path::Path, args: &[String]) -> Option<String> {
+    let env: Vec<(std::ffi::OsString, std::ffi::OsString)> = crate::ai::cli_provider::augmented_path(bin)
+        .map(|path| vec![("PATH".into(), path)])
+        .unwrap_or_default();
+    let home = crate::ai::cli_specs::home();
+    let mut spawned = match crate::ai::conpty::spawn(bin, args, home.as_deref(), &env) {
+        Ok(s) => s,
+        Err(e) => {
+            crate::log_line!("cli", "console spawn failed: {e}");
+            return None;
+        }
+    };
+    let collect = async {
+        let mut text = String::new();
+        while let Some(line) = spawned.lines.recv().await {
+            text.push_str(&line);
+            text.push('\n');
+        }
+        text
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(20), collect).await {
+        Ok(text) => Some(text),
+        Err(_) => {
+            crate::log_line!("cli", "console command timed out after 20s");
+            spawned.process.kill();
+            None
+        }
+    }
 }
 
 /// Augment a child command's `PATH` with the resolved binary's own directory plus
