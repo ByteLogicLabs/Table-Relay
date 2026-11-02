@@ -10,7 +10,7 @@ One app for **MySQL · PostgreSQL · SQLite · MongoDB · Redis**, built with [T
 
 <a href="https://www.producthunt.com/products/table-relay?embed=true&amp;utm_source=badge-featured&amp;utm_medium=badge&amp;utm_campaign=badge-table-relay" target="_blank" rel="noopener noreferrer"><img alt="Table Relay - Fast multi-DB workbench with a private, on-device AI | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1172086&amp;theme=light&amp;t=1781507862067"></a>
 
-<img src="desktop/screenshots/main.png" alt="Table Relay screenshot" width="900" />
+<img src="screenshots/main.png" alt="Table Relay screenshot" width="900" />
 
 </div>
 
@@ -116,10 +116,10 @@ The tool loop auto-retries only *transient* provider failures (network timeouts,
 
 ## Documentation
 
-Full docs live in [`docs/`](desktop/docs/README.md):
+Full docs live in [`docs/`](docs/README.md):
 
-- **User guide** — [connections](desktop/docs/guide/connections.md), [SSH tunnels](desktop/docs/guide/ssh-tunnels.md), [workspace & navigation](desktop/docs/guide/workspace.md), [querying & editing](desktop/docs/guide/querying-and-editing.md), [routines & triggers](desktop/docs/guide/routines-and-triggers.md), [diagrams](desktop/docs/guide/diagrams.md), [realtime](desktop/docs/guide/realtime.md), [process list](desktop/docs/guide/process-list.md), [AI assistant](desktop/docs/guide/ai-assistant.md), [AI safety](desktop/docs/guide/ai-safety.md), [import & export](desktop/docs/guide/import-export.md), [settings](desktop/docs/guide/settings.md), [keyboard shortcuts](desktop/docs/guide/keyboard-shortcuts.md)
-- **Developer guide** — [architecture](desktop/docs/dev/architecture.md), [adding an adapter](desktop/docs/dev/adding-an-adapter.md), [AI internals](desktop/docs/dev/ai-internals.md), [the encrypted store](desktop/docs/dev/store-encryption.md), [reconnect supervisor](desktop/docs/dev/reconnect.md)
+- **User guide** — [connections](docs/guide/connections.md), [SSH tunnels](docs/guide/ssh-tunnels.md), [workspace & navigation](docs/guide/workspace.md), [querying & editing](docs/guide/querying-and-editing.md), [routines & triggers](docs/guide/routines-and-triggers.md), [diagrams](docs/guide/diagrams.md), [realtime](docs/guide/realtime.md), [process list](docs/guide/process-list.md), [AI assistant](docs/guide/ai-assistant.md), [AI safety](docs/guide/ai-safety.md), [import & export](docs/guide/import-export.md), [settings](docs/guide/settings.md), [keyboard shortcuts](docs/guide/keyboard-shortcuts.md)
+- **Developer guide** — [architecture](docs/dev/architecture.md), [adding an adapter](docs/dev/adding-an-adapter.md), [AI internals](docs/dev/ai-internals.md), [the encrypted store](docs/dev/store-encryption.md), [reconnect supervisor](docs/dev/reconnect.md)
 
 ---
 
@@ -182,7 +182,6 @@ If "damaged" persists, confirm the build matches your Mac's architecture (an App
 ### Run in development
 
 ```bash
-cd desktop
 npm install
 npm run tauri:dev
 ```
@@ -194,13 +193,10 @@ The first Rust build compiles all five database adapters and can take several mi
 ### Build a release bundle
 
 ```bash
-cd desktop
-npm run tauri:build      # native installer/app under desktop/target/release/bundle/
+npm run tauri:build      # native installer/app under target/release/bundle/
 ```
 
 ### Scripts
-
-Run these from `desktop/`.
 
 | Command | What it does |
 |---|---|
@@ -218,8 +214,6 @@ The `build:mac` scripts ad-hoc sign the app so it launches without the Gatekeepe
 ---
 
 ## Architecture
-
-The repo holds two apps: `desktop/` (the Tauri app described below) and `mobile/` (Brain DB, the native Android app; see [`mobile/README.md`](mobile/README.md)). Paths below are relative to `desktop/`.
 
 ```
 src/                  React + TypeScript UI (Vite)

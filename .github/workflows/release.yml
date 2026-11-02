@@ -4,7 +4,7 @@ name: Release
 # to the GitHub Release that triggered the run.
 #
 # How to cut a release:
-#   1. Bump the version in desktop/package.json AND desktop/src-tauri/tauri.conf.json (keep them
+#   1. Bump the version in package.json AND src-tauri/tauri.conf.json (keep them
 #      in sync), commit, and push to main.
 #   2. On GitHub: Releases -> Draft a new release -> create a tag like `v0.2.0`
 #      -> "Save draft" (do NOT click Publish). Saving the draft fires this
@@ -75,11 +75,6 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
 
-    # The desktop app lives in desktop/ (mobile/ sits next to it).
-    defaults:
-      run:
-        working-directory: desktop
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -105,7 +100,6 @@ jobs:
         with:
           node-version: 22
           cache: npm
-          cache-dependency-path: desktop/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -113,11 +107,11 @@ jobs:
           targets: ${{ matrix.target }}
 
       # Cache the Cargo build so reruns are fast. This is a virtual workspace
-      # (desktop/Cargo.toml), so the target dir is desktop/target, not src-tauri/.
+      # (root Cargo.toml), so the target dir is at the repo root, not src-tauri/.
       - name: Rust cache
         uses: swatinem/rust-cache@v2
         with:
-          workspaces: desktop -> target
+          workspaces: . -> target
           key: ${{ matrix.target }}
 
       - name: Install frontend dependencies
@@ -137,7 +131,6 @@ jobs:
         with:
           tagName: ${{ github.event.release.tag_name }}
           releaseId: ${{ github.event.release.id }}
-          projectPath: desktop
           args: ${{ matrix.args }}
 
       # macOS .app/.dmg are signed and packaged by the SAME scripts used locally
