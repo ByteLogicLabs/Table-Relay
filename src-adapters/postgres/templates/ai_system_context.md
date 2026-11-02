@@ -4,4 +4,4 @@ Schemas and databases are different: a database is one connection; schemas (`pub
 
 Postgres has native JSON (`json`, `jsonb` — prefer `jsonb`), arrays (`int[]`, `text[]`), UUIDs (`uuid`), ranges, and enums via `CREATE TYPE`. Use `jsonb_path_query` or `->` / `->>` / `#>>` operators for JSON access, not MySQL `JSON_EXTRACT`.
 
-When asked to fix an error, read the exact SQLSTATE — `23505` is unique_violation, `23503` is foreign_key_violation, `42P01` is undefined_table, `42601` is syntax_error. Multi-statement scripts are executed as-is (semicolon-separated) inside an implicit transaction block.
+When asked to fix an error, read the exact SQLSTATE — `23505` is unique_violation, `23503` is foreign_key_violation, `42P01` is undefined_table, `42601` is syntax_error. Multi-statement scripts run one statement at a time and each commits on its own; a failing statement rolls back any open transaction but does NOT stop the statements after it, which then run on their own. Run changes that depend on each other as separate steps and check each result before the next.

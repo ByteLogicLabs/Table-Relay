@@ -1,5 +1,5 @@
 import type { Monaco } from '@monaco-editor/react';
-import type { IDisposable } from 'monaco-editor';
+import type { editor, IDisposable, languages } from 'monaco-editor';
 import type { SchemaInfo, TableStructure } from '../db';
 import {
   getAdapterFrontend,
@@ -18,6 +18,34 @@ export interface QueryCompletionHookContext {
   defaultSchema?: string | (() => string | undefined);
   getCachedStructure: (schema: string, table: string) => TableStructure | undefined;
   ensureStructure: (schema: string, table: string) => Promise<TableStructure>;
+  /** The editor model this registration serves. Monaco providers are global
+   *  per language, so with one registration per open query tab every
+   *  keystroke ran every tab's provider — N full analyses, structure fetches
+   *  for other connections, and their tables mixed into this tab's list. */
+  ownsModel?: (model: editor.ITextModel) => boolean;
+}
+
+/** `monaco` whose completion providers answer only for models `owns` accepts.
+ *  Everything else passes through to the real namespace. */
+function scopedMonaco(monaco: Monaco, owns: (model: editor.ITextModel) => boolean): Monaco {
+  const registerCompletionItemProvider = (
+    languageSelector: Parameters<Monaco['languages']['registerCompletionItemProvider']>[0],
+    provider: languages.CompletionItemProvider,
+  ) => {
+    const scoped: languages.CompletionItemProvider = Object.create(provider, {
+      provideCompletionItems: {
+        value: (model: editor.ITextModel, ...rest: unknown[]) =>
+          owns(model)
+            ? (provider.provideCompletionItems as (...a: unknown[]) => unknown).call(provider, model, ...rest)
+            : { suggestions: [] },
+      },
+    });
+    return monaco.languages.registerCompletionItemProvider(languageSelector, scoped);
+  };
+  const scopedLanguages = Object.create(monaco.languages, {
+    registerCompletionItemProvider: { value: registerCompletionItemProvider },
+  });
+  return Object.create(monaco, { languages: { value: scopedLanguages } });
 }
 
 /**
@@ -37,6 +65,7 @@ export interface QueryCompletionHookContext {
  * this file.
  */
 export function registerQueryCompletion(ctx: QueryCompletionHookContext): IDisposable | null {
+  if (ctx.ownsModel) ctx = { ...ctx, monaco: scopedMonaco(ctx.monaco, ctx.ownsModel) };
   const direct = getAdapterFrontend(ctx.adapterKey);
   if (direct?.registerQueryCompletion) return direct.registerQueryCompletion(ctx);
   const byLang = getAdapterFrontendByLanguage(ctx.language);

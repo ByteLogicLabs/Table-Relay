@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConnectionProfile, type ConnectionTag } from './types';
 import WorkspaceView from './features/workspace/workspace-view';
 import WelcomeView from './features/workspace/welcome-view';
@@ -11,7 +11,7 @@ import { hydrateCredentials } from './lib/ai-credentials';
 import { hydrateAutoApprovals } from './lib/ai-permissions';
 import { connectionsStore, type ConnectionProfileRecord } from './lib/connections-store';
 import { errText } from './lib/db';
-import { connectAndLoad, disconnect as disconnectDb, markConnectionLost, useConnections } from './state/connections';
+import { connectAndLoad, disconnect as disconnectDb, markConnectionLost, useConnectionsSelector } from './state/connections';
 import { getRailSnapshot, refreshRail, unpinManyTiles, useRail } from './state/rail';
 import { listen } from '@tauri-apps/api/event';
 import { toast } from 'sonner';
@@ -80,7 +80,9 @@ export default function App() {
 function UnlockedApp() {
   const [connections, setConnections] = useState<ConnectionProfile[]>([]);
   const [activeConnectionIds, setActiveConnectionIds] = useState<string[]>([]);
-  const connState = useConnections();
+  // The root only needs which connections are live; the whole store also
+  // changes on every cached table structure, which re-rendered the entire app.
+  const activeById = useConnectionsSelector((s) => s.activeById);
   const rail = useRail();
   // Stable reference to the current list so the reconnect listener (attached
   // once at mount) can still resolve a connection name without re-subscribing.
@@ -424,7 +426,7 @@ function UnlockedApp() {
 
   const handleEditConnection = async (conn: ConnectionProfile, previousId = conn.id) => {
     const idChanged = previousId !== conn.id;
-    const wasActive = connState.activeById.has(previousId) || activeConnectionIds.includes(previousId);
+    const wasActive = activeById.has(previousId) || activeConnectionIds.includes(previousId);
     try {
       if (idChanged) {
         await disconnectDb(previousId);
@@ -481,10 +483,13 @@ function UnlockedApp() {
     }
   };
 
-  const activeConnections = connections.filter(c => activeConnectionIds.includes(c.id) || connState.activeById.has(c.id));
+  const activeConnections = useMemo(
+    () => connections.filter(c => activeConnectionIds.includes(c.id) || activeById.has(c.id)),
+    [connections, activeConnectionIds, activeById],
+  );
   // Home rule: no saved connections → always welcome screen.
   // Otherwise show workspace if there are active connections or pinned tiles.
-  const showWorkspace = connections.length > 0 && (activeConnectionIds.length > 0 || connState.activeById.size > 0 || rail.tiles.length > 0);
+  const showWorkspace = connections.length > 0 && (activeConnectionIds.length > 0 || activeById.size > 0 || rail.tiles.length > 0);
 
   // Push to the debug store as a side effect — calling setState during render
   // schedules a re-render of DevDebug mid-commit, which React warns about.

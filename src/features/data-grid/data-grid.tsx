@@ -87,7 +87,7 @@ import {
 import {
   ensureTableStructure,
   refreshTableStructure,
-  useConnections,
+  useConnectionsSelector,
 } from "../../state/connections";
 import {
   useAdapterManifests,
@@ -182,9 +182,11 @@ export default function DataGrid({
   // tab renders instantly without a round trip. First boot / post-reload the
   // cache is empty (it's not persisted), so behavior matches "fetch fresh".
   const settings = useSettings();
-  const connState = useConnections();
+  // Just this connection's schema list: subscribing to the whole store
+  // re-rendered every open grid whenever any table structure was cached.
+  const connSchemas = useConnectionsSelector((s) => s.schemasById.get(connectionId));
   const exportSchemas = useMemo(() => {
-    const loaded = connState.schemasById.get(connectionId);
+    const loaded = connSchemas;
     if (loaded && loaded.length > 0) return loaded;
     return [
       {
@@ -192,16 +194,16 @@ export default function DataGrid({
         tables: [{ name: tableName, kind: "table" as const, rowCount: null }],
       },
     ];
-  }, [connState.schemasById, connectionId, schema, tableName]);
+  }, [connSchemas, schema, tableName]);
   // A view is not a real table: its toolbar swaps the Schema/Diagram toggles
   // for an "Edit" button that opens the CREATE script. Detect it from the
   // loaded schema list (views carry kind === "view").
   const isView = useMemo(() => {
-    const schemas = connState.schemasById.get(connectionId);
+    const schemas = connSchemas;
     if (!schemas) return false;
     const sch = schemas.find((s) => s.name === schema) ?? schemas[0];
     return sch?.tables.find((t) => t.name === tableName)?.kind === "view";
-  }, [connState.schemasById, connectionId, schema, tableName]);
+  }, [connSchemas, schema, tableName]);
   const cached = tabId ? readCachedGrid(tabId) : undefined;
   // A cache entry is only "loaded" if it carries a real fetch result (a
   // structure, or at least columns). A draft-only skeleton — created when the
@@ -1129,32 +1131,45 @@ export default function DataGrid({
   // `fetchData` (which still runs to keep the grid warm) must not paint the
   // grid placeholder over them.
   const isDataView = viewMode === "table" || viewMode === "json";
+  const progressRef = useRef(progress);
+  progressRef.current = progress;
+  const progressAnimatingRef = useRef(false);
   useEffect(() => {
-    if (isBusy) {
+    // Only the visible grid animates its bar. A hidden tab's grid sits "busy"
+    // until it's first shown, and every one of them re-rendered on every
+    // animation frame — with many tabs open that alone kept the CPU busy.
+    // Ten steps a second is plenty for a bar; it stops at the ceiling.
+    if (isBusy && isActive) {
+      progressAnimatingRef.current = true;
       setProgressVisible(true);
-      setProgress((p) => (p > 0 && p < 100 ? p : 8));
-      let raf = 0;
-      const step = () => {
-        setProgress((prev) => {
-          if (prev >= 90) return prev;
-          // Gap to the ceiling shrinks as we approach it → natural ease.
-          const gap = 90 - prev;
-          const next = prev + Math.max(0.3, gap * 0.04);
-          return next > 90 ? 90 : next;
-        });
-        raf = requestAnimationFrame(step);
-      };
-      raf = requestAnimationFrame(step);
-      return () => cancelAnimationFrame(raf);
+      let current = progressRef.current > 0 && progressRef.current < 100 ? progressRef.current : 8;
+      setProgress(current);
+      const timer = setInterval(() => {
+        // Gap to the ceiling shrinks as we approach it → natural ease.
+        const gap = 90 - current;
+        current = Math.min(90, current + Math.max(1.8, gap * 0.2));
+        setProgress(current);
+        if (current >= 90) clearInterval(timer);
+      }, 100);
+      return () => clearInterval(timer);
     }
-    // Not busy any more — complete the bar, then hide it.
+    // Still busy but hidden, or never showed the bar (e.g. just switched to an
+    // idle tab): nothing to finish.
+    if (isBusy || !progressAnimatingRef.current) return;
+    progressAnimatingRef.current = false;
+    // Not busy any more — complete the bar, then hide it. Hidden right away
+    // if the effect re-runs first (a quick tab switch), or it stayed stuck full.
     setProgress(100);
-    const t = setTimeout(() => {
+    const hide = () => {
       setProgressVisible(false);
       setProgress(0);
-    }, 250);
-    return () => clearTimeout(t);
-  }, [isBusy]);
+    };
+    const t = setTimeout(hide, 250);
+    return () => {
+      clearTimeout(t);
+      hide();
+    };
+  }, [isBusy, isActive]);
 
   const hasEdits = Object.keys(editedCells).length > 0;
   // A draft insert only counts as "pending" once it actually holds data. Just
@@ -1883,6 +1898,9 @@ export default function DataGrid({
   // Global paste capture for table view. If the focus is inside a cell editor
   // we do nothing so regular text paste works as expected there.
   useEffect(() => {
+    // Only the grid on screen: every open data tab stays mounted, and without
+    // this a paste queued draft rows into every hidden grid too.
+    if (!isActive) return;
     const onPaste = (e: ClipboardEvent) => {
       if (viewMode !== "table") return;
       const target = e.target as HTMLElement | null;
@@ -1901,7 +1919,7 @@ export default function DataGrid({
     };
     window.addEventListener("paste", onPaste);
     return () => window.removeEventListener("paste", onPaste);
-  }, [viewMode, pasteRows]);
+  }, [viewMode, pasteRows, isActive]);
 
   // Auto-remove a draft insert IFF it still holds no data. Called when the
   // user opens a blank draft (by clicking an empty cell) then leaves without

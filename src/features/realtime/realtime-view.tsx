@@ -32,6 +32,9 @@ interface RealtimeViewProps {
   /** Appends a PUBLISH (or subscribe lifecycle) entry to the shared
    *  per-connection query log that renders at the bottom of the tab. */
   onLogQuery?: (statement: string, opts?: LogQueryOptions) => void;
+  /** Whether this tab is the one on screen. Every open tab stays mounted, so
+   *  connection-wide events must only be acted on by the visible one. */
+  isActive?: boolean;
 }
 
 interface RecordedEvent extends SubscribeEvent {
@@ -49,7 +52,9 @@ interface PublishLogEntry {
   error: string | null;
 }
 
-export default function RealtimeView({ connection, initialPattern, onPatternChange, onLogQuery }: RealtimeViewProps) {
+export default function RealtimeView({ connection, initialPattern, onPatternChange, onLogQuery, isActive = true }: RealtimeViewProps) {
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
   // Realtime semantics come from the active manifest, not the driver
   // name. Adapters declare their kind in `adapter.toml`:
   //   - listen_notify  → Postgres-style: literal channels, NOTIFY/LISTEN
@@ -123,6 +128,8 @@ export default function RealtimeView({ connection, initialPattern, onPatternChan
     let unlisten: (() => void) | null = null;
     void ai.onRealtimeSubscribe(e => {
       if (e.connectionId !== connection.id) return;
+      // Only the realtime tab on screen — not every one on this connection.
+      if (!isActiveRef.current) return;
       if (!e.channel.trim()) return;
       pendingAiStartRef.current = e.channel;
       setPattern(e.channel);

@@ -155,6 +155,8 @@ pub fn run() {
             app.manage(Arc::new(DownloadRegistry::default()));
             app.manage(Arc::new(ApprovalRegistry::default()));
             app.manage(Arc::new(AutoApprovals::default()));
+            // Per-request Stop tokens for in-flight chat turns.
+            app.manage(Arc::new(crate::ai::cancel::CancelRegistry::default()));
             // MCP bridge slot — None until the first CLI session lazily binds the
             // loopback server that exposes DB tools to the wrapped coding CLIs.
             let mcp_slot: crate::ai::mcp_bridge::McpBridgeSlot =

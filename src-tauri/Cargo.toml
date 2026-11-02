@@ -97,3 +97,16 @@ which = "6"
 # See ai-plan.md — M8.1 Stage B — for the re-visit.
 # [target.'cfg(target_os = "macos")'.dependencies]
 # llama-cpp-2 = { version = "0.1", features = ["metal"] }
+
+# Pseudo console (ConPTY) for CLIs that only write to a console (`agy`).
+# Already in the dependency tree via tauri/tokio; no new crate.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_IO",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+] }

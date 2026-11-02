@@ -1551,15 +1551,13 @@ fn is_routine_ddl(upper: &str) -> bool {
         || rest.starts_with("EVENT ")
 }
 
+/// Statements that return a result set, so their rows are fetched and shown.
+/// Leading comments and parens are skipped: `(SELECT …) UNION (SELECT …)`.
 fn is_query(sql: &str) -> bool {
-    let head = sql.trim_start().to_ascii_uppercase();
-    head.starts_with("SELECT")
-        || head.starts_with("SHOW")
-        || head.starts_with("DESCRIBE")
-        || head.starts_with("DESC ")
-        || head == "DESC"
-        || head.starts_with("EXPLAIN")
-        || head.starts_with("WITH")
+    matches!(
+        adapter_api::leading_keyword(sql, adapter_api::SqlDialect::Mysql).as_str(),
+        "SELECT" | "SHOW" | "DESCRIBE" | "DESC" | "EXPLAIN" | "WITH" | "TABLE" | "VALUES" | "CALL"
+    )
 }
 
 /// Does the SQL already contain a top-level `LIMIT` clause? Ignores LIMIT
@@ -1600,113 +1598,10 @@ fn has_limit_clause(sql: &str) -> bool {
 }
 
 
+/// Split a batch on `;` (or a client `DELIMITER`), honouring MySQL quoting,
+/// backslash escapes and comments.
 pub(crate) fn split_statements(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_back = false;
-    let mut in_block_comment = false;
-    let mut prev = '\0';
-    let mut delim: String = ";".into();
-
-    for raw_line in input.split_inclusive('\n') {
-        if !in_single && !in_double && !in_back && !in_block_comment && buf.trim().is_empty() {
-            let trimmed = raw_line.trim_start();
-            if trimmed.len() >= 9 && trimmed[..9].eq_ignore_ascii_case("DELIMITER") {
-                let rest = trimmed[9..].trim();
-                let token = rest.trim_end_matches(';').trim();
-                if !token.is_empty() {
-                    delim = token.to_string();
-                }
-                continue;
-            }
-        }
-
-        let mut chars = raw_line.chars().peekable();
-        while let Some(ch) = chars.next() {
-            if in_block_comment {
-                buf.push(ch);
-                if ch == '*' && chars.peek() == Some(&'/') {
-                    buf.push('/');
-                    chars.next();
-                    in_block_comment = false;
-                }
-                prev = ch;
-                continue;
-            }
-            match ch {
-                '\'' if !in_double && !in_back && prev != '\\' => in_single = !in_single,
-                '"' if !in_single && !in_back && prev != '\\' => in_double = !in_double,
-                '`' if !in_single && !in_double => in_back = !in_back,
-                '-' if !in_single && !in_double && !in_back && chars.peek() == Some(&'-') => {
-                    buf.push(ch);
-                    for nc in chars.by_ref() {
-                        buf.push(nc);
-                        if nc == '\n' {
-                            break;
-                        }
-                    }
-                    prev = '\n';
-                    continue;
-                }
-                '#' if !in_single && !in_double && !in_back => {
-                    buf.push(ch);
-                    for nc in chars.by_ref() {
-                        buf.push(nc);
-                        if nc == '\n' {
-                            break;
-                        }
-                    }
-                    prev = '\n';
-                    continue;
-                }
-                '/' if !in_single && !in_double && !in_back && chars.peek() == Some(&'*') => {
-                    buf.push(ch);
-                    buf.push('*');
-                    chars.next();
-                    in_block_comment = true;
-                    prev = '*';
-                    continue;
-                }
-                _ => {}
-            }
-
-            if !in_single && !in_double && !in_back && starts_with_delim(ch, &mut chars, &delim) {
-                if !buf.trim().is_empty() {
-                    out.push(std::mem::take(&mut buf));
-                }
-                prev = ch;
-                continue;
-            }
-
-            buf.push(ch);
-            prev = ch;
-        }
-    }
-    if !buf.trim().is_empty() {
-        out.push(buf);
-    }
-    out
-}
-
-fn starts_with_delim(first: char, chars: &mut std::iter::Peekable<std::str::Chars<'_>>, delim: &str) -> bool {
-    let mut iter = delim.chars();
-    let Some(d0) = iter.next() else { return false };
-    if first != d0 {
-        return false;
-    }
-    let mut look = chars.clone();
-    for expected in iter {
-        match look.next() {
-            Some(c) if c == expected => {}
-            _ => return false,
-        }
-    }
-    for _ in 1..delim.chars().count() {
-        chars.next();
-    }
-    true
+    adapter_api::split_sql_statements(input, adapter_api::SqlDialect::Mysql)
 }
 
 async fn fetch_latest_innodb_fk_error(conn: &mut sqlx::MySqlConnection) -> Option<String> {
@@ -1733,7 +1628,8 @@ async fn execute_query(
     // without existing limits are capped; SHOW, DESCRIBE, EXPLAIN, locking queries,
     // and queries with trailing semicolons or comments are executed cleanly without
     // illegal LIMIT injections.
-    let (effective, can_be_truncated) = adapter_api::prepare_capped_query(sql, row_limit);
+    let (effective, can_be_truncated) =
+        adapter_api::prepare_capped_query(sql, row_limit, adapter_api::SqlDialect::Mysql);
 
     log_line!("run_query", "  sqlx←{}", effective.replace('\n', " ⏎ "));
     let t_fetch = Instant::now();

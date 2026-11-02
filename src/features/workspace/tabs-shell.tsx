@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   DndContext,
   closestCenter,
@@ -28,10 +28,17 @@ import TriggerView from '../trigger/trigger-view';
 import RealtimeView from '../realtime/realtime-view';
 import QueryLog from '../sql-editor/query-log';
 import { useRail } from '../../state/rail';
+import { useStableCallback } from '../../hooks/use-stable-callback';
 
 interface TabsShellProps {
   activeConnections: ConnectionProfile[];
+  /** The focused rail tile's tabs: the tab bar and the active tab. */
   tabs: AppTab[];
+  /** Every open tab, across all rail tiles. Their editors stay mounted
+   *  (hidden) so switching tiles doesn't rebuild every grid and Monaco editor
+   *  — that took most of a second per switch with many tabs, and lost each
+   *  editor's cursor, scroll and undo history. Defaults to `tabs`. */
+  mountedTabs?: AppTab[];
   activeTabId: string | null;
   onTabChange: (id: string) => void;
   onCloseTab: (id: string) => void;
@@ -75,9 +82,10 @@ interface TabsShellProps {
   focusedConnectionId?: string | null;
 }
 
-export default function TabsShell({
+function TabsShell({
   activeConnections,
   tabs,
+  mountedTabs,
   activeTabId,
   onTabChange,
   onCloseTab,
@@ -170,7 +178,8 @@ export default function TabsShell({
   const handleScrollTabsLeft = useCallback(() => scrollTabs('left'), [scrollTabs]);
   const handleScrollTabsRight = useCallback(() => scrollTabs('right'), [scrollTabs]);
 
-  const handleCreateNewQuery = useCallback(() => {
+  // Stable: every tab item gets these, and the tab items are memoized.
+  const handleCreateNewQuery = useStableCallback(() => {
     if (connection) {
       onNewQuery(connection.id);
     } else if (focusedConnectionId) {
@@ -178,9 +187,9 @@ export default function TabsShell({
     } else if (activeConnections.length > 0) {
       onNewQuery(activeConnections[0].id);
     }
-  }, [connection, focusedConnectionId, activeConnections, onNewQuery]);
+  });
 
-  const handleOpenQuery = useCallback(() => {
+  const handleOpenQuery = useStableCallback(() => {
     if (connection) {
       onOpenQueryFile?.(connection.id);
     } else if (focusedConnectionId) {
@@ -188,7 +197,7 @@ export default function TabsShell({
     } else if (activeConnections.length > 0) {
       onOpenQueryFile?.(activeConnections[0].id);
     }
-  }, [connection, focusedConnectionId, activeConnections, onOpenQueryFile]);
+  });
 
 
   const openChat = useCallback(() => {
@@ -265,9 +274,11 @@ export default function TabsShell({
     }
   }, [onCloseTab]);
   
+  const paneTabs = mountedTabs ?? tabs;
+  let emptyState: React.ReactNode = null;
   if (tabs.length === 0) {
     if (noDatabaseSelected) {
-      return (
+      emptyState = (
         <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground bg-background px-6 text-center gap-4">
           <p className="text-sm">
             No database selected, press{' '}
@@ -280,8 +291,8 @@ export default function TabsShell({
           </Button>
         </div>
       );
-    }
-    return (
+    } else {
+      emptyState = (
       <div className="flex-1 flex flex-col items-center justify-center text-muted-foreground bg-background">
         <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center mb-4">
           <DatabaseIcon className="w-8 h-8 opacity-50" />
@@ -299,11 +310,18 @@ export default function TabsShell({
           </Button>
         </div>
       </div>
-    );
+      );
+    }
+    // Nothing open on other tiles either: just the empty state.
+    if (paneTabs.length === 0) return emptyState;
   }
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden min-w-0">
+      {emptyState}
+      {/* Hidden (not unmounted) while this tile has no tabs, so other tiles'
+          editors survive. `contents` keeps the normal layout otherwise. */}
+      <div className={emptyState ? 'hidden' : 'contents'}>
       {/* Tab Bar — the scroll area is width-capped to the workspace content
           area (set on the WorkspaceView root as `--content-max-w`) minus the
           fixed-width left/right arrows and the new-tab button. The arrows and
@@ -404,7 +422,7 @@ export default function TabsShell({
             wastes bandwidth and blocks the UI. The query-log panel already
             keys off the active tab, so hidden grids don't compete for it.
           */}
-          {tabs.filter(t => t.type === 'data').map(tab => {
+          {paneTabs.filter(t => t.type === 'data').map(tab => {
             const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
             if (!tabConnection) return null;
             const isActive = tab.id === activeTabId;
@@ -431,7 +449,7 @@ export default function TabsShell({
             against its own tab's connection so a tab on another connection still
             shows correctly. ERD stays conditional below (heavy graph, not Monaco).
           */}
-          {tabs.filter(t => t.type === 'structure').map(tab => {
+          {paneTabs.filter(t => t.type === 'structure').map(tab => {
             const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
             if (!tabConnection) return null;
             const isActive = tab.id === activeTabId;
@@ -446,7 +464,7 @@ export default function TabsShell({
               />
             );
           })}
-          {tabs.filter(t => t.type === 'query').map(tab => {
+          {paneTabs.filter(t => t.type === 'query').map(tab => {
             const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
             if (!tabConnection) return null;
             const isActive = tab.id === activeTabId;
@@ -464,7 +482,7 @@ export default function TabsShell({
                 onTabQueryChange={onTabQueryChange}
                 onTabFilePathChange={onTabFilePathChange}
                 onTabDirtyChange={onTabDirtyChange}
-                onOpenQueryFile={onOpenQueryFile ? () => onOpenQueryFile(tabConnection.id) : undefined}
+                onOpenQueryFile={onOpenQueryFile}
                 onAppendQueryLog={onAppendQueryLog}
               />
             );
@@ -477,7 +495,7 @@ export default function TabsShell({
               tableName={activeTab.table}
             />
           )}
-          {tabs.filter(t => t.type === 'routine' && t.routine).map(tab => {
+          {paneTabs.filter(t => t.type === 'routine' && t.routine).map(tab => {
             const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
             if (!tabConnection || !tab.routine) return null;
             const isActive = tab.id === activeTabId;
@@ -492,7 +510,7 @@ export default function TabsShell({
               />
             );
           })}
-          {tabs.filter(t => t.type === 'trigger' && t.trigger).map(tab => {
+          {paneTabs.filter(t => t.type === 'trigger' && t.trigger).map(tab => {
             const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
             if (!tabConnection || !tab.trigger) return null;
             const isActive = tab.id === activeTabId;
@@ -514,7 +532,7 @@ export default function TabsShell({
             and drop the event buffer the user accumulated. Only the active
             one is visible.
           */}
-          {tabs.filter(t => t.type === 'realtime').map(tab => {
+          {paneTabs.filter(t => t.type === 'realtime').map(tab => {
             const tabConnection = activeConnections.find(c => c.id === tab.connectionId);
             if (!tabConnection) return null;
             const isActive = tab.id === activeTabId;
@@ -587,6 +605,7 @@ export default function TabsShell({
           />
         )}
       </div>
+      </div>
     </div>
   );
 }
@@ -606,7 +625,7 @@ interface DataPaneProps {
   onAppendQueryLog: AppendQueryLogFn;
 }
 
-function DataPane({
+const DataPane = memo(function DataPane({
   tab,
   tabConnection,
   isActive,
@@ -654,7 +673,7 @@ function DataPane({
       />
     </div>
   );
-}
+});
 
 interface StructurePaneProps {
   tab: AppTab;
@@ -664,7 +683,7 @@ interface StructurePaneProps {
   onTableCreated?: (tabId: string, savedName: string) => void;
 }
 
-function StructurePane({
+const StructurePane = memo(function StructurePane({
   tab,
   tabConnection,
   isActive,
@@ -691,7 +710,7 @@ function StructurePane({
       />
     </div>
   );
-}
+});
 
 interface QueryPaneProps {
   tab: AppTab;
@@ -701,11 +720,11 @@ interface QueryPaneProps {
   onTabQueryChange?: (tabId: string, query: string) => void;
   onTabFilePathChange?: (tabId: string, filePath: string | null) => void;
   onTabDirtyChange?: (tabId: string, dirty: boolean) => void;
-  onOpenQueryFile?: () => void;
+  onOpenQueryFile?: (connectionId: string) => void;
   onAppendQueryLog: AppendQueryLogFn;
 }
 
-function QueryPane({
+const QueryPane = memo(function QueryPane({
   tab,
   tabConnection,
   isActive,
@@ -727,6 +746,10 @@ function QueryPane({
   const handleDirtyChange = useCallback(
     (dirty: boolean) => onTabDirtyChange?.(tab.id, dirty),
     [onTabDirtyChange, tab.id],
+  );
+  const handleOpenQueryFile = useMemo(
+    () => (onOpenQueryFile ? () => onOpenQueryFile(tabConnection.id) : undefined),
+    [onOpenQueryFile, tabConnection.id],
   );
   const handleLogQuery = useCallback(
     (statement: string, opts?: { source?: QueryLogEntry['source']; durationMs?: number; status?: QueryLogEntry['status']; message?: string }) =>
@@ -752,12 +775,12 @@ function QueryPane({
         onQueryChange={handleQueryChange}
         onFilePathChange={handleFilePathChange}
         onDirtyChange={handleDirtyChange}
-        onOpenQueryFile={onOpenQueryFile}
+        onOpenQueryFile={handleOpenQueryFile}
         onLogQuery={handleLogQuery}
       />
     </div>
   );
-}
+});
 
 interface RoutinePaneProps {
   tab: AppTab;
@@ -767,7 +790,7 @@ interface RoutinePaneProps {
   onAppendQueryLog: AppendQueryLogFn;
 }
 
-function RoutinePane({
+const RoutinePane = memo(function RoutinePane({
   tab,
   tabConnection,
   isActive,
@@ -803,7 +826,7 @@ function RoutinePane({
       />
     </div>
   );
-}
+});
 
 interface TriggerPaneProps {
   tab: AppTab;
@@ -814,7 +837,7 @@ interface TriggerPaneProps {
   onAppendQueryLog: AppendQueryLogFn;
 }
 
-function TriggerPane({
+const TriggerPane = memo(function TriggerPane({
   tab,
   tabConnection,
   isActive,
@@ -857,7 +880,7 @@ function TriggerPane({
       />
     </div>
   );
-}
+});
 
 interface RealtimePaneProps {
   tab: AppTab;
@@ -867,7 +890,7 @@ interface RealtimePaneProps {
   onAppendQueryLog: AppendQueryLogFn;
 }
 
-function RealtimePane({
+const RealtimePane = memo(function RealtimePane({
   tab,
   tabConnection,
   isActive,
@@ -894,13 +917,14 @@ function RealtimePane({
     <div className={`absolute inset-0 flex flex-col ${isActive ? '' : 'hidden'}`}>
       <RealtimeView
         connection={tabConnection}
+        isActive={isActive}
         initialPattern={tab.realtimePattern}
         onPatternChange={handlePatternChange}
         onLogQuery={handleLogQuery}
       />
     </div>
   );
-}
+});
 
 interface TabBarItemProps {
   tab: AppTab;
@@ -919,7 +943,7 @@ interface TabBarItemProps {
   onOpenQueryFile?: () => void;
 }
 
-function TabBarItem({
+const TabBarItem = memo(function TabBarItem({
   tab,
   isActive,
   activeTabRef,
@@ -1069,7 +1093,7 @@ function TabBarItem({
       </ContextMenuContent>
     </ContextMenu>
   );
-}
+});
 
 function DatabaseIcon(props: any) {
   return (
@@ -1091,3 +1115,7 @@ function DatabaseIcon(props: any) {
     </svg>
   );
 }
+
+// Re-renders only when its own props change; the workspace re-renders for
+// many reasons (sidebar drags, rail hover, query logs) that don't concern it.
+export default memo(TabsShell);

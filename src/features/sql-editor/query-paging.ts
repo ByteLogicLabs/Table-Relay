@@ -2,54 +2,88 @@
 // a plain SELECT with no LIMIT of its own, we wrap it with LIMIT/OFFSET and show
 // pager controls so large tables don't dump millions of rows at once. Queries
 // that already carry a LIMIT, or aren't a single SELECT, are left untouched.
+//
+// Mirrors the backend row cap (src-tauri/adapter-api/src/query_cap.rs): the
+// statement is inspected on a dialect-aware *masked* copy — literals, quoted
+// identifiers and comments blanked out, length preserved — and only clauses at
+// paren depth 0 count, so a LIMIT inside a subquery doesn't stop paging.
 
-import { splitSqlStatements } from './sql-editor-utils';
+import type { SqlDialect } from '../../lib/db';
+import { isSqlSpace, isWordChar, mainVerbIndex, maskLiteralsAndComments, tokenize } from './sql-lexer';
+
+/** Verbs that write. Paging re-runs the statement for every page, so anything
+ *  that writes (e.g. a Postgres data-modifying CTE) must run exactly once. */
+const WRITE_VERBS = new Set(['INSERT', 'UPDATE', 'DELETE', 'MERGE']);
 
 /**
- * Decide whether a payload is a single, pageable SELECT. Pageable means:
+ * Decide whether a payload is a single, pageable query. Pageable means:
  *   - exactly one statement (multi-statement runs are not paged)
- *   - it's a SELECT (or a WITH … SELECT) — not INSERT/UPDATE/DDL/etc.
- *   - it has no top-level LIMIT / OFFSET / FETCH already (respect the user's)
- *   - no trailing locking or file-export clause we'd be unsafe to wrap
+ *   - it returns rows: SELECT, WITH … SELECT, TABLE t, VALUES …, or one of
+ *     those in parentheses (`(SELECT …) UNION (SELECT …)`)
+ *   - it has no top-level LIMIT (or, where they're reserved, OFFSET / FETCH)
+ *     already — respect the user's
+ *   - no INTO target (`SELECT … INTO new_table` would copy only one page)
+ *   - no trailing locking or PROCEDURE clause we'd be unsafe to wrap
+ *   - nothing in it writes data
  *
- * Returns the trimmed single statement when pageable, else null.
+ * Returns the statement cut after its last significant token (trailing `;` and
+ * comments dropped) when pageable, else null.
  */
-export function pageableSelect(payload: string): string | null {
-  const trimmed = payload.trim().replace(/;\s*$/, '');
-  if (!trimmed) return null;
+export function pageableSelect(payload: string, dialect: SqlDialect): string | null {
+  if (dialect === 'none') return null;
+  let start = 0;
+  while (start < payload.length && isSqlSpace(payload[start])) start++;
+  const sql = payload.slice(start);
+  const masked = maskLiteralsAndComments(sql, dialect);
 
-  // Single statement only. splitSqlStatements honors quotes/comments.
-  const stmts = splitSqlStatements(trimmed);
-  if (stmts.length !== 1) return null;
-  const stmt = stmts[0].trim();
+  let end = masked.length;
+  while (end > 0 && (isSqlSpace(masked[end - 1]) || masked[end - 1] === ';')) end--;
+  if (end === 0) return null;
+  const body = masked.slice(0, end);
+  // A `;` before the end means more than one statement.
+  if (body.includes(';')) return null;
+  // SQLite takes LIMIT only on SELECT — not after a bare VALUES — and has no
+  // parenthesized top-level queries.
+  const sqlite = dialect === 'sqlite';
+  // Only opening parens may come before the first keyword.
+  let firstWordAt = 0;
+  while (firstWordAt < end && !isWordChar(body[firstWordAt])) firstWordAt++;
+  if ([...body.slice(0, firstWordAt)].some(ch => !isSqlSpace(ch) && (ch !== '(' || sqlite))) return null;
 
-  // Must start with SELECT or WITH (CTE feeding a SELECT).
-  if (!/^(select|with)\b/i.test(stmt)) return null;
+  const words = tokenize(body);
+  const verb = words[mainVerbIndex(words)]?.text;
+  const returnsRows = verb === 'SELECT' || (!sqlite && (verb === 'TABLE' || verb === 'VALUES'));
+  if (!returnsRows) return null;
 
-  // Mask string/identifier literals and comments so keywords inside them don't trip the
-  // checks below (e.g. a column value 'limit 5' or a comment '-- check limit').
-  const masked = maskLiteralsAndComments(stmt);
+  if (words.some(w => WRITE_VERBS.has(w.text))) return null;
 
-  // If it starts with WITH, verify the main statement after CTEs is a SELECT
-  // (and not WITH … INSERT/UPDATE/DELETE).
-  if (/^with\b/i.test(stmt)) {
-    if (/\b(insert\s+into|update\s+\w+|delete\s+from)\b/i.test(masked)) {
-      return null;
+  // MySQL and SQLite only accept OFFSET after LIMIT and have no FETCH clause,
+  // so there the words are plain identifiers (`SELECT t.offset FROM t`).
+  const pagingWords = dialect === 'mysql' || dialect === 'sqlite' ? ['LIMIT'] : ['LIMIT', 'OFFSET', 'FETCH'];
+  const top = words.filter(w => w.depth === 0).map(w => w.text);
+  for (let i = 0; i < top.length; i++) {
+    const word = top[i];
+    const next = top[i + 1] ?? '';
+    // Already has its own paging — leave it alone.
+    if (pagingWords.includes(word)) return null;
+    switch (word) {
+      // SELECT … INTO @var / OUTFILE / DUMPFILE (MySQL), SELECT … INTO new_table (Postgres).
+      case 'INTO':
+      // PROCEDURE ANALYSE (MySQL 5.x).
+      case 'PROCEDURE':
+        return null;
+      // FOR UPDATE / FOR SHARE / FOR NO KEY UPDATE / FOR KEY SHARE.
+      case 'FOR':
+        if (['UPDATE', 'SHARE', 'NO', 'KEY'].includes(next)) return null;
+        break;
+      // LOCK IN SHARE MODE (MySQL).
+      case 'LOCK':
+        if (next === 'IN') return null;
+        break;
     }
   }
 
-  // Already has its own paging — leave it alone.
-  if (/\blimit\b/i.test(masked)) return null;
-  if (/\boffset\b/i.test(masked)) return null;
-  if (/\bfetch\s+(first|next)\b/i.test(masked)) return null;
-
-  // Locking or special trailing clauses that disallow trailing LIMIT / OFFSET.
-  if (/\bfor\s+(update|share|no\s+key\s+update|key\s+share)\b/i.test(masked)) return null;
-  if (/\block\s+in\s+share\s+mode\b/i.test(masked)) return null;
-  if (/\binto\s+(@\w+|outfile|dumpfile)\b/i.test(masked)) return null;
-  if (/\bprocedure\s+analyse\b/i.test(masked)) return null;
-
-  return stmt;
+  return sql.slice(0, end);
 }
 
 /**
@@ -62,91 +96,4 @@ export function buildPagedSql(stmt: string, page: number, pageSize: number): str
   const offset = page * pageSize;
   const base = stmt.trim().replace(/;\s*$/, '');
   return `${base}\nLIMIT ${limit} OFFSET ${offset}`;
-}
-
-/**
- * Replace string literals, dollar quotes, and SQL comments with spaces
- * (preserving length and character positions) so regex scans for keywords
- * only see real SQL code.
- */
-export function maskLiteralsAndComments(sql: string): string {
-  let out = '';
-  let i = 0;
-  while (i < sql.length) {
-    const ch = sql[i];
-    const next = sql[i + 1] ?? '';
-
-    // Line comments: -- or #
-    if ((ch === '-' && next === '-') || ch === '#') {
-      const isDash = ch === '-';
-      out += isDash ? '  ' : ' ';
-      i += isDash ? 2 : 1;
-      while (i < sql.length && sql[i] !== '\n') {
-        out += ' ';
-        i++;
-      }
-      continue;
-    }
-
-    // Block comments: /* ... */
-    if (ch === '/' && next === '*') {
-      out += '  ';
-      i += 2;
-      while (i < sql.length) {
-        if (sql[i] === '*' && sql[i + 1] === '/') {
-          out += '  ';
-          i += 2;
-          break;
-        }
-        out += sql[i] === '\n' ? '\n' : ' ';
-        i++;
-      }
-      continue;
-    }
-
-    // Dollar quotes: $tag$...$tag$ or $$...$$
-    if (ch === '$') {
-      const match = sql.slice(i).match(/^\$([a-zA-Z0-9_]*)\$/);
-      if (match) {
-        const tag = match[0];
-        out += ' '.repeat(tag.length);
-        i += tag.length;
-        const closeIdx = sql.indexOf(tag, i);
-        if (closeIdx !== -1) {
-          while (i < closeIdx + tag.length) {
-            out += sql[i] === '\n' ? '\n' : ' ';
-            i++;
-          }
-          continue;
-        }
-      }
-    }
-
-    // String / identifier quotes: '...', "...", `...`
-    if (ch === "'" || ch === '"' || ch === '`') {
-      const quote = ch;
-      out += ' ';
-      i++;
-      while (i < sql.length) {
-        if (sql[i] === quote) {
-          // SQL '' escape inside single quotes.
-          if (quote === "'" && sql[i + 1] === "'") {
-            out += '  ';
-            i += 2;
-            continue;
-          }
-          out += ' ';
-          i++;
-          break;
-        }
-        out += sql[i] === '\n' ? '\n' : ' ';
-        i++;
-      }
-      continue;
-    }
-
-    out += ch;
-    i++;
-  }
-  return out;
 }

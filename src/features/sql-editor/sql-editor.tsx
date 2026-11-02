@@ -41,7 +41,7 @@ import {
   ensureTableStructure,
   getCachedTableStructure,
   refreshSchemas,
-  useConnections,
+  useConnectionsSelector,
 } from '../../state/connections';
 import { formatSql, languageForDialect } from '../../lib/format-sql';
 import { useSettings } from '../../lib/settings-store';
@@ -62,6 +62,7 @@ import {
 import { VerticalResizeHandle } from './sql-editor-resize-handle';
 import { lintSql } from './sql-lint';
 import { pageableSelect, buildPagedSql } from './query-paging';
+import { codeForChecks } from './sql-lexer';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { copyText } from '../../lib/clipboard';
 import { listen } from '@tauri-apps/api/event';
@@ -242,26 +243,24 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
   // Schemas come from the external connections store; we keep a ref that the
   // completion provider reads fresh on each call so late-arriving schemas
   // show up without re-registering the provider.
-  const connState = useConnections();
-  const schemasRef = useRef(connState.schemasById.get(connection.id) ?? []);
-  schemasRef.current = connState.schemasById.get(connection.id) ?? [];
+  // Just this connection's schema list (see DataGrid).
+  const connSchemas = useConnectionsSelector((s) => s.schemasById.get(connection.id));
+  const schemasRef = useRef(connSchemas ?? []);
+  schemasRef.current = connSchemas ?? [];
   const defaultSchemaRef = useRef<string | undefined>(effectiveSchema);
   defaultSchemaRef.current = effectiveSchema;
 
-  // Tick the live "Running…" timer while a query executes. We use rAF rather
-  // than setInterval so the displayed elapsed time stays smooth and stops
-  // immediately on completion; the final authoritative duration comes from the
-  // result's `durationMs` once the run resolves.
+  // Tick the live "Running…" timer while a query executes and this tab is
+  // shown. Ten ticks a second: re-rendering the whole editor on every animation
+  // frame for the length of a long query made the app sluggish. The final
+  // authoritative duration comes from the result's `durationMs`.
   useEffect(() => {
-    if (!isExecuting) return;
-    let raf = 0;
-    const tick = () => {
-      setRunElapsedMs(performance.now() - runStartRef.current);
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [isExecuting]);
+    if (!isExecuting || !isActive) return;
+    const tick = () => setRunElapsedMs(performance.now() - runStartRef.current);
+    tick();
+    const timer = setInterval(tick, 100);
+    return () => clearInterval(timer);
+  }, [isExecuting, isActive]);
 
   // Track the app's dark-mode class so Monaco follows the theme switch.
   useEffect(() => {
@@ -308,7 +307,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
   // — refetching on every query-tab open made the visible table list flash a
   // reload. Only fetch when nothing is cached yet.
   useEffect(() => {
-    const hasCache = (connState.schemasById.get(connection.id)?.length ?? 0) > 0;
+    const hasCache = (connSchemas?.length ?? 0) > 0;
     if (hasCache) return;
     void refreshSchemas(connection.id);
     // Intentionally keyed only on connection.id: we want this to run once per
@@ -334,6 +333,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
         getCachedTableStructure(connection.id, schema, table),
       ensureStructure: (schema, table) =>
         ensureTableStructure(connection.id, schema, table),
+      ownsModel: (model) => model === editorRef.current?.getModel(),
     });
     return () => {
       completionDisposerRef.current?.dispose();
@@ -974,7 +974,7 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
     // Auto-paging: a plain SELECT with no LIMIT of its own gets wrapped with
     // LIMIT/OFFSET and pager controls. Anything else (non-SELECT, multi-
     // statement, user-supplied LIMIT) runs verbatim with paging off.
-    const pageable = pageableSelect(payload);
+    const pageable = pageableSelect(payload, activeManifest?.capabilities.sqlDialect ?? 'none');
     if (pageable && pageSize > 0) {
       setPagedStmt(pageable);
       await runPage(pageable, 0, pageSize);
@@ -986,12 +986,16 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
   };
 
   const handleRun = async (statementOverride?: string) => {
-    const payload = stripCodeComments(statementOverride ?? query, language, activeManifest?.queryEditor?.commentTags).trim();
-    if (!payload) return;
+    const dialect = activeManifest?.capabilities.sqlDialect ?? 'none';
+    const payload = stripCodeComments(statementOverride ?? query, language, activeManifest?.queryEditor?.commentTags, dialect).trim();
+    // Optimizer hints and `/*! … */` comments survive stripping because the
+    // server reads them; judge the statement by what it actually parses — a
+    // lone hint is nothing to run, and `/*+ x */ DELETE FROM t` is a DELETE.
+    const code = codeForChecks(payload, dialect);
+    if (!code.trim()) return;
 
     // Check for destructive statements before executing
-    const dialect = activeManifest?.capabilities.sqlDialect ?? 'none';
-    const analysis = analyzeDestructive(payload, dialect);
+    const analysis = analyzeDestructive(code, dialect);
     if (settings.confirmDestructive && 'statements' in analysis) {
       pendingRunRef.current = payload;
       setDestructiveWarning(analysis.statements);
@@ -1024,7 +1028,12 @@ export default function SqlEditor({ tabId, isActive = true, initialQuery = '', i
     if (separator === ';' || separator == null) {
       const pos = editor.getPosition();
       const offset = pos ? model.getOffsetAt(pos) : query.length;
-      const current = statementAtCursor(query, offset);
+      const current = statementAtCursor(
+        query,
+        offset,
+        activeManifest?.capabilities.sqlDialect,
+        activeManifest?.queryEditor?.commentTags,
+      );
       void handleRun(current || query);
       return;
     }

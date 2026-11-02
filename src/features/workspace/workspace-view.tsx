@@ -26,8 +26,9 @@ import {
   getActiveDatabase,
   refreshSchemas,
   switchConnectionDatabase,
-  useConnections,
+  useConnectionsSelector,
 } from "../../state/connections";
+import { useStableCallback } from "../../hooks/use-stable-callback";
 import {
   useAdapterManifests,
   resolveManifest,
@@ -354,7 +355,7 @@ export default function WorkspaceView({
         appendQueryLog({
           connectionId: ev.payload.connection_id,
           statement: ev.payload.statement,
-          source: "ai" as any,
+          source: "ai",
           durationMs: ev.payload.duration_ms,
           status: ev.payload.status as any,
           message: ev.payload.message ?? undefined,
@@ -506,7 +507,13 @@ export default function WorkspaceView({
     {},
   );
 
-  const connState = useConnections();
+  // Only the slices the workspace reads: the table-structure cache (refilled
+  // by autocomplete and every grid) must not re-render the whole workspace.
+  const activeById = useConnectionsSelector((s) => s.activeById);
+  const connectingIds = useConnectionsSelector((s) => s.connectingIds);
+  const lastErrorById = useConnectionsSelector((s) => s.lastErrorById);
+  const schemasById = useConnectionsSelector((s) => s.schemasById);
+  const connState = { activeById, connectingIds, lastErrorById, schemasById };
   const railState = useRail();
   useEffect(() => {
     void refreshRail();
@@ -742,9 +749,10 @@ export default function WorkspaceView({
     focusedTile && isConnectionScopedDb(focusedConnection ?? undefined)
       ? focusedTile.databaseName
       : undefined;
-  const visibleTabs = focusedConnection
+  const focusedConnectionKey = focusedConnection?.id ?? null;
+  const visibleTabs = useMemo(() => focusedConnectionKey
     ? tabs.filter((t) => {
-        if (t.connectionId !== focusedConnection.id) return false;
+        if (t.connectionId !== focusedConnectionKey) return false;
         if (!t.schema) return true; // connection-scoped query tab
         // Postgres: a tab belongs to a specific PG database. Databases all
         // share a `public` schema, so the database must match too — otherwise
@@ -771,7 +779,32 @@ export default function WorkspaceView({
             t.schema === focusedTileEffectiveSchema)
         );
       })
-    : [];
+    : [], [tabs, focusedConnectionKey, focusedTileScopedDb, focusedTileEffectiveSchema, scopeKey]);
+
+  // Tabs kept mounted (hidden) while another rail tile is focused, so switching
+  // back is instant and editors keep their cursor, scroll and undo history.
+  // Only tabs already shown this session — building every tile's editors at
+  // startup would just move the cost — and never another Postgres database's
+  // tabs on the focused server: that connection's pool now points at the
+  // focused database, so their views would reload against the wrong one.
+  const [shownTabIds, setShownTabIds] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    if (visibleTabs.every((t) => shownTabIds.has(t.id))) return;
+    setShownTabIds((prev) => {
+      const next = new Set(prev);
+      for (const t of visibleTabs) next.add(t.id);
+      return next;
+    });
+  }, [visibleTabs, shownTabIds]);
+  const mountedTabs = useMemo(() => {
+    const visibleIds = new Set(visibleTabs.map((t) => t.id));
+    return tabs.filter(
+      (t) =>
+        visibleIds.has(t.id) ||
+        (shownTabIds.has(t.id) &&
+          !(focusedTileScopedDb != null && t.connectionId === focusedConnectionKey)),
+    );
+  }, [tabs, visibleTabs, shownTabIds, focusedTileScopedDb, focusedConnectionKey]);
   const storedActive = scopeKey ? activeTabByConn[scopeKey] : undefined;
   // If the stored active tab no longer exists (e.g. closed while another
   // tile was focused) fall back to the first visible tab so the user sees
@@ -1815,11 +1848,16 @@ export default function WorkspaceView({
       title,
       type: "query",
       connectionId: targetConn,
+      // Postgres query tabs carry the DATABASE in `schema` (see `visibleTabs`).
+      // The AI reports its SQL schema (`public`), which no database tile
+      // matches — the tab opened invisibly.
       schema:
-        ev.schema ??
-        (focusedTile?.serverId === targetConn
-          ? focusedTile.databaseName
-          : undefined),
+        focusedTileScopedDb != null && focusedTile?.serverId === targetConn
+          ? focusedTileScopedDb
+          : ev.schema ??
+            (focusedTile?.serverId === targetConn
+              ? focusedTile.databaseName
+              : undefined),
       query: ev.sql,
       aiOwned: true,
     };
@@ -2021,6 +2059,93 @@ export default function WorkspaceView({
 
   const handleCloseExport = useCallback(() => setExportForId(null), []);
 
+  // Stable identities for what the memoized tab shell and sidebar get: a fresh
+  // handler per render re-rendered every open tab (each data grid and SQL
+  // editor) on any workspace update — a sidebar drag, a query-log line.
+  const onTabChange = useStableCallback(setActiveTabId);
+  const onCloseTab = useStableCallback(handleCloseTab);
+  const onCloseTabs = useStableCallback(handleCloseTabs);
+  const onReorderTabs = useStableCallback(handleReorderTabs);
+  const onNewQuery = useStableCallback(handleNewQuery);
+  const onOpenQueryFile = useStableCallback(handleOpenQueryFile);
+  const onImportSql = useStableCallback(handleImportSqlForId);
+  const onOpenRealtime = useStableCallback(handleNewRealtime);
+  const onTabViewModeChange = useStableCallback(handleTabViewModeChange);
+  const onTabQueryChange = useStableCallback(handleTabQueryChange);
+  const onTabFilePathChange = useStableCallback(handleTabFilePathChange);
+  const onTabTriggerDraftChange = useStableCallback(handleTabTriggerDraftChange);
+  const onTabDirtyChange = useStableCallback(handleTabDirtyChange);
+  const onTabRealtimePatternChange = useStableCallback(handleTabRealtimePatternChange);
+  const onTableCreated = useStableCallback(handleTabTableCreated);
+  const onAppendQueryLog = useStableCallback(appendQueryLog);
+  const onClearQueryLog = useStableCallback(clearQueryLog);
+  const onOpenTable = useStableCallback(handleOpenTable);
+  const onOpenStructure = useStableCallback(handleOpenStructure);
+  const onOpenErd = useStableCallback(handleOpenErd);
+  const onPickConnection = useStableCallback(handlePickConnection);
+  const onEditConnectionFromSidebar = useStableCallback(handleEditConnectionFromSidebar);
+  const onDeleteConnectionStable = useStableCallback(onDeleteConnection);
+  const onDisconnectStable = useStableCallback(onDisconnect);
+  const onOpenNewServer = useStableCallback(handleOpenNewServer);
+  const onPinDatabase = useStableCallback(handlePinDatabase);
+  const onExport = useStableCallback(handleExportForConnection);
+  const onOpenDefinition = useStableCallback(handleOpenDefinition);
+  const onOpenRoutine = useStableCallback(handleOpenRoutine);
+  const onOpenTrigger = useStableCallback(handleOpenTrigger);
+  const onNewTable = useStableCallback(handleNewTable);
+  const onNewView = useStableCallback(handleNewView);
+  const onNewRoutine = useStableCallback(handleNewRoutine);
+  const onNewTrigger = useStableCallback(handleNewTrigger);
+  const sidebarActiveItem = useMemo(() => {
+    const tab = visibleTabs.find((t) => t.id === activeTabId);
+    if (!tab || !tab.schema) return null;
+    // Data + structure tabs represent a table or view — we distinguish
+    // by whether that name appears in the view list for the schema.
+    if (
+      (tab.type === "data" || tab.type === "structure") &&
+      tab.table &&
+      tab.table !== "(new)"
+    ) {
+      const schemas = schemasById.get(tab.connectionId) ?? [];
+      const schema = schemas.find((s) => s.name === tab.schema);
+      const kind = schema?.tables.find((t) => t.name === tab.table)?.kind;
+      return {
+        type: kind === "view" ? "view" : "table",
+        connectionId: tab.connectionId,
+        schema: tab.schema,
+        name: tab.table,
+      } as const;
+    }
+    if (
+      tab.type === "routine" &&
+      tab.routine &&
+      tab.routine.name !== "(new)"
+    ) {
+      return {
+        type: tab.routine.kind === "view" ? "view" : "routine",
+        connectionId: tab.connectionId,
+        schema: tab.schema,
+        name: tab.routine.name,
+        routineKind:
+          tab.routine.kind === "view" ? undefined : tab.routine.kind,
+      } as const;
+    }
+    if (
+      tab.type === "trigger" &&
+      tab.trigger &&
+      tab.trigger.name !== "(new)"
+    ) {
+      return {
+        type: "trigger",
+        connectionId: tab.connectionId,
+        schema: tab.schema,
+        name: tab.trigger.name,
+      } as const;
+    }
+    return null;
+  }, [visibleTabs, activeTabId, schemasById]);
+  const connectedServerIds = useMemo(() => new Set(activeById.keys()), [activeById]);
+
   return (
     <div
       className="flex-1 flex bg-background relative mac-vibrancy min-w-0"
@@ -2034,7 +2159,7 @@ export default function WorkspaceView({
         onEditServer={handleEditServer}
         onImportSql={handleImportSqlForId}
         onExport={handleExportForConnection}
-        connectedServerIds={new Set(connState.activeById.keys())}
+        connectedServerIds={connectedServerIds}
         expanded={railExpanded}
         onExpandChange={setRailExpanded}
       />
@@ -2047,74 +2172,27 @@ export default function WorkspaceView({
           focusedConnection={focusedConnection}
           focusedDatabase={focusedTile?.databaseName ?? null}
           connections={connections}
-          onOpenTable={handleOpenTable}
-          onOpenStructure={handleOpenStructure}
-          onNewQuery={handleNewQuery}
-          onOpenErd={handleOpenErd}
-          onPickConnection={handlePickConnection}
-          onEditConnection={handleEditConnectionFromSidebar}
-          onDeleteConnection={onDeleteConnection}
-          onDisconnect={onDisconnect}
-          onOpenNewServer={handleOpenNewServer}
-          onPinDatabase={handlePinDatabase}
-          onImportSql={handleImportSqlForId}
-          onExport={handleExportForConnection}
-          onOpenDefinition={handleOpenDefinition}
-          onOpenRoutine={handleOpenRoutine}
-          onOpenTrigger={handleOpenTrigger}
-          onNewTable={handleNewTable}
-          onNewView={handleNewView}
-          onNewRoutine={handleNewRoutine}
-          onNewTrigger={handleNewTrigger}
-          onOpenRealtime={handleNewRealtime}
-          activeItem={(() => {
-            const tab = visibleTabs.find((t) => t.id === activeTabId);
-            if (!tab || !tab.schema) return null;
-            // Data + structure tabs represent a table or view — we distinguish
-            // by whether that name appears in the view list for the schema.
-            if (
-              (tab.type === "data" || tab.type === "structure") &&
-              tab.table &&
-              tab.table !== "(new)"
-            ) {
-              const schemas = connState.schemasById.get(tab.connectionId) ?? [];
-              const schema = schemas.find((s) => s.name === tab.schema);
-              const kind = schema?.tables.find((t) => t.name === tab.table)?.kind;
-              return {
-                type: kind === "view" ? "view" : "table",
-                connectionId: tab.connectionId,
-                schema: tab.schema,
-                name: tab.table,
-              };
-            }
-            if (
-              tab.type === "routine" &&
-              tab.routine &&
-              tab.routine.name !== "(new)"
-            ) {
-              return {
-                type: tab.routine.kind === "view" ? "view" : "routine",
-                connectionId: tab.connectionId,
-                schema: tab.schema,
-                name: tab.routine.name,
-                routineKind:
-                  tab.routine.kind === "view" ? undefined : tab.routine.kind,
-              };
-            }
-            if (
-              tab.type === "trigger" &&
-              tab.trigger &&
-              tab.trigger.name !== "(new)"
-            ) {
-              return {
-                type: "trigger",
-                connectionId: tab.connectionId,
-                schema: tab.schema,
-                name: tab.trigger.name,
-              };
-            }
-            return null;
-          })()}
+          onOpenTable={onOpenTable}
+          onOpenStructure={onOpenStructure}
+          onNewQuery={onNewQuery}
+          onOpenErd={onOpenErd}
+          onPickConnection={onPickConnection}
+          onEditConnection={onEditConnectionFromSidebar}
+          onDeleteConnection={onDeleteConnectionStable}
+          onDisconnect={onDisconnectStable}
+          onOpenNewServer={onOpenNewServer}
+          onPinDatabase={onPinDatabase}
+          onImportSql={onImportSql}
+          onExport={onExport}
+          onOpenDefinition={onOpenDefinition}
+          onOpenRoutine={onOpenRoutine}
+          onOpenTrigger={onOpenTrigger}
+          onNewTable={onNewTable}
+          onNewView={onNewView}
+          onNewRoutine={onNewRoutine}
+          onNewTrigger={onNewTrigger}
+          onOpenRealtime={onOpenRealtime}
+          activeItem={sidebarActiveItem}
         />
         <div
           onMouseDown={handleSidebarResizeMouseDown}
@@ -2128,25 +2206,26 @@ export default function WorkspaceView({
         <TabsShell
           activeConnections={activeConnections}
           tabs={visibleTabs}
+          mountedTabs={mountedTabs}
           activeTabId={activeTabId}
-          onTabChange={setActiveTabId}
-          onCloseTab={handleCloseTab}
-          onCloseTabs={handleCloseTabs}
-          onReorderTabs={handleReorderTabs}
-          onNewQuery={handleNewQuery}
-          onOpenQueryFile={handleOpenQueryFile}
-          onImportSql={handleImportSqlForId}
-          onOpenRealtime={handleNewRealtime}
-          onTabViewModeChange={handleTabViewModeChange}
-          onTabQueryChange={handleTabQueryChange}
-          onTabFilePathChange={handleTabFilePathChange}
-          onTabTriggerDraftChange={handleTabTriggerDraftChange}
-          onTabDirtyChange={handleTabDirtyChange}
-          onTabRealtimePatternChange={handleTabRealtimePatternChange}
-          onTableCreated={handleTabTableCreated}
+          onTabChange={onTabChange}
+          onCloseTab={onCloseTab}
+          onCloseTabs={onCloseTabs}
+          onReorderTabs={onReorderTabs}
+          onNewQuery={onNewQuery}
+          onOpenQueryFile={onOpenQueryFile}
+          onImportSql={onImportSql}
+          onOpenRealtime={onOpenRealtime}
+          onTabViewModeChange={onTabViewModeChange}
+          onTabQueryChange={onTabQueryChange}
+          onTabFilePathChange={onTabFilePathChange}
+          onTabTriggerDraftChange={onTabTriggerDraftChange}
+          onTabDirtyChange={onTabDirtyChange}
+          onTabRealtimePatternChange={onTabRealtimePatternChange}
+          onTableCreated={onTableCreated}
           queryLogs={queryLogs}
-          onAppendQueryLog={appendQueryLog}
-          onClearQueryLog={clearQueryLog}
+          onAppendQueryLog={onAppendQueryLog}
+          onClearQueryLog={onClearQueryLog}
           noDatabaseSelected={!!focusedConnection && !focusedTile}
           focusedDatabase={focusedTile?.databaseName ?? null}
           focusedConnectionId={focusedConnection?.id ?? null}

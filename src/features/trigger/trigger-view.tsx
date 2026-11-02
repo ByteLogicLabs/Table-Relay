@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Editor from '@monaco-editor/react';
+import { useEditorCompletion } from '../../lib/query-completion/use-editor-completion';
 import { Check, X, RefreshCw, Loader2, AlertCircle, AlignLeft, Sparkles } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '../../components/ui/button';
@@ -138,6 +139,15 @@ export default function TriggerView({
   // Use the manifest's Monaco language id (pgsql / mysql / …) for accurate
   // highlighting, matching the query editor; fall back to generic SQL.
   const editorLanguage = activeManifest?.queryEditor?.language?.trim() || 'sql';
+  // Table/column suggestions for this editor (the query tabs' providers only
+  // answer for their own editors).
+  const handleEditorMount = useEditorCompletion({
+    connectionId: connection.id,
+    adapterKey: activeManifest?.adapter.key,
+    dialect,
+    language: editorLanguage,
+    defaultSchema: schema,
+  });
 
   // Follow the app's active Monaco theme (same as the query editor) instead of
   // hardcoding vs-dark — keeps the DDL editor consistent in light/dark/monokai.
@@ -445,6 +455,7 @@ export default function TriggerView({
         <Editor
           language={editorLanguage}
           value={draft}
+          onMount={handleEditorMount}
           onChange={handleEditorChange}
           theme={theme}
           options={ddlEditorOptions({

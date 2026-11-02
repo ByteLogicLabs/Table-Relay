@@ -25,17 +25,55 @@
 //! `initialize`, `tools/list`, `tools/call`. We implement just enough of the
 //! spec for the four CLIs to discover + invoke our tools.
 
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
 
+use crate::ai::cancel::CancelToken;
 use crate::ai::tools::{self, ToolContext};
 use crate::db::registry::Registry;
 
 use super::mcp_server::{advertised_tools, MCP_SERVER_NAME};
+
+/// MCP tool calls currently executing (including those waiting on approval).
+static IN_FLIGHT_CALLS: AtomicUsize = AtomicUsize::new(0);
+/// When the last MCP tool call finished, in ms since the Unix epoch.
+static LAST_CALL_END_MS: AtomicU64 = AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Whether a wrapped CLI is busy with one of our tools right now (or finished
+/// one within `within`). The CLIs print nothing while a tool runs or waits for
+/// approval, so the CLI provider's silence-based "the agent is done" heuristic
+/// must not fire during that time.
+pub fn tool_activity_within(within: std::time::Duration) -> bool {
+    IN_FLIGHT_CALLS.load(Ordering::SeqCst) > 0
+        || now_ms().saturating_sub(LAST_CALL_END_MS.load(Ordering::SeqCst)) < within.as_millis() as u64
+}
+
+/// Counts one MCP tool call as in flight until dropped.
+struct CallActivity;
+
+impl CallActivity {
+    fn start() -> Self {
+        IN_FLIGHT_CALLS.fetch_add(1, Ordering::SeqCst);
+        CallActivity
+    }
+}
+
+impl Drop for CallActivity {
+    fn drop(&mut self) {
+        IN_FLIGHT_CALLS.fetch_sub(1, Ordering::SeqCst);
+        LAST_CALL_END_MS.store(now_ms(), Ordering::SeqCst);
+    }
+}
 
 /// Mutable per-turn routing context. The CLI provider has no idea which DB
 /// connection the user is looking at — that arrives per `ai_chat_send`. We
@@ -49,6 +87,8 @@ struct BridgeContext {
     /// on it so the frontend attaches the tool bubble + approval popup to the
     /// running assistant message (same UX as in-app tool calls).
     request_id: Option<String>,
+    /// Stop token of that turn, so a stopped turn's approval waits end.
+    cancel: Option<CancelToken>,
 }
 
 /// App-lifetime MCP bridge. Created once (lazily, on the first CLI session) and
@@ -119,18 +159,22 @@ impl McpBridge {
     }
 
     /// Update the routing context for tool calls. Called from `ai_chat_send`
-    /// every turn so MCP tool calls hit the connection the user is focused on
-    /// and ride on the in-flight chat turn's request id.
+    /// every turn — once that turn holds the session's send lock, so a turn
+    /// still running can't have its later tool calls re-pointed at another
+    /// connection — making MCP tool calls hit the connection the user is
+    /// focused on and ride on the in-flight chat turn's request id.
     pub async fn set_context(
         &self,
         connection_id: Option<String>,
         schema: Option<String>,
         request_id: Option<String>,
+        cancel: Option<CancelToken>,
     ) {
         let mut c = self.ctx.write().await;
         c.connection_id = connection_id;
         c.schema = schema;
         c.request_id = request_id;
+        c.cancel = cancel;
     }
 
     /// Serve one client connection: auth handshake, then JSON-RPC request loop.
@@ -219,12 +263,14 @@ impl McpBridge {
             .unwrap_or(json!({}))
             .to_string();
 
-        let (connection_id, schema, request_id) = {
+        let _activity = CallActivity::start();
+        let (connection_id, schema, request_id, cancel) = {
             let c = self.ctx.read().await;
             (
                 c.connection_id.clone(),
                 c.schema.clone(),
                 c.request_id.clone(),
+                c.cancel.clone(),
             )
         };
         let Some(connection_id) = connection_id else {
@@ -238,6 +284,8 @@ impl McpBridge {
         let ctx = ToolContext {
             connection_id: connection_id.clone(),
             default_schema: schema,
+            request_id: request_id.clone(),
+            cancel,
         };
         // Synthesize a tool_call_id. The frontend keys the tool bubble +
         // approval popup off this id, so dispatch()'s approval_request (which

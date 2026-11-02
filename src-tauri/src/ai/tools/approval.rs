@@ -162,24 +162,42 @@ impl AutoApprovals {
 }
 
 impl ApprovalRegistry {
-    pub async fn wait(&self, id: &str) -> Result<ApprovalDecision, AiError> {
+    /// Wait for the user's answer to approval `id`. Gives up after 5 minutes,
+    /// or as soon as `cancel` trips (the user stopped the turn), so a card
+    /// nobody will answer can't hold the turn — and its send lock — hostage.
+    pub async fn wait(
+        &self,
+        id: &str,
+        cancel: Option<&crate::ai::cancel::CancelToken>,
+    ) -> Result<ApprovalDecision, AiError> {
         let (tx, rx) = oneshot::channel();
         {
             let mut guard = self.pending.lock().await;
+            // Drop entries whose waiter is gone: a stopped turn drops this
+            // future mid-wait, so the cleanup below never runs for it.
+            guard.retain(|_, tx| !tx.is_closed());
             guard.insert(id.to_string(), tx);
         }
         // 5-minute cap — the UI banner is persistent so the user can reply
         // whenever, but we don't want to lock the tool loop forever.
-        let deadline = tokio::time::timeout(Duration::from_secs(300), rx).await;
+        let answer = tokio::time::timeout(Duration::from_secs(300), rx);
+        let outcome = match cancel {
+            Some(token) => tokio::select! {
+                r = answer => Some(r),
+                _ = token.cancelled() => None,
+            },
+            None => Some(answer.await),
+        };
         // Always clean up the entry.
         {
             let mut guard = self.pending.lock().await;
             guard.remove(id);
         }
-        match deadline {
-            Ok(Ok(decision)) => Ok(decision),
-            Ok(Err(_)) => Err(AiError::Other("approval channel closed".into())),
-            Err(_) => Err(AiError::Other("approval timed out after 5 minutes".into())),
+        match outcome {
+            None => Err(AiError::Canceled),
+            Some(Ok(Ok(decision))) => Ok(decision),
+            Some(Ok(Err(_))) => Err(AiError::Other("approval channel closed".into())),
+            Some(Err(_)) => Err(AiError::Other("approval timed out after 5 minutes".into())),
         }
     }
 
