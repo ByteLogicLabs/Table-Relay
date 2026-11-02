@@ -95,9 +95,14 @@ async fn run_statement(
             } else {
                 parse_json_document(args.trim())?
             };
-            let limit = parse_limit(&tail)?.or(row_limit.map(|n| n as i64));
+            let modifiers = parse_find_modifiers(&tail)?;
+            let effective_row_limit = row_limit.and_then(|n| if n == 0 { None } else { Some(n as i64) });
+            let limit = modifiers.limit.or(effective_row_limit);
             let mut opts = FindOptions::default();
             opts.limit = limit;
+            opts.skip = modifiers.skip;
+            opts.sort = modifiers.sort;
+            opts.projection = modifiers.projection;
             let mut cur = coll.find(filter, opts).await.map_err(map_err)?;
             let mut docs = Vec::new();
             while let Some(d) = cur.try_next().await.map_err(map_err)? {
@@ -237,30 +242,85 @@ async fn run_statement(
     }
 }
 
-fn parse_limit(tail: &str) -> Result<Option<i64>, AdapterError> {
-    let t = tail.trim();
-    if t.is_empty() {
-        return Ok(None);
-    }
-    if !t.starts_with(".limit(") {
-        return Err(AdapterError::Syntax {
-            message: format!("Unsupported trailing clause `{t}`. Only .limit(n) is supported after find()."),
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct FindModifiers {
+    pub limit: Option<i64>,
+    pub skip: Option<u64>,
+    pub sort: Option<Document>,
+    pub projection: Option<Document>,
+}
+
+pub(crate) fn parse_find_modifiers(tail: &str) -> Result<FindModifiers, AdapterError> {
+    let mut modifiers = FindModifiers::default();
+    let mut rest = tail.trim().to_string();
+
+    while !rest.is_empty() {
+        if rest == ";" {
+            break;
+        }
+        if rest.starts_with(';') {
+            rest = rest[1..].trim().to_string();
+            continue;
+        }
+
+        if !rest.starts_with('.') {
+            return Err(AdapterError::Syntax {
+                message: format!("Unexpected tokens after find(): `{rest}`"),
+                line: None,
+                column: None,
+            });
+        }
+
+        let after_dot = rest[1..].trim_start();
+        let open_paren = after_dot.find('(').ok_or_else(|| AdapterError::Syntax {
+            message: format!("Expected '(' in method call: `{after_dot}`"),
             line: None,
             column: None,
-        });
+        })?;
+
+        let method = after_dot[..open_paren].trim().to_string();
+        let (args, next_tail) = extract_call_args(&after_dot[open_paren..])?;
+
+        match method.as_str() {
+            "limit" => {
+                let n = args.trim().parse::<i64>().map_err(|e| AdapterError::Syntax {
+                    message: format!("Invalid limit value in limit({args}): {e}"),
+                    line: None,
+                    column: None,
+                })?;
+                modifiers.limit = Some(n);
+            }
+            "skip" => {
+                let n = args.trim().parse::<u64>().map_err(|e| AdapterError::Syntax {
+                    message: format!("Invalid skip value in skip({args}): {e}"),
+                    line: None,
+                    column: None,
+                })?;
+                modifiers.skip = Some(n);
+            }
+            "sort" => {
+                let doc = parse_json_document(args.trim())?;
+                modifiers.sort = Some(doc);
+            }
+            "project" | "projection" => {
+                let doc = parse_json_document(args.trim())?;
+                modifiers.projection = Some(doc);
+            }
+            _ => {
+                return Err(AdapterError::Syntax {
+                    message: format!(
+                        "Unsupported chained method `.{method}()` after find(). Supported: limit, sort, skip, project"
+                    ),
+                    line: None,
+                    column: None,
+                });
+            }
+        }
+
+        rest = next_tail.trim().to_string();
     }
-    let end = t.rfind(')').ok_or_else(|| AdapterError::Syntax {
-        message: "Missing closing ')' in limit()".to_string(),
-        line: None,
-        column: None,
-    })?;
-    let inner = &t[7..end];
-    let n = inner.trim().parse::<i64>().map_err(|e| AdapterError::Syntax {
-        message: format!("Invalid limit value: {e}"),
-        line: None,
-        column: None,
-    })?;
-    Ok(Some(n))
+
+    Ok(modifiers)
 }
 
 /// Drop a leading `USE <schema>;` statement if present (case-insensitive).
@@ -689,5 +749,52 @@ mod tests {
         ]"#;
         let arr = crate::mongo::parse_json_array(pipeline).expect("parse mongo shell json");
         assert_eq!(arr.len(), 2);
+    }
+
+    #[test]
+    fn parse_find_modifiers_empty_and_semicolon() {
+        let empty = parse_find_modifiers("").expect("empty");
+        assert_eq!(empty, FindModifiers::default());
+
+        let semi = parse_find_modifiers(";").expect("semicolon");
+        assert_eq!(semi, FindModifiers::default());
+
+        let spaces = parse_find_modifiers("   ").expect("spaces");
+        assert_eq!(spaces, FindModifiers::default());
+    }
+
+    #[test]
+    fn parse_find_modifiers_limit_only() {
+        let m = parse_find_modifiers(".limit(50)").expect("limit");
+        assert_eq!(m.limit, Some(50));
+        assert_eq!(m.skip, None);
+        assert_eq!(m.sort, None);
+    }
+
+    #[test]
+    fn parse_find_modifiers_chained_sort_limit_skip() {
+        let m = parse_find_modifiers(".sort({ createdAt: -1 }).skip(10).limit(25)")
+            .expect("chained");
+        assert_eq!(m.limit, Some(25));
+        assert_eq!(m.skip, Some(10));
+        let sort = m.sort.expect("sort doc");
+        assert_eq!(sort.get_i32("createdAt").unwrap_or(0), -1);
+    }
+
+    #[test]
+    fn parse_find_modifiers_projection() {
+        let m = parse_find_modifiers(r#".project({ "name": 1, "email": 1 })"#)
+            .expect("projection");
+        assert_eq!(m.limit, None);
+        let proj = m.projection.expect("proj doc");
+        assert_eq!(proj.get_i32("name").unwrap_or(0), 1);
+        assert_eq!(proj.get_i32("email").unwrap_or(0), 1);
+    }
+
+    #[test]
+    fn parse_find_modifiers_invalid_tokens() {
+        assert!(parse_find_modifiers("bogus()").is_err());
+        assert!(parse_find_modifiers(".unknown(123)").is_err());
+        assert!(parse_find_modifiers(".limit(abc)").is_err());
     }
 }
