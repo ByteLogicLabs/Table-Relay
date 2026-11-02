@@ -840,12 +840,13 @@ fn parse_sqlite_trigger_meta(sql: &str) -> (String, String) {
     (timing, event)
 }
 
+/// Statements that return a result set, so their rows are fetched and shown.
 fn is_query(sql: &str) -> bool {
-    let head = sql.trim_start().to_ascii_uppercase();
-    head.starts_with("SELECT")
-        || head.starts_with("WITH")
-        || head.starts_with("PRAGMA")
-        || head.starts_with("EXPLAIN")
+    use adapter_api::SqlDialect::Sqlite;
+    matches!(
+        adapter_api::leading_keyword(sql, Sqlite).as_str(),
+        "SELECT" | "WITH" | "PRAGMA" | "EXPLAIN" | "VALUES"
+    ) || adapter_api::has_top_level_keyword(sql, Sqlite, "RETURNING")
 }
 
 /// Does the SQL already contain a top-level `LIMIT` clause? Same
@@ -884,66 +885,10 @@ fn has_limit_clause(sql: &str) -> bool {
     false
 }
 
-/// Simple statement splitter. SQLite doesn't have MySQL's `DELIMITER` so
-/// this stays simpler than the MySQL version.
+/// Split a batch on `;`, honouring SQLite quoting (no backslash escapes),
+/// `[ident]`, comments, and `CREATE TRIGGER … BEGIN …; END` bodies.
 fn split_statements(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_block_comment = false;
-    let mut prev = '\0';
-    let mut chars = input.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        if in_block_comment {
-            buf.push(ch);
-            if ch == '*' && chars.peek() == Some(&'/') {
-                buf.push('/');
-                chars.next();
-                in_block_comment = false;
-            }
-            prev = ch;
-            continue;
-        }
-        match ch {
-            '\'' if !in_double && prev != '\\' => in_single = !in_single,
-            '"' if !in_single && prev != '\\' => in_double = !in_double,
-            '-' if !in_single && !in_double && chars.peek() == Some(&'-') => {
-                buf.push(ch);
-                for nc in chars.by_ref() {
-                    buf.push(nc);
-                    if nc == '\n' {
-                        break;
-                    }
-                }
-                prev = '\n';
-                continue;
-            }
-            '/' if !in_single && !in_double && chars.peek() == Some(&'*') => {
-                buf.push(ch);
-                buf.push('*');
-                chars.next();
-                in_block_comment = true;
-                prev = '*';
-                continue;
-            }
-            ';' if !in_single && !in_double => {
-                if !buf.trim().is_empty() {
-                    out.push(std::mem::take(&mut buf));
-                }
-                prev = ch;
-                continue;
-            }
-            _ => {}
-        }
-        buf.push(ch);
-        prev = ch;
-    }
-    if !buf.trim().is_empty() {
-        out.push(buf);
-    }
-    out
+    adapter_api::split_sql_statements(input, adapter_api::SqlDialect::Sqlite)
 }
 
 async fn execute_query(
@@ -954,7 +899,8 @@ async fn execute_query(
     // Bound the statement safely via prepare_capped_query. Pure SELECT statements
     // without existing limits are capped; PRAGMA, EXPLAIN, and queries with
     // trailing semicolons or comments are executed cleanly without illegal LIMIT injections.
-    let (effective, can_be_truncated) = adapter_api::prepare_capped_query(sql, row_limit);
+    let (effective, can_be_truncated) =
+        adapter_api::prepare_capped_query(sql, row_limit, adapter_api::SqlDialect::Sqlite);
 
     let t_fetch = Instant::now();
     let rows: Vec<SqliteRow> = sqlx::query(&effective).fetch_all(&mut *conn).await?;

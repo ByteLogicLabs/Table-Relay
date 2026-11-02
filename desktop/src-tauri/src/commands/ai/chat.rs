@@ -1,12 +1,14 @@
 //! Chat-send command and the legacy streaming path. The tool-calling loop
 //! lives in the sibling `tool_loop` module.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 
+use crate::ai::cancel::{CancelRegistry, CancelToken};
 use crate::ai::session::SessionSlot;
 use crate::ai::{session, AiError, ChatMessage, ChatRole, CompletionRequest};
 
@@ -79,7 +81,21 @@ pub struct ChatSendInput {
     /// callers keep the streaming behaviour.
     #[serde(default = "default_stream")]
     pub stream: bool,
+    /// The panel keeps one transcript per connection but the backend session
+    /// holds one. When the user sends from a different connection's chat than
+    /// the previous turn, the frontend sends that chat's text history here and
+    /// it replaces the session transcript before this turn runs — otherwise
+    /// the model answered with another connection's conversation in mind.
+    #[serde(default)]
+    pub history: Option<Vec<RestoreMessage>>,
 }
+
+/// How long building the schema context may take before the turn goes ahead
+/// without it (a slow or wedged server).
+const CONTEXT_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Reply cap for the bundled llama-server (8k-token context).
+const LLAMA_MAX_REPLY_TOKENS: u32 = 3_072;
 
 fn default_stream() -> bool {
     true
@@ -172,7 +188,7 @@ fn assemble_user_turn(input: &ChatSendInput) -> String {
         ChatKind::Explain => {
             let sql = input.sql.as_deref().unwrap_or(&input.content);
             format!(
-                "Explain what this SQL does in plain English. Call out any joins, \
+                "Explain what this SQL does in plain language. Call out any joins, \
                 filters, aggregations, or potential gotchas. Be concise.\n\n\
                 ```sql\n{sql}\n```"
             )
@@ -207,32 +223,42 @@ pub async fn ai_chat_send(
     approvals: State<'_, Arc<crate::ai::tools::ApprovalRegistry>>,
     auto_approvals: State<'_, Arc<crate::ai::tools::AutoApprovals>>,
     mcp_slot: State<'_, crate::ai::mcp_bridge::McpBridgeSlot>,
+    cancels: State<'_, Arc<CancelRegistry>>,
 ) -> Result<(), AiError> {
-    // Keep the MCP bridge pointed at the connection/schema the user is looking
-    // at, so any DB tool a wrapped CLI calls runs against the right database.
-    if let Some(bridge) = mcp_slot.read().await.as_ref() {
-        bridge
-            .set_context(
-                input.connection_id.clone(),
-                input.schema.clone(),
-                Some(input.request_id.clone()),
-            )
-            .await;
-    }
-    let result = ai_chat_send_inner(input, app, slot, db_registry, approvals, auto_approvals).await;
+    // Stop for this turn trips `cancel`; the guard unregisters it however the
+    // turn ends.
+    let (cancel, _cancel_guard) = cancels.register(&input.request_id);
+    let turn = ai_chat_send_inner(input, app, slot, db_registry, approvals, auto_approvals, mcp_slot, cancel);
+    // Tauri doesn't catch panics in async commands: a panic left the
+    // frontend's invoke pending forever and the chat spinning until its
+    // watchdog gave up. Turn it into an ordinary error instead.
+    let result = match AssertUnwindSafe(turn).catch_unwind().await {
+        Ok(r) => r,
+        Err(panic) => {
+            let msg = panic
+                .downcast_ref::<&str>()
+                .map(|s| s.to_string())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "unknown panic".into());
+            Err(AiError::Other(format!("internal error: {msg}")))
+        }
+    };
     if let Err(e) = &result {
         crate::log_chat!("error", "{e}");
     }
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn ai_chat_send_inner(
-    input: ChatSendInput,
+    mut input: ChatSendInput,
     app: tauri::AppHandle,
     slot: State<'_, SessionSlot>,
     db_registry: State<'_, Arc<crate::db::registry::Registry>>,
     approvals: State<'_, Arc<crate::ai::tools::ApprovalRegistry>>,
     auto_approvals: State<'_, Arc<crate::ai::tools::AutoApprovals>>,
+    mcp_slot: State<'_, crate::ai::mcp_bridge::McpBridgeSlot>,
+    cancel: CancelToken,
 ) -> Result<(), AiError> {
     // Serialise sends per-session. Without this, a quick second send
     // can interleave a User message between an assistant-with-tool_calls
@@ -246,13 +272,68 @@ async fn ai_chat_send_inner(
         let session = guard.as_ref().ok_or(AiError::NoActiveSession)?;
         session.send_lock.clone()
     };
-    let _send_guard = send_lock.lock().await;
+    // A turn stopped while still queued behind another never starts.
+    let _send_guard = tokio::select! {
+        guard = send_lock.lock() => guard,
+        _ = cancel.cancelled() => {
+            emit_done(&app, input.request_id, String::new(), "canceled");
+            return Ok(());
+        }
+    };
 
-    // Schema context is (re-)injected whenever the user's focused
-    // connection/schema/tab fingerprint changes. We key on
-    // `"<conn_id>|<schema>|<focus>"` so switching tabs (even within the
-    // same database) triggers a refresh, while staying on the same tab
-    // skips the re-build (which is the hot path).
+    // Keep the MCP bridge pointed at the connection/schema the user is looking
+    // at, so any DB tool a wrapped CLI calls runs against the right database.
+    // Set only now that this turn owns the session — setting it before the lock
+    // re-pointed a still-running turn's tool calls at the new connection.
+    if let Some(bridge) = mcp_slot.read().await.as_ref() {
+        bridge
+            .set_context(
+                input.connection_id.clone(),
+                input.schema.clone(),
+                Some(input.request_id.clone()),
+                Some(cancel.clone()),
+            )
+            .await;
+    }
+
+    // A turn sent from another connection's chat brings that chat's history:
+    // swap it in now that this turn owns the session (see `history`).
+    if let Some(history) = input.history.take() {
+        let mut guard = slot.write().await;
+        let Some(session) = guard.as_mut() else {
+            return Err(AiError::NoActiveSession);
+        };
+        session.messages = restored_messages(history);
+        session.last_context_key = None;
+        session.current_context = None;
+        session.context_built_at = None;
+        session.recent_activity = None;
+    }
+
+    // Can the model use the DB tools this turn? Natively in the tool loop, or —
+    // for the wrapped CLIs — over the MCP bridge. The prompt and the context
+    // only teach tools when it can.
+    let (provider_kind, supports_tools) = {
+        let guard = slot.read().await;
+        let session = guard.as_ref().ok_or(AiError::NoActiveSession)?;
+        (session.provider_kind, session.provider.supports_tools())
+    };
+    let tool_mode = supports_tools && input.connection_id.is_some();
+    let tools_available = tool_mode
+        || (input.connection_id.is_some()
+            && provider_kind.is_cli()
+            && mcp_slot.read().await.is_some());
+
+    // Schema context is (re-)built whenever the fingerprint of what the user
+    // is looking at changes: connection, its current database (Postgres
+    // switches databases under the same connection id), schema, focused tab,
+    // tool access, and a counter the AI's own DDL bumps. Staying on the same
+    // tab skips the rebuild (the hot path) until the context is a few minutes
+    // old.
+    let active_database = match input.connection_id.as_deref() {
+        Some(cid) => db_registry.profile(cid).await.ok().and_then(|p| p.database),
+        None => None,
+    };
     let new_context_key: Option<String> = input.connection_id.as_deref().map(|cid| {
         let schema_part = input.schema.as_deref().unwrap_or("");
         let focus_part = input
@@ -260,46 +341,61 @@ async fn ai_chat_send_inner(
             .as_ref()
             .map(FocusHint::cache_key)
             .unwrap_or_default();
-        format!("{cid}|{schema_part}|{focus_part}")
+        format!(
+            "{cid}|{}|{schema_part}|{focus_part}|{tools_available}|{}",
+            active_database.as_deref().unwrap_or(""),
+            crate::ai::context::schema_epoch()
+        )
     });
-    let needs_context = {
+    let rebuild = {
         let guard = slot.read().await;
-        let Some(session) = guard.as_ref() else {
-            return Err(AiError::NoActiveSession);
-        };
+        let session = guard.as_ref().ok_or(AiError::NoActiveSession)?;
+        let stale = session
+            .context_built_at
+            .map_or(true, |t| t.elapsed() > crate::ai::context::SCHEMA_CONTEXT_TTL);
         match (&session.last_context_key, &new_context_key) {
-            (_, None) => false,           // no focus → nothing to inject
-            (None, Some(_)) => true,      // first turn with a focus
-            (Some(a), Some(b)) => a != b, // user switched tabs
+            (_, None) => false,
+            (None, Some(_)) => true,
+            (Some(a), Some(b)) => a != b || stale,
         }
     };
 
-    let system_context: Option<String> = if needs_context {
-        match input.connection_id.as_deref() {
-            Some(conn_id) => {
-                match crate::ai::context::build(
-                    db_registry.inner(),
-                    conn_id,
-                    input.schema.as_deref(),
-                    input.focus.as_ref(),
-                )
-                .await
-                {
-                    Ok(text) => Some(text),
-                    Err(e) => {
-                        // Don't fail the chat over a context-build hiccup — the
-                        // user can still have a conversation, just without
-                        // auto-injected schema awareness.
-                        crate::log_line!("ai_context", "failed to build schema context: {e}");
-                        None
-                    }
-                }
+    // `Some(new)` when the stored context changes this turn.
+    let mut context_update: Option<Option<String>> = None;
+    if new_context_key.is_none() {
+        // No connection: don't keep answering against the last one's schema.
+        context_update = Some(None);
+    } else if rebuild {
+        let conn_id = input.connection_id.as_deref().expect("key implies a connection");
+        let build = crate::ai::context::build(
+            db_registry.inner(),
+            conn_id,
+            input.schema.as_deref(),
+            input.focus.as_ref(),
+            tools_available,
+        );
+        let outcome = match cancel.run(tokio::time::timeout(CONTEXT_BUILD_TIMEOUT, build)).await {
+            Some(r) => r,
+            None => {
+                emit_done(&app, input.request_id, String::new(), "canceled");
+                return Ok(());
             }
-            None => None,
-        }
-    } else {
-        None
-    };
+        };
+        // Don't fail the chat over a context-build hiccup — the user can still
+        // have a conversation, just without auto-injected schema awareness. But
+        // drop the old context: it described whatever was focused before.
+        context_update = Some(match outcome {
+            Ok(Ok(text)) => Some(text),
+            Ok(Err(e)) => {
+                crate::log_line!("ai_context", "failed to build schema context: {e}");
+                None
+            }
+            Err(_) => {
+                crate::log_line!("ai_context", "schema context timed out; continuing without it");
+                None
+            }
+        });
+    }
 
     let user_turn = assemble_user_turn(&input);
 
@@ -307,21 +403,30 @@ async fn ai_chat_send_inner(
     // are logged from the paths that produce them below.
     crate::log_chat!("user", "{}", user_turn);
 
-    // Append system (if needed) + user turn. Snapshot provider for the
-    // tool-path decision.
-    let (provider, tool_mode) = {
+    // Store the context (if it changed) + append the user turn.
+    let provider = {
         let mut guard = slot.write().await;
         let Some(session) = guard.as_mut() else {
             return Err(AiError::NoActiveSession);
         };
-        if let Some(ctx) = system_context {
-            // Store (don't push into history). `with_system_prompt` re-prepends
-            // this every turn so the schema sits right next to the system prompt
-            // + the latest user turn — weak local models ignored it when it was
-            // buried thousands of tokens back in history.
-            crate::log_chat!("system", "{}", ctx.chars().take(400).collect::<String>());
-            session.current_context = Some(ctx);
-            session.last_context_key = new_context_key.clone();
+        match context_update.clone() {
+            Some(Some(ctx)) => {
+                // Store (don't push into history). `with_system_prompt` re-prepends
+                // this every turn so the schema sits right next to the system prompt
+                // + the latest user turn — weak local models ignored it when it was
+                // buried thousands of tokens back in history.
+                crate::log_chat!("system", "{}", ctx.chars().take(400).collect::<String>());
+                session.current_context = Some(ctx);
+                session.last_context_key = new_context_key.clone();
+                session.context_built_at = Some(std::time::Instant::now());
+            }
+            // Cleared, or the build failed (retried next turn).
+            Some(None) => {
+                session.current_context = None;
+                session.last_context_key = None;
+                session.context_built_at = None;
+            }
+            None => {}
         }
         // Refresh the recent-activity block every turn (it grows as queries run).
         // Cleared when the frontend sends nothing so a stale log can't linger.
@@ -333,8 +438,7 @@ async fn ai_chat_send_inner(
         session
             .messages
             .push(ChatMessage::text(ChatRole::User, user_turn));
-        let tool_mode = session.provider.supports_tools() && input.connection_id.is_some();
-        (session.provider.clone(), tool_mode)
+        session.provider.clone()
     };
 
     // Diagnostic: makes "the model has no DB context" debuggable. If
@@ -343,11 +447,17 @@ async fn ai_chat_send_inner(
     // focused connection means the provider/model reported no tool support.
     crate::log_chat!(
         "ctx",
-        "connection={} schema={} context_injected={} tool_mode={} effort={:?} max_tokens={:?} max_iter={:?} max_repeat={:?}",
+        "connection={} database={} schema={} context={} tool_mode={} tools={} effort={:?} max_tokens={:?} max_iter={:?} max_repeat={:?}",
         input.connection_id.as_deref().unwrap_or("<none>"),
+        active_database.as_deref().unwrap_or("<none>"),
         input.schema.as_deref().unwrap_or("<none>"),
-        needs_context,
+        match &context_update {
+            Some(Some(_)) => "rebuilt",
+            Some(None) => "none",
+            None => "kept",
+        },
         tool_mode,
+        tools_available,
         input.reasoning_effort,
         input.max_tokens,
         input.max_iterations,
@@ -357,14 +467,20 @@ async fn ai_chat_send_inner(
     // Effort-driven per-turn knobs, shared by both paths. `max_tokens` is
     // clamped to a sane range; `reasoning_effort` is passed through verbatim
     // (providers/models that don't support it ignore it).
-    let max_tokens = input
+    let mut max_tokens = input
         .max_tokens
         .filter(|n| (256..=200_000).contains(n))
         .unwrap_or(DEFAULT_AI_MAX_TOKENS);
+    if provider_kind == crate::ai::ProviderKind::LlamaLocal {
+        // llama-server runs an 8k-token window shared by prompt and reply;
+        // asking for 16k of output can't be honoured.
+        max_tokens = max_tokens.min(LLAMA_MAX_REPLY_TOKENS);
+    }
     let turn_opts = crate::ai::TurnOptions {
         max_tokens: Some(max_tokens),
         reasoning_effort: input.reasoning_effort,
         stream: input.stream,
+        sql_fence_fallback: matches!(input.kind, ChatKind::Chat),
     };
 
     if tool_mode {
@@ -393,6 +509,7 @@ async fn ai_chat_send_inner(
             max_iterations,
             max_repeat_calls,
             turn_opts,
+            cancel,
         )
         .await;
     }
@@ -406,10 +523,11 @@ async fn ai_chat_send_inner(
         };
         with_system_prompt(
             &session.messages,
-            session.provider_kind.as_str(),
+            session.provider_kind,
             &session.model,
             session.current_context.as_deref(),
             session.recent_activity.as_deref(),
+            tools_available,
         )
     };
 
@@ -422,11 +540,27 @@ async fn ai_chat_send_inner(
         reasoning_effort: input.reasoning_effort,
     };
 
-    let mut stream = provider.complete(req).await?;
+    let mut stream = tokio::select! {
+        s = provider.complete(req) => s?,
+        _ = cancel.cancelled() => {
+            emit_done(&app, input.request_id, String::new(), "canceled");
+            return Ok(());
+        }
+    };
     let mut full = String::new();
     let mut finish: Option<crate::ai::FinishReason> = None;
 
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            c = stream.next() => c,
+            _ = cancel.cancelled() => {
+                // Dropping the stream closes the connection (or the CLI's
+                // pipe), which stops generation.
+                finish = Some(crate::ai::FinishReason::Canceled);
+                break;
+            }
+        };
+        let Some(chunk) = chunk else { break };
         full.push_str(&chunk.delta);
         if chunk.finish_reason.is_some() {
             finish = chunk.finish_reason;
@@ -446,12 +580,18 @@ async fn ai_chat_send_inner(
         }
     }
 
+    drop(stream);
     crate::log_chat!("assistant", "{}", full);
 
     // Commit assistant turn back onto the session — but only if it's still
     // the same session that started the request. If the user ended the chat
     // mid-stream, the session slot is already empty; drop the reply silently.
-    {
+    // An empty reply isn't committed: Anthropic and Gemini reject empty
+    // non-final messages, so one empty turn failed every later request. A
+    // failed reply isn't either — it ends with the error notice, which the
+    // model shouldn't read back as something it said.
+    let failed = matches!(finish, Some(crate::ai::FinishReason::Error));
+    if !failed && !full.trim().is_empty() {
         let mut guard = slot.write().await;
         if let Some(session) = guard.as_mut() {
             session
@@ -460,26 +600,38 @@ async fn ai_chat_send_inner(
         }
     }
 
-    let _ = app.emit(
-        "ai://chat/done",
-        DoneEvent {
-            request_id: input.request_id,
-            content: full,
-            finish_reason: finish.map(|f| match f {
-                crate::ai::FinishReason::Stop => "stop",
-                crate::ai::FinishReason::Length => "length",
-                crate::ai::FinishReason::Canceled => "canceled",
-                crate::ai::FinishReason::Error => "error",
-            }),
-        },
-    );
+    let reason = match finish {
+        Some(crate::ai::FinishReason::Length) => "length",
+        Some(crate::ai::FinishReason::Canceled) => "canceled",
+        Some(crate::ai::FinishReason::Error) => "error",
+        Some(crate::ai::FinishReason::Stop) | None => "stop",
+    };
+    emit_done(&app, input.request_id, full, reason);
     Ok(())
 }
 
+/// Emit the terminal `ai://chat/done` event for a turn.
+pub(super) fn emit_done(app: &tauri::AppHandle, request_id: String, content: String, finish_reason: &'static str) {
+    let _ = app.emit(
+        "ai://chat/done",
+        DoneEvent { request_id, content, finish_reason: Some(finish_reason) },
+    );
+}
+
 #[tauri::command]
-pub async fn ai_chat_stop(request_id: String, slot: State<'_, SessionSlot>) -> Result<(), AiError> {
-    let provider = session::require_provider(&slot).await?;
-    provider.cancel(&request_id).await;
+pub async fn ai_chat_stop(
+    request_id: String,
+    slot: State<'_, SessionSlot>,
+    cancels: State<'_, Arc<CancelRegistry>>,
+) -> Result<(), AiError> {
+    // Ends the turn's stream, tool loop and approval waits, and releases the
+    // send lock so the next message isn't stuck behind it.
+    cancels.cancel(&request_id);
+    // Provider-level cancel too (kills a CLI child process). No session left
+    // is fine — there is nothing to stop.
+    if let Ok(provider) = session::require_provider(&slot).await {
+        provider.cancel(&request_id).await;
+    }
     Ok(())
 }
 
@@ -508,18 +660,39 @@ pub struct RestoreMessage {
 pub async fn ai_restore_messages(
     messages: Vec<RestoreMessage>,
     slot: State<'_, SessionSlot>,
-) -> Result<(), AiError> {
+) -> Result<bool, AiError> {
+    // Returns whether the transcript was replaced: `false` while a turn is
+    // still running — the UI's next send then carries this history instead.
+    let Some(_turn) = session::settle_turn(&slot).await? else {
+        return Ok(false);
+    };
     let mut guard = slot.write().await;
     let Some(session) = guard.as_mut() else {
         return Err(AiError::NoActiveSession);
     };
-    let restored: Vec<ChatMessage> = messages
+    let restored = restored_messages(messages);
+    crate::log_line!("ai", "restored {} messages into session", restored.len());
+    session.messages = restored;
+    // Force a fresh schema-context injection on the next turn (the restored
+    // transcript has no context fingerprint).
+    session.last_context_key = None;
+    session.current_context = None;
+    session.context_built_at = None;
+    session.recent_activity = None;
+    Ok(true)
+}
+
+/// The user/assistant text turns of a saved or client-side transcript, as
+/// session messages. Tool/system turns are dropped (see
+/// [`ai_restore_messages`]), and so are empty ones — Anthropic and Gemini
+/// reject an empty message.
+fn restored_messages(messages: Vec<RestoreMessage>) -> Vec<ChatMessage> {
+    messages
         .into_iter()
         .filter_map(|m| {
             let role = match m.role.as_str() {
                 "user" => ChatRole::User,
                 "assistant" => ChatRole::Assistant,
-                // Skip tool/system turns — see the doc comment.
                 _ => return None,
             };
             if m.content.trim().is_empty() {
@@ -527,15 +700,7 @@ pub async fn ai_restore_messages(
             }
             Some(ChatMessage::text(role, m.content))
         })
-        .collect();
-    crate::log_line!("ai", "restored {} messages into session", restored.len());
-    session.messages = restored;
-    // Force a fresh schema-context injection on the next turn (the restored
-    // transcript has no context fingerprint).
-    session.last_context_key = None;
-    session.current_context = None;
-    session.recent_activity = None;
-    Ok(())
+        .collect()
 }
 
 #[derive(Serialize, Clone)]

@@ -1,5 +1,6 @@
 //! Shared subprocess engine for the CLI-backed AI providers (Claude Code,
-//! Codex, Gemini CLI, opencode).
+//! Codex, Gemini CLI, opencode, Kilo, Antigravity). A CLI that only writes to
+//! a console runs under a pseudo console on Windows (see `conpty`).
 //!
 //! Each concrete provider supplies a [`CliSpec`] describing how to find its
 //! binary, build the headless argv, and parse one line of its JSON/text output
@@ -31,6 +32,16 @@ use super::{
 
 /// Hard caps so a wedged CLI can't hang the chat forever.
 const MAX_WALL_CLOCK: Duration = Duration::from_secs(600);
+
+/// See [`CliSpec::stalls_on_stderr_errors`].
+const STALL_AFTER: Duration = Duration::from_secs(90);
+
+/// Stderr kept for error reports: the most recent part, since the reason a run
+/// failed is usually logged last.
+const STDERR_KEEP: usize = 6_000;
+/// Per stderr line. The end is kept: some CLIs log whole request bodies and
+/// put the provider's error message at the end of the line.
+const STDERR_LINE_KEEP: usize = 1_500;
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 /// What one parsed stdout line yields. A line may carry text, signal the end,
@@ -72,6 +83,28 @@ pub trait CliSpec: Send + Sync + 'static {
     }
     /// Parse one line of stdout into an event.
     fn parse_line(&self, line: &str) -> LineEvent;
+    /// Whether stdout is a single JSON document that may be pretty-printed
+    /// across lines. The engine then hands `parse_line` the document gathered
+    /// so far (from its first `{` line) instead of each line on its own —
+    /// line-by-line, a pretty-printed reply never parsed and the run ended as
+    /// "[no output from CLI]". Defaults to false (one event per line).
+    fn whole_output_json(&self) -> bool {
+        false
+    }
+    /// Whether the CLI writes its answer to a console only, never to a
+    /// redirected stdout (`agy` on Windows). It then runs under a pseudo
+    /// console. Windows only; ignored elsewhere.
+    fn needs_console(&self) -> bool {
+        false
+    }
+    /// Whether a run that has printed nothing on stdout for
+    /// [`STALL_AFTER`] while logging errors on stderr is stuck rather than
+    /// slow. opencode/kilo retry a failing provider forever without a word on
+    /// stdout — the chat sat on "thinking" for ~9 minutes before failing with
+    /// no reason. Only for CLIs that print events as soon as the model starts.
+    fn stalls_on_stderr_errors(&self) -> bool {
+        false
+    }
     /// Whether a non-zero process exit should be ignored when the CLI already
     /// produced output. Some CLIs (e.g. `agy`) exit non-zero even on a
     /// successful run, which would otherwise append a spurious "[CLI exited with
@@ -224,6 +257,14 @@ fn cmd_quote(s: &str) -> String {
 /// inherited PATH. Lets a Finder-launched app (minimal PATH) run node-based CLIs
 /// that shell out to `node`/sibling tools. Deduped, order-preserving.
 fn augment_path(cmd: &mut Command, bin: &std::path::Path) {
+    if let Some(path) = augmented_path(bin) {
+        cmd.env("PATH", path);
+    }
+}
+
+/// `PATH` for a spawned CLI: its own dir, the runtime dirs, then the
+/// inherited entries (deduped, first wins).
+pub(crate) fn augmented_path(bin: &std::path::Path) -> Option<std::ffi::OsString> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(parent) = bin.parent() {
         dirs.push(parent.to_path_buf());
@@ -235,9 +276,86 @@ fn augment_path(cmd: &mut Command, bin: &std::path::Path) {
     // Dedup while preserving first-seen order.
     let mut seen = std::collections::HashSet::new();
     dirs.retain(|p| seen.insert(p.clone()));
-    if let Ok(joined) = std::env::join_paths(dirs) {
-        cmd.env("PATH", joined);
+    std::env::join_paths(dirs).ok()
+}
+
+/// Where a running CLI's output lines come from.
+enum LineSource {
+    Pipe(tokio::io::Lines<BufReader<tokio::process::ChildStdout>>),
+    #[cfg(windows)]
+    Console(tokio::sync::mpsc::UnboundedReceiver<String>),
+}
+
+impl LineSource {
+    /// Next line; cancel-safe (the stream polls it under a timeout).
+    async fn next_line(&mut self) -> std::io::Result<Option<String>> {
+        match self {
+            LineSource::Pipe(lines) => lines.next_line().await,
+            #[cfg(windows)]
+            LineSource::Console(rx) => Ok(rx.recv().await),
+        }
     }
+}
+
+/// A started CLI process.
+enum Running {
+    Pipe(Child),
+    #[cfg(windows)]
+    Console(crate::ai::conpty::PtyProcess),
+}
+
+impl Running {
+    fn start_kill(&mut self) {
+        match self {
+            Running::Pipe(child) => {
+                let _ = child.start_kill();
+            }
+            #[cfg(windows)]
+            Running::Console(p) => p.kill(),
+        }
+    }
+
+    /// Wait for exit; whether it succeeded.
+    async fn wait_success(&mut self) -> bool {
+        match self {
+            Running::Pipe(child) => child.wait().await.map(|s| s.success()).unwrap_or(false),
+            #[cfg(windows)]
+            Running::Console(p) => p.wait().await == Some(0),
+        }
+    }
+}
+
+/// A short reason from a CLI's stderr: the provider's own message when one is
+/// embedded in the last error line (`"message":"…"`), else that line clipped.
+fn stderr_reason(stderr: &str) -> Option<String> {
+    let line = stderr
+        .lines()
+        .rev()
+        .find(|l| l.to_ascii_lowercase().contains("error"))
+        .or_else(|| stderr.lines().rev().find(|l| !l.trim().is_empty()))?;
+    // The message may sit in JSON embedded as a string (escaped quotes) or in
+    // plain JSON; the last occurrence is the innermost / most recent.
+    for pat in ["\"message\":\"", "\\\"message\\\":\\\""] {
+        if let Some(start) = line.rfind(pat) {
+            let rest = &line[start + pat.len()..];
+            let end = rest.find(['"', '\\']).unwrap_or(rest.len());
+            let msg = rest[..end].trim();
+            if !msg.is_empty() {
+                return Some(msg.to_string());
+            }
+        }
+    }
+    let line = line.trim();
+    let clipped = if line.len() > 300 {
+        let mut start = line.len() - 300;
+        while !line.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("…{}", &line[start..])
+    } else {
+        line.to_string()
+    };
+    Some(clipped)
 }
 
 /// A generic CLI provider parameterized by a [`CliSpec`].
@@ -247,7 +365,7 @@ pub struct CliProvider {
     model: String,
     /// Path to a generated MCP config file exposing host DB tools (when used).
     mcp_config_path: Option<String>,
-    inflight: Arc<Mutex<HashMap<String, Child>>>,
+    inflight: Arc<Mutex<HashMap<String, Running>>>,
 }
 
 impl CliProvider {
@@ -290,6 +408,77 @@ fn flatten_prompt(messages: &[ChatMessage]) -> String {
     }
     out.push_str("Assistant:\n");
     out
+}
+
+impl CliProvider {
+    /// Start the CLI: piped stdio normally, under a pseudo console for a CLI
+    /// that only writes to a console (see [`CliSpec::needs_console`]).
+    async fn start(
+        &self,
+        args: &[String],
+        stdin_prompt: Option<&str>,
+    ) -> Result<(LineSource, Running, Option<tokio::process::ChildStderr>), AiError> {
+        let spawn_err = |e: std::io::Error| AiError::Other(format!("failed to spawn {}: {e}", self.spec.binary_name()));
+        // Run from the user's home rather than inheriting the app's cwd. A
+        // packaged .app launched from Finder has cwd `/`, which confuses some
+        // CLIs (e.g. codex's git-repo trust check). Home is always present and
+        // writable; we don't rely on the CLI's working directory for anything.
+        let home = crate::ai::cli_specs::home();
+
+        #[cfg(windows)]
+        if self.spec.needs_console() {
+            let mut env: Vec<(std::ffi::OsString, std::ffi::OsString)> = self
+                .spec
+                .extra_env()
+                .into_iter()
+                .map(|(k, v)| (k.into(), v.into()))
+                .collect();
+            if let Some(path) = augmented_path(&self.bin) {
+                env.push(("PATH".into(), path));
+            }
+            let spawned = crate::ai::conpty::spawn(&self.bin, args, home.as_deref(), &env).map_err(spawn_err)?;
+            return Ok((LineSource::Console(spawned.lines), Running::Console(spawned.process), None));
+        }
+
+        let mut cmd = build_command(&self.bin, args);
+        cmd.stdin(if stdin_prompt.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(home) = home {
+            cmd.current_dir(home);
+        }
+        // Augment PATH with node-manager / package-manager dirs. A Finder-
+        // launched app inherits a minimal PATH, so node-based CLIs like `claude`
+        // (`#!/usr/bin/env node`) fail with "env: node: No such file or
+        // directory" even when the CLI binary itself was located. Prepend the
+        // common runtime locations (nvm/volta/fnm/homebrew/...) so `node` and any
+        // sibling tools resolve.
+        augment_path(&mut cmd, &self.bin);
+        for (k, v) in self.spec.extra_env() {
+            cmd.env(k, v);
+        }
+
+        let mut child = cmd.spawn().map_err(spawn_err)?;
+
+        // Feed the prompt over stdin when the CLI wants it that way.
+        if let Some(prompt) = stdin_prompt {
+            if let Some(mut stdin) = child.stdin.take() {
+                use tokio::io::AsyncWriteExt;
+                let _ = stdin.write_all(prompt.as_bytes()).await;
+                let _ = stdin.shutdown().await;
+            }
+        }
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| AiError::Other("child stdout unavailable".into()))?;
+        // Capture stderr so a failed run can surface the CLI's own error text
+        // (e.g. "run `claude login`") instead of a silent empty stream.
+        let stderr = child.stderr.take();
+        Ok((LineSource::Pipe(BufReader::new(stdout).lines()), Running::Pipe(child), stderr))
+    }
 }
 
 #[async_trait]
@@ -364,55 +553,14 @@ impl AiProvider for CliProvider {
             flag_preview,
         );
 
-        let mut cmd = build_command(&self.bin, &args);
-        cmd.stdin(if via_stdin { Stdio::piped() } else { Stdio::null() })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        // Run from the user's home rather than inheriting the app's cwd. A
-        // packaged .app launched from Finder has cwd `/`, which confuses some
-        // CLIs (e.g. codex's git-repo trust check). Home is always present and
-        // writable; we don't rely on the CLI's working directory for anything.
-        if let Some(home) = crate::ai::cli_specs::home() {
-            cmd.current_dir(home);
-        }
-        // Augment PATH with node-manager / package-manager dirs. A Finder-
-        // launched app inherits a minimal PATH, so node-based CLIs like `claude`
-        // (`#!/usr/bin/env node`) fail with "env: node: No such file or
-        // directory" even when the CLI binary itself was located. Prepend the
-        // common runtime locations (nvm/volta/fnm/homebrew/...) so `node` and any
-        // sibling tools resolve.
-        augment_path(&mut cmd, &self.bin);
-        for (k, v) in self.spec.extra_env() {
-            cmd.env(k, v);
-        }
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| AiError::Other(format!("failed to spawn {}: {e}", self.spec.binary_name())))?;
-
-        // Feed the prompt over stdin when the CLI wants it that way.
-        if via_stdin {
-            if let Some(mut stdin) = child.stdin.take() {
-                use tokio::io::AsyncWriteExt;
-                let _ = stdin.write_all(prompt.as_bytes()).await;
-                let _ = stdin.shutdown().await;
-            }
-        }
-
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| AiError::Other("child stdout unavailable".into()))?;
-        // Capture stderr so a failed run can surface the CLI's own error text
-        // (e.g. "run `claude login`") instead of a silent empty stream.
-        let stderr = child.stderr.take();
+        let (reader, running, stderr) =
+            self.start(&args, via_stdin.then_some(prompt.as_str())).await?;
 
         // Register for cancel. The inflight map is an Arc shared with the
         // stream, so cancel() (on the provider) and the stream's own cleanup
         // both reach the same child handle.
         let request_id = req.request_id.clone();
-        self.inflight.lock().await.insert(request_id.clone(), child);
+        self.inflight.lock().await.insert(request_id.clone(), running);
 
         let spec = self.spec.clone();
         let inflight_key = request_id.clone();
@@ -427,10 +575,23 @@ impl AiProvider for CliProvider {
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(l)) = lines.next_line().await {
+                    let mut kept = l.as_str();
+                    if kept.len() > STDERR_LINE_KEEP {
+                        let mut start = kept.len() - STDERR_LINE_KEEP;
+                        while !kept.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        kept = &kept[start..];
+                    }
                     let mut g = buf.lock().await;
-                    if g.len() < 4096 {
-                        g.push_str(&l);
-                        g.push('\n');
+                    g.push_str(kept);
+                    g.push('\n');
+                    if g.len() > STDERR_KEEP {
+                        let mut cut = g.len() - STDERR_KEEP;
+                        while !g.is_char_boundary(cut) {
+                            cut += 1;
+                        }
+                        g.drain(..cut);
                     }
                 }
             })
@@ -438,7 +599,8 @@ impl AiProvider for CliProvider {
 
         let out = async_stream::stream! {
             let started = std::time::Instant::now();
-            let mut reader = BufReader::new(stdout).lines();
+            let mut reader = reader;
+            let mut last_line_at = std::time::Instant::now();
             let mut bytes_seen = 0usize;
             let mut finished = false;
             let mut emitted_any = false;
@@ -450,6 +612,8 @@ impl AiProvider for CliProvider {
             // "[CLI timed out]". We only idle-finish AFTER real output, so a slow
             // first token (model still thinking / tool round-trip) never trips it.
             let mut idle_ticks = 0u32;
+            // The JSON document so far, for `whole_output_json` CLIs.
+            let mut doc_buf = String::new();
             const IDLE_TICK_SECS: u64 = 5;
             const IDLE_FINISH_AFTER_TICKS: u32 = 6; // 30s of silence post-output
 
@@ -466,7 +630,31 @@ impl AiProvider for CliProvider {
                         // Idle tick. If we've already streamed output and the
                         // process has gone quiet for a while, treat the run as
                         // complete rather than waiting for EOF/wall-clock.
-                        if emitted_any {
+                        //
+                        // Silence while one of our MCP tools runs — or waits for
+                        // the user's approval, which can take minutes — is the
+                        // agent working, not finished: cutting the run there
+                        // threw away the final answer and left the approval card
+                        // live with nothing waiting on it.
+                        if crate::ai::mcp_bridge::tool_activity_within(Duration::from_secs(IDLE_TICK_SECS)) {
+                            idle_ticks = 0;
+                            last_line_at = std::time::Instant::now();
+                        } else if !emitted_any
+                            && spec.stalls_on_stderr_errors()
+                            && last_line_at.elapsed() >= STALL_AFTER
+                        {
+                            let reason = stderr_reason(&stderr_buf.lock().await);
+                            if let Some(reason) = reason {
+                                let msg = format!(
+                                    "{} has produced no reply for {}s and keeps logging errors, so it was stopped. Last error: {reason}",
+                                    spec.binary_name(),
+                                    STALL_AFTER.as_secs()
+                                );
+                                yield TokenChunk { request_id: request_id.clone(), delta: msg, finish_reason: Some(FinishReason::Error) };
+                                finished = true;
+                                break;
+                            }
+                        } else if emitted_any {
                             idle_ticks += 1;
                             if idle_ticks >= IDLE_FINISH_AFTER_TICKS {
                                 yield TokenChunk { request_id: request_id.clone(), delta: String::new(), finish_reason: Some(FinishReason::Stop) };
@@ -481,13 +669,28 @@ impl AiProvider for CliProvider {
                     Ok(Err(_)) => break,   // read error
                 };
                 idle_ticks = 0; // any line resets the idle counter
+                last_line_at = std::time::Instant::now();
                 bytes_seen += line.len() + 1;
                 if bytes_seen > MAX_OUTPUT_BYTES {
                     yield TokenChunk { request_id: request_id.clone(), delta: "\n[CLI output too large — truncated]".into(), finish_reason: Some(FinishReason::Error) };
                     finished = true;
                     break;
                 }
-                match spec.parse_line(&line) {
+                let event = if !spec.whole_output_json() {
+                    spec.parse_line(&line)
+                } else if doc_buf.is_empty() && !line.trim_start().starts_with('{') {
+                    // Banner/warning text printed before the document.
+                    LineEvent::Ignore
+                } else {
+                    doc_buf.push_str(&line);
+                    doc_buf.push('\n');
+                    if line.trim_end().ends_with('}') {
+                        spec.parse_line(&doc_buf)
+                    } else {
+                        LineEvent::Ignore
+                    }
+                };
+                match event {
                     LineEvent::Delta(text) => {
                         if !text.is_empty() {
                             emitted_any = true;
@@ -507,9 +710,13 @@ impl AiProvider for CliProvider {
                         break;
                     }
                     LineEvent::Failed(msg) => {
-                        let detail = {
-                            let g = stderr_buf.lock().await;
-                            if g.trim().is_empty() { msg } else { format!("{msg}\n{}", g.trim()) }
+                        let detail = match stderr_reason(&stderr_buf.lock().await) {
+                            Some(reason)
+                                if msg.len() < 40 && !msg.contains(&reason) && !reason.contains(&msg) =>
+                            {
+                                format!("{msg}\n{reason}")
+                            }
+                            _ => msg,
                         };
                         yield TokenChunk { request_id: request_id.clone(), delta: detail, finish_reason: Some(FinishReason::Error) };
                         finished = true;
@@ -523,11 +730,8 @@ impl AiProvider for CliProvider {
             // stderr reader so its buffer is complete before we inspect it.
             let exit_ok = {
                 if let Some(mut child) = inflight.lock().await.remove(&inflight_key) {
-                    let _ = child.start_kill();
-                    match child.wait().await {
-                        Ok(status) => status.success(),
-                        Err(_) => false,
-                    }
+                    child.start_kill();
+                    child.wait_success().await
                 } else {
                     // Already reaped by cancel() — treat as a clean stop.
                     true
@@ -536,7 +740,7 @@ impl AiProvider for CliProvider {
             if let Some(t) = stderr_task {
                 let _ = t.await;
             }
-            let stderr_text = { stderr_buf.lock().await.trim().to_string() };
+            let stderr_text = stderr_reason(&stderr_buf.lock().await).unwrap_or_default();
 
             // Stream ended without an explicit Done/Failed/Stop — decide based on
             // exit status, so a non-zero exit (even AFTER partial output) is
@@ -578,8 +782,8 @@ impl AiProvider for CliProvider {
 
     async fn cancel(&self, request_id: &str) {
         if let Some(mut child) = self.inflight.lock().await.remove(request_id) {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            child.start_kill();
+            let _ = child.wait_success().await;
         }
     }
 
@@ -587,7 +791,7 @@ impl AiProvider for CliProvider {
         // Kill any still-running children.
         let mut map = self.inflight.lock().await;
         for (_, mut child) in map.drain() {
-            let _ = child.start_kill();
+            child.start_kill();
         }
     }
 }

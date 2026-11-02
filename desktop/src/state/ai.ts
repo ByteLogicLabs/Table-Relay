@@ -8,7 +8,10 @@ import { recentQueryLog } from './query-log-store';
  *  Newest last; statements truncated; errors carry their message. Returns
  *  undefined when there's nothing worth sending. */
 function recentQueryLogForAi(connectionId: string): string | undefined {
-  const entries = recentQueryLog(connectionId, 8);
+  // Only what the USER ran. The AI's own queries are already in the
+  // transcript as tool results; listing them again here read as "the user just
+  // ran this", so the model re-diagnosed its own work.
+  const entries = recentQueryLog(connectionId, 50).filter(e => e.source !== 'ai').slice(-8);
   if (entries.length === 0) return undefined;
   const lines = entries.map((e) => {
     const sql = e.statement.replace(/\s+/g, ' ').trim();
@@ -149,70 +152,173 @@ function mutate(fn: (s: AiState) => AiState) {
 // resetting it — only a genuinely dead turn (dropped event, wedged subprocess)
 // trips it. 5 min gives slow providers + big tool batches ample headroom.
 const WATCHDOG_IDLE_MS = 300_000;
-let watchdogTimer: ReturnType<typeof setTimeout> | null = null;
-let watchdogKey: string | null = null;
-let watchdogRid: string | null = null;
+// One timer per pending turn. Each connection bucket can have a turn pending
+// at once; a single shared timer only ever watched the latest, leaving the
+// others with no safety net.
+const watchdogs = new Map<string, { key: string; timer: ReturnType<typeof setTimeout> }>();
 
-function disarmWatchdog() {
-  if (watchdogTimer) { clearTimeout(watchdogTimer); watchdogTimer = null; }
-  watchdogKey = null;
-  watchdogRid = null;
+function disarmWatchdog(rid: string) {
+  const w = watchdogs.get(rid);
+  if (w) clearTimeout(w.timer);
+  watchdogs.delete(rid);
+}
+
+function disarmAllWatchdogs() {
+  for (const w of watchdogs.values()) clearTimeout(w.timer);
+  watchdogs.clear();
 }
 
 /** (Re)arm the watchdog for a pending turn. Called when a send starts and
  *  bumped on every chunk so active streams stay alive. */
 function armWatchdog(key: string, rid: string) {
-  if (watchdogTimer) clearTimeout(watchdogTimer);
-  watchdogKey = key;
-  watchdogRid = rid;
-  watchdogTimer = setTimeout(() => onWatchdogFire(key, rid), WATCHDOG_IDLE_MS);
+  disarmWatchdog(rid);
+  watchdogs.set(rid, { key, timer: setTimeout(() => onWatchdogFire(key, rid), WATCHDOG_IDLE_MS) });
 }
 
-/** Bump the watchdog deadline for the active turn (on chunk / tool activity).
- *  Re-arms even from a disarmed state (e.g. after an approval pause) as long as
- *  `rid` is still the pending turn for some connection bucket — so resuming
- *  work after a long approval wait restores the safety net. */
+/** Bump the watchdog deadline for a turn (on chunk / tool activity). Re-arms
+ *  even from a disarmed state (e.g. after an approval pause) as long as `rid`
+ *  is still a pending turn — so resuming work after a long approval wait
+ *  restores the safety net. */
 function bumpWatchdog(rid: string) {
-  if (watchdogRid === rid && watchdogKey) {
-    armWatchdog(watchdogKey, rid);
-    return;
+  const key = pendingBucketOf(state, rid);
+  if (key !== null) armWatchdog(key, rid);
+}
+
+/** The bucket whose in-flight turn is `rid`, or null when no bucket is
+ *  waiting on it — it finished, or was stopped / cleared locally. Events for
+ *  such a turn are stale and must not touch the transcript: a late `done`
+ *  from a stopped turn used to clear the pending flag of the NEXT turn, and
+ *  its chunks kept appending to a bubble already marked stopped. */
+function pendingBucketOf(s: AiState, rid: string): string | null {
+  for (const [key, chat] of Object.entries(s.byConnection)) {
+    if (chat.pendingRequestId === rid) return key;
   }
-  // Disarmed (or tracking a different turn) — find the bucket whose pending
-  // turn is `rid` and (re)arm for it.
-  for (const [key, chat] of Object.entries(state.byConnection)) {
-    if (chat.pendingRequestId === rid) {
-      armWatchdog(key, rid);
-      return;
-    }
-  }
+  return null;
 }
 
 function onWatchdogFire(key: string, rid: string) {
-  watchdogTimer = null;
+  watchdogs.delete(rid);
   const chat = state.byConnection[key];
   // Only act if this exact turn is still the pending one — otherwise it already
   // completed/cancelled and the timer is stale.
   if (!chat || chat.pendingRequestId !== rid) return;
   flog('ai', 'recovered a stuck chat turn (no response received) — clearing pending state');
+  finalizeTurn(key, rid, 'error', '(no response — the request stalled and was cleared. Try again.)');
+  // Best-effort backend cancel so a wedged CLI subprocess gets killed.
+  void ai.chatStop(rid).catch(() => {});
+}
+
+/** Result shown on a tool card whose turn stopped before the call finished.
+ *  Same text the backend gives the model for it. */
+const STOPPED_TOOL_RESULT = JSON.stringify({ error: 'Stopped by the user before this call finished.' });
+
+/** End turn `rid` locally: its reply stops streaming, and its tool cards that
+ *  are still running or waiting for approval are resolved — nothing will
+ *  answer them any more. No-op unless `rid` is still `key`'s pending turn.
+ *  Returns the reply text shown so far. */
+// Streamed tokens are applied in batches. One state update — and so one
+// re-render of the whole transcript, markdown included — per token made fast
+// streams stutter and the window feel hung on long replies.
+const DELTA_FLUSH_MS = 33;
+const pendingDeltas = new Map<string, string>();
+let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+function flushDeltas() {
+  if (deltaFlushTimer !== null) { clearTimeout(deltaFlushTimer); deltaFlushTimer = null; }
+  if (pendingDeltas.size === 0) return;
+  const batch = [...pendingDeltas];
+  pendingDeltas.clear();
+  mutate(s => {
+    let next = s;
+    for (const [rid, delta] of batch) {
+      const conn = pendingBucketOf(next, rid);
+      if (conn === null) continue; // stopped / finished meanwhile
+      const chat = chatOf(next, conn);
+      const idx = chat.messages.findIndex(m => m.id === rid);
+      if (idx < 0) continue;
+      const messages = [...chat.messages];
+      messages[idx] = { ...messages[idx], content: messages[idx].content + delta };
+      next = setChat(next, conn, { ...chat, messages });
+    }
+    return next;
+  });
+}
+
+function finalizeTurn(
+  key: string,
+  rid: string,
+  finishReason: NonNullable<ChatMessage['finishReason']>,
+  emptyFallback?: string,
+): string {
+  flushDeltas(); // include tokens still waiting for the next batch
+  let shown = '';
   mutate(s => {
     const c = chatOf(s, key);
     if (c.pendingRequestId !== rid) return s;
-    const idx = c.messages.findIndex(m => m.id === rid);
-    const next = idx >= 0 ? [...c.messages] : c.messages;
+    const next = [...c.messages];
+    const idx = next.findIndex(m => m.id === rid);
     if (idx >= 0) {
+      shown = next[idx].content;
       next[idx] = {
         ...next[idx],
         streaming: false,
-        finishReason: 'error',
-        content: next[idx].content
-          || '(no response — the request stalled and was cleared. Try again.)',
+        finishReason,
+        content: shown || emptyFallback || '',
       };
+      // A turn's tool cards sit directly above its reply.
+      for (let i = idx - 1; i >= 0 && next[i].role === 'tool'; i--) {
+        const t = next[i].tool;
+        if (t && t.result === undefined) {
+          next[i] = { ...next[i], tool: { ...t, pendingApproval: undefined, result: STOPPED_TOOL_RESULT } };
+        }
+      }
     }
     return setChat(s, key, { ...c, messages: next, pendingRequestId: undefined });
   });
-  // Best-effort backend cancel so a wedged CLI subprocess gets killed.
-  void ai.chatStop(rid).catch(() => {});
-  disarmWatchdog();
+  return shown;
+}
+
+/** Stop `key`'s in-flight turn, if any: finalise it here, keep the partial
+ *  reply in the saved conversation, and tell the backend to stop. Used by Stop
+ *  and before anything that replaces the transcript a running turn is still
+ *  writing into (new chat, loading a saved chat, ending the session). */
+async function stopPendingTurn(key: string): Promise<void> {
+  const chat = state.byConnection[key];
+  const rid = chat?.pendingRequestId;
+  if (!rid) return;
+  disarmWatchdog(rid);
+  // Finalise locally first. Otherwise, if the in-flight request was started
+  // in a previous page lifecycle (HMR / reload) its callbacks are dead and
+  // `done` will never arrive — the UI stays stuck on Stop forever.
+  const shown = finalizeTurn(key, rid, 'canceled');
+  // A turn stopped while queued never applied the history it carried; re-sync
+  // next time. (Only then: re-sending history replaces the backend transcript
+  // with text turns, which drops the model's earlier tool results.)
+  if (historyCarriers.delete(rid)) backendBucket = null;
+  if (chat.conversationId && shown.trim()) {
+    void ai.conversationSaveMessage(chat.conversationId, rid, 'assistant', shown).catch(() => {});
+  }
+  try { await ai.chatStop(rid); } catch { /* best-effort */ }
+}
+
+/** Which connection bucket the backend session's transcript currently
+ *  mirrors. The panel keeps a transcript per connection but the backend holds
+ *  one, so a turn sent from a different bucket carries that bucket's history
+ *  (see `sendMessage`). `null` = unknown (fresh session, reload). */
+let backendBucket: string | null = null;
+
+/** Requests that carried `history`. If one is stopped before the backend got
+ *  to apply it, the backend transcript is no longer known to match. */
+const historyCarriers = new Set<string>();
+
+/** The text turns of a bucket, as the backend restores them. Failed replies
+ *  are left out: their text is an error notice ("(failed: …)", "⚠ …"), which
+ *  the model must not read back as something it said. */
+function restorableOf(messages: ChatMessage[]): Array<{ role: string; content: string }> {
+  return messages
+    .filter(m => (m.role === 'user' || m.role === 'assistant') && m.content.trim() !== '')
+    .filter(m => m.finishReason !== 'error')
+    .map(m => ({ role: m.role, content: m.content }));
 }
 
 /** Read helper so components don't have to duplicate the null coalesce. */
@@ -316,22 +422,17 @@ async function wireListeners() {
   disposePriorWiring();
   unlisteners.push(await ai.onChunk(ev => {
     bumpWatchdog(ev.requestId); // activity → push the stuck-turn deadline out
-    mutate(s => {
-      const conn = findConnectionByMessageId(s, ev.requestId);
-      if (!conn) return s;
-      const chat = chatOf(s, conn);
-      const idx = chat.messages.findIndex(m => m.id === ev.requestId);
-      if (idx < 0) return s;
-      const next = [...chat.messages];
-      next[idx] = { ...next[idx], content: next[idx].content + ev.delta };
-      return setChat(s, conn, { ...chat, messages: next });
-    });
+    pendingDeltas.set(ev.requestId, (pendingDeltas.get(ev.requestId) ?? '') + ev.delta);
+    if (deltaFlushTimer === null) deltaFlushTimer = setTimeout(flushDeltas, DELTA_FLUSH_MS);
   }));
   unlisteners.push(await ai.onDone(ev => {
-    if (watchdogRid === ev.requestId) disarmWatchdog(); // turn completed cleanly
+    historyCarriers.delete(ev.requestId); // the turn ran, history applied
+    flushDeltas(); // the reply's last tokens land before it's finalised
+    disarmWatchdog(ev.requestId); // turn completed
     mutate(s => {
-      const conn = findConnectionByMessageId(s, ev.requestId);
-      if (!conn) return s;
+      // Already finalised here (Stop, watchdog, new chat): keep what's shown.
+      const conn = pendingBucketOf(s, ev.requestId);
+      if (conn === null) return s;
       const chat = chatOf(s, conn);
       const idx = chat.messages.findIndex(m => m.id === ev.requestId);
       if (idx < 0) return setChat(s, conn, { ...chat, pendingRequestId: undefined });
@@ -344,10 +445,13 @@ async function wireListeners() {
         // reconcile if any chunk events got dropped.
         content: ev.content || next[idx].content,
       };
-      // Save assistant message to persistent storage
+      // Save assistant message to persistent storage. A failed reply is
+      // tagged so reloading the chat doesn't hand its error notice back to
+      // the model as something it said.
       if (chat.conversationId && ev.content) {
         void ai.conversationSaveMessage(
           chat.conversationId, ev.requestId, 'assistant', ev.content,
+          ev.finishReason === 'error' ? { kind: 'error' } : undefined,
         ).catch(() => {});
       }
       return setChat(s, conn, { ...chat, messages: next, pendingRequestId: undefined });
@@ -365,9 +469,9 @@ async function wireListeners() {
     bumpWatchdog(ev.requestId);
     mutate(s => {
       // The tool call fires during the assistant reply — look up the
-      // owning connection via the reply's id.
-      const conn = findConnectionByMessageId(s, ev.requestId);
-      if (!conn) return s;
+      // owning connection via the reply's id (stale turns are ignored).
+      const conn = pendingBucketOf(s, ev.requestId);
+      if (conn === null) return s;
       const chat = chatOf(s, conn);
       // Skip if we already rendered this call — tool_call_started fires
       // once per tool, but React strict mode could double-subscribe.
@@ -431,15 +535,19 @@ async function wireListeners() {
     }
   }));
   unlisteners.push(await ai.onApprovalRequest(ev => {
+    // The card of a turn that was already stopped would never be answered —
+    // the backend gave up waiting when the turn stopped.
+    if (ev.requestId && pendingBucketOf(state, ev.requestId) === null) return;
     // A pending approval blocks on the USER, who may take far longer than the
     // idle window. Disarm the watchdog so it doesn't "clear" a turn that's
     // simply waiting for a click. It re-arms when the tool resolves
     // (onToolCallFinished bumps) or the next chunk arrives.
-    disarmWatchdog();
+    if (ev.requestId) disarmWatchdog(ev.requestId);
     mutate(s => {
       const conn = findConnectionByMessageId(s, ev.toolCallId);
       if (!conn) return s;
       const chat = chatOf(s, conn);
+      if (!ev.requestId && chat.pendingRequestId) disarmWatchdog(chat.pendingRequestId);
       const idx = chat.messages.findIndex(m => m.id === ev.toolCallId);
       if (idx < 0) return s;
       const next = [...chat.messages];
@@ -491,7 +599,10 @@ if (import.meta.hot) {
     }
     unlisteners = [];
     wiredPromise = null;
-    disarmWatchdog();
+    disarmAllWatchdogs();
+    if (deltaFlushTimer !== null) clearTimeout(deltaFlushTimer);
+    deltaFlushTimer = null;
+    pendingDeltas.clear();
   });
 }
 
@@ -548,6 +659,7 @@ export async function start(input: StartInput) {
       providerKind: status.providerKind,
       model: status.model,
     }));
+    backendBucket = null; // a new session starts with an empty transcript
     // If the focused connection already has an open conversation, re-bind it to
     // the (possibly new) provider/model so resuming it later continues with what
     // the user is actually using now — not the model it was created with. No-op
@@ -579,14 +691,20 @@ export async function start(input: StartInput) {
  * connection+schema+focus, so switching tabs re-injects context anyway).
  */
 export function newChat() {
-  mutate(s => {
-    const key = s.focusedConnectionId ?? GLOBAL_KEY;
-    return setChat(s, key, emptyChat());
-  });
-  ai.newChat().catch(e => {
-    if (isAiError(e) && e.kind === 'NoActiveSession') return;
-    mutate(s => ({ ...s, lastError: errMsg(e) }));
-  });
+  const key = state.focusedConnectionId ?? GLOBAL_KEY;
+  // Stop a running turn first, or it keeps writing into the fresh transcript.
+  const stopped = stopPendingTurn(key);
+  mutate(s => setChat(s, key, emptyChat()));
+  // In sync only once the backend has actually cleared its transcript — it
+  // declines while another chat's turn is still running.
+  backendBucket = null;
+  stopped
+    .then(() => ai.newChat())
+    .then(cleared => { if (cleared) backendBucket = key; })
+    .catch(e => {
+      if (isAiError(e) && e.kind === 'NoActiveSession') return;
+      mutate(s => ({ ...s, lastError: errMsg(e) }));
+    });
 }
 
 /**
@@ -659,6 +777,10 @@ export async function loadConversation(conversationId: string) {
   // connectionId and that differs from the current view, the messages would
   // land in an off-screen bucket and the conversation would appear not to load.
   const connKey = state.focusedConnectionId ?? GLOBAL_KEY;
+  // A turn still running in this bucket would keep writing into the loaded
+  // transcript, and its `done` could never find its bubble again — the panel
+  // stayed "busy" until the watchdog gave up.
+  await stopPendingTurn(connKey);
   const messages: ChatMessage[] = conv.messages
     .filter(m => m.role === 'user' || m.role === 'assistant' || m.role === 'tool')
     .map(m => {
@@ -695,6 +817,9 @@ export async function loadConversation(conversationId: string) {
         content:   m.content,
         createdAt: m.createdAt ? Date.parse(m.createdAt) || undefined : undefined,
         streaming: false,
+        // Saved failed replies are tagged (see onDone) — keep them out of
+        // the restored transcript.
+        finishReason: m.role === 'assistant' && m.kind === 'error' ? 'error' as const : undefined,
       };
     });
   mutate(s => setChat(s, connKey, {
@@ -721,12 +846,12 @@ export async function loadConversation(conversationId: string) {
   // every provider, but most visibly the stateless CLIs ("I don't see a prior
   // attempt in this conversation"). Send the user/assistant text turns; the
   // backend drops tool/system turns itself.
-  const restorable = messages
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .map(m => ({ role: m.role, content: m.content }));
   try {
-    await ai.restoreMessages(restorable);
+    // Declined while another chat's turn is running: the next send carries
+    // the history instead.
+    backendBucket = (await ai.restoreMessages(restorableOf(messages))) ? connKey : null;
   } catch (e) {
+    backendBucket = null; // the next send carries the history instead
     flog('ai', 'failed to restore conversation history:', errMsg(e));
   }
 }
@@ -760,6 +885,13 @@ export async function end(opts?: { awaitBackend?: boolean; keepTranscript?: bool
   // model switch. So for swaps we drop to `inactive` but preserve the buckets;
   // start() flips back to `active` and the same transcript is still there. Plain
   // "End" (no opts) still clears everything.
+  //
+  // Turns still running die with the session; stop them so they don't leave
+  // spinning bubbles (kept transcript) or keep the backend busy.
+  for (const [key, chat] of Object.entries(state.byConnection)) {
+    if (chat.pendingRequestId) void stopPendingTurn(key);
+  }
+  backendBucket = null;
   if (opts?.keepTranscript) {
     mutate(s => ({ ...s, status: 'inactive' }));
   } else {
@@ -786,14 +918,15 @@ export async function end(opts?: { awaitBackend?: boolean; keepTranscript?: bool
  */
 export async function restoreBackendTranscript() {
   const key = state.focusedConnectionId ?? GLOBAL_KEY;
-  const msgs = state.byConnection[key]?.messages ?? [];
-  const restorable = msgs
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .map(m => ({ role: m.role, content: m.content }));
-  if (restorable.length === 0) return;
+  const restorable = restorableOf(state.byConnection[key]?.messages ?? []);
+  if (restorable.length === 0) {
+    backendBucket = key; // fresh session, empty chat: already in sync
+    return;
+  }
   try {
-    await ai.restoreMessages(restorable);
+    backendBucket = (await ai.restoreMessages(restorable)) ? key : null;
   } catch (e) {
+    backendBucket = null;
     flog('ai', 'failed to re-seed history after provider switch:', errMsg(e));
   }
 }
@@ -893,6 +1026,14 @@ export async function sendMessage(
     } catch { /* non-fatal */ }
   }
 
+  // Sending from another connection's chat than the backend transcript holds:
+  // bring this chat's history along (snapshot before the new turn is added).
+  const history = backendBucket === connKey
+    ? undefined
+    : restorableOf(state.byConnection[connKey]?.messages ?? []);
+  backendBucket = connKey;
+  if (history !== undefined) historyCarriers.add(requestId);
+
   mutate(s => {
     const chat = chatOf(s, connKey);
     return setChat(s, connKey, {
@@ -931,12 +1072,27 @@ export async function sendMessage(
       maxTokens: preset.maxTokens,
       reasoningEffort: preset.reasoningEffort,
       stream: appSettings.aiStreamMode,
+      history,
     });
+    // The backend emits `done` before the command returns, so a turn still
+    // pending shortly after lost its `done` event — finalise it with what
+    // arrived rather than leave the panel busy until the watchdog fires.
+    setTimeout(() => {
+      if (pendingBucketOf(state, requestId) !== connKey) return;
+      flog('ai', 'chat turn returned without a done event — finalising');
+      disarmWatchdog(requestId);
+      finalizeTurn(connKey, requestId, 'error', '(no reply received)');
+    }, 2_000);
   } catch (e) {
     flog('ai', 'chat send failed:', errMsg(e));
-    if (watchdogRid === requestId) disarmWatchdog();
+    disarmWatchdog(requestId);
+    // Unknown whether the backend applied the history this send carried.
+    if (historyCarriers.delete(requestId)) backendBucket = null;
     mutate(s => {
       const chat = chatOf(s, connKey);
+      // Stopped or cleared meanwhile: the error belongs to a turn the user
+      // already moved on from — and must not clear a newer turn's flag.
+      if (chat.pendingRequestId !== requestId) return s;
       const idx = chat.messages.findIndex(m => m.id === requestId);
       if (idx < 0) {
         return setChat(s, connKey, {
@@ -995,30 +1151,7 @@ export async function approveToolCall(toolCallId: string, approve: boolean) {
 }
 
 export async function stopStreaming() {
-  const key = state.focusedConnectionId ?? GLOBAL_KEY;
-  const rid = state.byConnection[key]?.pendingRequestId;
-  if (!rid) return;
-  if (watchdogRid === rid) disarmWatchdog();
-  // Finalise locally first. Otherwise, if the in-flight request was
-  // started in a previous page lifecycle (HMR / reload) its callbacks
-  // are dead and `done` will never arrive — the UI stays stuck on Stop
-  // forever. Clearing here unsticks the panel even when the backend
-  // can't deliver the cancel ack.
-  mutate(s => {
-    const chat = chatOf(s, key);
-    if (chat.pendingRequestId !== rid) return s;
-    const idx = chat.messages.findIndex(m => m.id === rid);
-    const next = idx >= 0 ? [...chat.messages] : chat.messages;
-    if (idx >= 0) {
-      next[idx] = {
-        ...next[idx],
-        streaming: false,
-        finishReason: 'canceled',
-      };
-    }
-    return setChat(s, key, { ...chat, messages: next, pendingRequestId: undefined });
-  });
-  try { await ai.chatStop(rid); } catch { /* best-effort */ }
+  await stopPendingTurn(state.focusedConnectionId ?? GLOBAL_KEY);
 }
 
 // --- Shortcut entry points (M8.5) ---

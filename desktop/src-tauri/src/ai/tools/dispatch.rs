@@ -2,25 +2,47 @@
 //! result wrapper, per-call context, and the cross-database guard helpers.
 
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use adapter_api::SqlDialect;
 use serde_json::{json, Value};
 
+use crate::ai::cancel::CancelToken;
+use crate::ai::AiError;
 use crate::db::registry::Registry;
 
 use super::approval::{ApprovalDecision, ApprovalRegistry, AutoApprovals};
-use super::tiers::classify_batch;
+use super::tiers::{classify_batch, CommandLanguage, QueryTier};
 
 /// Context every tool call needs to reach the database.
-#[derive(Debug, Clone)]
+#[derive(Clone, Default)]
 pub struct ToolContext {
     pub connection_id: String,
     pub default_schema: Option<String>,
+    /// The chat turn this call belongs to. Sent with approval cards so the UI
+    /// can tie a card to its turn and retire it when that turn is stopped.
+    pub request_id: Option<String>,
+    /// Tripped when the user stops the turn; approval waits end immediately.
+    pub cancel: Option<CancelToken>,
 }
+
+/// Longest an AI-issued query may run before the tool gives up and tells the
+/// model. A lock wait or runaway query used to hang the whole turn — and the
+/// session's send lock — indefinitely.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Rows of a result shown to the model, and limits that keep one result from
+/// flooding its context: a 100 KB TEXT cell in 25 rows used to become a
+/// 2.7 MB tool message, re-sent on every later turn (a small local model's
+/// whole context window, many times over).
+const MAX_ROWS_SHOWN: usize = 25;
+const MAX_CELL_CHARS: usize = 500;
+const MAX_RESULT_BYTES: usize = 12_000;
 
 /// Detect whether `sql` references a database OTHER than `active`. Catches the
 /// two ways to escape the active DB in a MySQL-style dialect: an explicit
-/// `USE otherdb`, and a qualified `otherdb.table` reference.
+/// `USE otherdb` (in any statement of the batch, after any comments), and a
+/// qualified `otherdb.table` reference.
 ///
 /// CRITICAL: a qualified `x.y` token is ambiguous — it can be `database.table`,
 /// `table.column`, OR `alias.column`. We must NOT flag table/column/alias
@@ -28,9 +50,11 @@ pub struct ToolContext {
 /// matches an ACTUAL other database name in `known_databases`. Table aliases
 /// like `films f` → `f.id` won't match a real database, so they pass through.
 /// `known_databases` is the live `list_schemas` result; comparison is
-/// case-insensitive and ignores backticks.
+/// case-insensitive and ignores backticks. Text inside string literals and
+/// comments (`'x@otherdb.com'`, `-- see otherdb.t`) is never looked at.
 fn references_other_database(
     sql: &str,
+    dialect: SqlDialect,
     active: &str,
     known_databases: &[String],
 ) -> Option<String> {
@@ -41,62 +65,175 @@ fn references_other_database(
         .map(|d| d.trim_matches('`').to_ascii_lowercase())
         .filter(|d| *d != active_norm)
         .collect();
-
-    // 1) `USE <db>` — binds the session to another database. Block any USE that
-    // targets a real other database (not the active one).
-    let upper = sql.trim_start().to_ascii_uppercase();
-    if upper.starts_with("USE ") {
-        let db = sql.trim_start()[4..]
-            .trim()
-            .trim_end_matches(';')
-            .trim()
-            .trim_matches('`')
-            .to_ascii_lowercase();
-        if others.contains(&db) {
-            return Some(db);
-        }
-    }
-
-    // 2) Qualified `db.table` references — but ONLY flag when the left
-    // identifier is a known other database. Aliases and table-qualified columns
-    // (`f.id`, `films.title`) won't be in `others`, so they're allowed.
     if others.is_empty() {
         return None;
     }
-    let bytes = sql.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i] as char;
-        let is_ident_start = c.is_ascii_alphabetic() || c == '_' || c == '`';
-        if !is_ident_start {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        if c == '`' {
-            i += 1;
-            while i < bytes.len() && bytes[i] != b'`' {
+
+    // Identifier tokens of the code (string contents and comments blanked,
+    // quoted identifiers kept), each with whether a `.` follows it.
+    let identifiers = |code: &str| -> Vec<(String, bool)> {
+        let bytes = code.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            let c = bytes[i];
+            let start = i;
+            if c == b'`' || c == b'"' {
                 i += 1;
-            }
-            i += 1; // closing backtick
-        } else {
-            while i < bytes.len() {
-                let ch = bytes[i] as char;
-                if ch.is_ascii_alphanumeric() || ch == '_' {
+                while i < bytes.len() && bytes[i] != c {
                     i += 1;
-                } else {
-                    break;
+                }
+                i = (i + 1).min(bytes.len());
+            } else if c.is_ascii_alphabetic() || c == b'_' {
+                while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$') {
+                    i += 1;
+                }
+            } else {
+                i += 1;
+                continue;
+            }
+            let ident = code[start..i].trim_matches(|ch| ch == '`' || ch == '"').to_ascii_lowercase();
+            out.push((ident, bytes.get(i) == Some(&b'.')));
+        }
+        out
+    };
+
+    for stmt in adapter_api::split_sql_statements(sql, dialect) {
+        let code = adapter_api::mask_strings_and_comments(&stmt, dialect);
+        let idents = identifiers(&code);
+        // 1) `USE <db>` binds the session to another database.
+        if adapter_api::leading_keyword(&stmt, dialect) == "USE" {
+            if let Some((db, _)) = idents.iter().skip_while(|(w, _)| w != "use").nth(1) {
+                if others.contains(db) {
+                    return Some(db.clone());
                 }
             }
         }
-        if i < bytes.len() && bytes[i] == b'.' {
-            let ident = sql[start..i].trim_matches('`').to_ascii_lowercase();
-            if others.contains(&ident) {
-                return Some(ident);
-            }
+        // 2) Qualified `db.table` references — ONLY when the left identifier is
+        // a known other database. Aliases and table-qualified columns
+        // (`f.id`, `films.title`) won't be in `others`, so they're allowed.
+        if let Some((db, _)) = idents.iter().find(|(w, dotted)| *dotted && others.contains(w)) {
+            return Some(db.clone());
         }
     }
     None
+}
+
+/// Shape a query's result for the model: what ran, what it did, and a capped
+/// sample of rows — saying plainly when something was cut so the model never
+/// mistakes "25 shown" for "25 exist". `skip_first` drops the `USE <schema>;`
+/// the dispatcher prepended for MySQL.
+fn shape_query_result(statements: &[adapter_api::StatementResult], skip_first: bool) -> ToolResult {
+    // Hide our own `USE` unless it is what failed.
+    let statements = if skip_first && statements.len() > 1 && statements[0].error.is_none() {
+        &statements[1..]
+    } else {
+        statements
+    };
+    let Some(last) = statements.last() else {
+        return ToolResult::error("no statements returned");
+    };
+
+    let summary = |s: &adapter_api::StatementResult| -> Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("sql".into(), json!(crate::ai::clip_str(s.sql.trim(), 200)));
+        match &s.error {
+            Some(e) => {
+                obj.insert("status".into(), json!("error"));
+                obj.insert("error".into(), json!(e));
+            }
+            None => {
+                obj.insert("status".into(), json!("ok"));
+                if let Some(n) = s.rows_affected {
+                    obj.insert("rows_affected".into(), json!(n));
+                }
+                if !s.columns.is_empty() {
+                    obj.insert("rows_returned".into(), json!(s.rows.len()));
+                }
+            }
+        }
+        Value::Object(obj)
+    };
+
+    // A batch keeps going after an error, so the model must learn what
+    // succeeded too — reporting only the error made it re-run statements
+    // that had already committed.
+    if let Some(failed) = statements.iter().position(|s| s.error.is_some()) {
+        let err = statements[failed].error.clone().unwrap_or_default();
+        if statements.len() == 1 {
+            return ToolResult::error(err);
+        }
+        return ToolResult {
+            content: json!({
+                "error": format!("statement {} of {} failed: {err}", failed + 1, statements.len()),
+                "statements": statements.iter().map(summary).collect::<Vec<_>>(),
+            })
+            .to_string(),
+            is_error: true,
+        };
+    }
+
+    let mut out = serde_json::Map::new();
+    if statements.len() > 1 {
+        out.insert("statements".into(), json!(statements.iter().map(summary).collect::<Vec<_>>()));
+    }
+    out.insert("ok".into(), json!(true));
+    if last.columns.is_empty() && last.rows.is_empty() {
+        // DML / DDL: no result set, just its effect.
+        if let Some(n) = last.rows_affected {
+            out.insert("rows_affected".into(), json!(n));
+        }
+    } else {
+        let rows: Vec<Value> = last
+            .rows
+            .iter()
+            .take(MAX_ROWS_SHOWN)
+            .map(|r| Value::Array(r.iter().map(clip_cell).collect()))
+            .collect();
+        out.insert("columns".into(), json!(last.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>()));
+        out.insert("row_count".into(), json!(last.rows.len()));
+        // The adapter stops at its own row cap; more rows exist on the server.
+        if last.truncated {
+            out.insert("row_count_is_capped".into(), json!(true));
+        }
+        out.insert("rows_shown".into(), json!(rows.len()));
+        out.insert("rows".into(), Value::Array(rows));
+    }
+    out.insert("duration_ms".into(), json!(last.duration_ms));
+
+    // Keep the whole message bounded: drop trailing rows until it fits.
+    let mut value = Value::Object(out);
+    while value.to_string().len() > MAX_RESULT_BYTES {
+        let Some(rows) = value.get_mut("rows").and_then(Value::as_array_mut) else { break };
+        if rows.len() <= 1 {
+            break;
+        }
+        rows.pop();
+        let shown = rows.len();
+        value["rows_shown"] = json!(shown);
+        value["rows_omitted_for_size"] = json!(true);
+    }
+    ToolResult::from_value(value)
+}
+
+/// A result cell, cut down when it's long text or a large document.
+fn clip_cell(v: &Value) -> Value {
+    match v {
+        Value::String(s) if s.chars().count() > MAX_CELL_CHARS => {
+            let cut: String = s.chars().take(MAX_CELL_CHARS).collect();
+            json!(format!("{cut}…(+{} chars)", s.chars().count() - MAX_CELL_CHARS))
+        }
+        Value::Array(_) | Value::Object(_) => {
+            let text = v.to_string();
+            if text.chars().count() > MAX_CELL_CHARS {
+                let cut: String = text.chars().take(MAX_CELL_CHARS).collect();
+                json!(format!("{cut}…(+{} chars)", text.chars().count() - MAX_CELL_CHARS))
+            } else {
+                v.clone()
+            }
+        }
+        _ => v.clone(),
+    }
 }
 
 /// Choose which statement in a (possibly multi-statement) batch is the one whose
@@ -131,7 +268,7 @@ impl ToolResult {
     fn from_value(v: Value) -> Self {
         Self { content: v.to_string(), is_error: false }
     }
-    fn error(msg: impl Into<String>) -> Self {
+    pub fn error(msg: impl Into<String>) -> Self {
         Self {
             content: json!({ "error": msg.into() }).to_string(),
             is_error: true,
@@ -148,6 +285,24 @@ impl ToolResult {
     }
 }
 
+/// Show an approval card and wait for the user's answer. The card carries the
+/// turn's request id so the UI can tie it to its bubble and retire it if that
+/// turn is stopped; a stopped turn also stops waiting right away.
+async fn ask_user(
+    approvals: &Arc<ApprovalRegistry>,
+    app: &tauri::AppHandle,
+    ctx: &ToolContext,
+    tool_call_id: &str,
+    mut payload: Value,
+) -> Result<ApprovalDecision, AiError> {
+    use tauri::Emitter;
+    if let (Some(obj), Some(request_id)) = (payload.as_object_mut(), ctx.request_id.as_ref()) {
+        obj.insert("request_id".into(), json!(request_id));
+    }
+    let _ = app.emit("ai://tool/approval_request", payload);
+    approvals.wait(tool_call_id, ctx.cancel.as_ref()).await
+}
+
 /// Common approval path: if auto-approved for this tool, returns `Ok(())`.
 /// Otherwise emits an approval_request for the UI and blocks on the user's
 /// decision. Returns `Err(ToolResult)` when the user denies (or approval
@@ -156,6 +311,7 @@ async fn require_approval(
     auto_approvals: &Arc<AutoApprovals>,
     approvals: &Arc<ApprovalRegistry>,
     app: &tauri::AppHandle,
+    ctx: &ToolContext,
     tool_call_id: &str,
     name: &str,
     preview: Value,
@@ -163,15 +319,13 @@ async fn require_approval(
     if auto_approvals.allows(name).await {
         return Ok(());
     }
-    use tauri::Emitter;
     let mut payload = match preview {
         Value::Object(map) => map,
         _ => serde_json::Map::new(),
     };
     payload.insert("tool_call_id".into(), json!(tool_call_id));
     payload.insert("name".into(), json!(name));
-    let _ = app.emit("ai://tool/approval_request", Value::Object(payload));
-    match approvals.wait(tool_call_id).await {
+    match ask_user(approvals, app, ctx, tool_call_id, Value::Object(payload)).await {
         Ok(ApprovalDecision::Approve) => Ok(()),
         Ok(ApprovalDecision::Deny) => Err(ToolResult::error(format!("user denied `{name}`"))),
         Err(e) => Err(ToolResult::error(format!("approval: {e}"))),
@@ -254,11 +408,19 @@ pub async fn dispatch(
     // NOTE: we key off `sql_dialect == Postgres`, NOT `database_picker` —
     // MySQL also sets `database_picker: true` (it shows a DB picker), but on
     // MySQL schema and database are the same thing.
-    let database_is_distinct_from_schema = db_registry
-        .manifest(&ctx.connection_id)
-        .await
-        .map(|m| matches!(m.capabilities.sql_dialect, adapter_api::SqlDialect::Postgres))
-        .unwrap_or(false);
+    let manifest = db_registry.manifest(&ctx.connection_id).await.ok();
+    let sql_dialect = manifest
+        .as_ref()
+        .map(|m| m.capabilities.sql_dialect)
+        .unwrap_or(SqlDialect::None);
+    let database_is_distinct_from_schema = matches!(sql_dialect, SqlDialect::Postgres);
+    // What `call_query` commands are written in, for approval tiers.
+    let command_language = match (sql_dialect, manifest.as_ref().map(|m| m.adapter.key)) {
+        (SqlDialect::None, Some("mongo")) => CommandLanguage::Mongo,
+        (SqlDialect::None, Some("redis")) => CommandLanguage::Redis,
+        (SqlDialect::None, _) => CommandLanguage::Unknown,
+        (dialect, _) => CommandLanguage::Sql(dialect),
+    };
 
     match name {
         "list_schemas" => {
@@ -288,6 +450,7 @@ pub async fn dispatch(
                 auto_approvals,
                 approvals,
                 app,
+                ctx,
                 tool_call_id,
                 name,
                 json!({ "summary": "List every schema the current user can see." }),
@@ -326,6 +489,7 @@ pub async fn dispatch(
                 auto_approvals,
                 approvals,
                 app,
+                ctx,
                 tool_call_id,
                 name,
                 json!({ "summary": format!("List tables + views in schema `{schema}`.") }),
@@ -375,6 +539,7 @@ pub async fn dispatch(
                 auto_approvals,
                 approvals,
                 app,
+                ctx,
                 tool_call_id,
                 name,
                 json!({ "summary": format!("Describe `{schema}.{table}` (columns, indexes, foreign keys).") }),
@@ -451,7 +616,7 @@ pub async fn dispatch(
                         .await
                         .map(|list| list.into_iter().map(|s| s.name).collect())
                         .unwrap_or_default();
-                    if let Some(other) = references_other_database(&sql, active, &known) {
+                    if let Some(other) = references_other_database(&sql, sql_dialect, active, &known) {
                         return ToolResult::error(format!(
                             "Blocked: query references database `{other}`, but cross-database access is disabled. \
                              You are locked to the active database `{active}`. Ask the user to enable \
@@ -464,22 +629,18 @@ pub async fn dispatch(
             let started = Instant::now();
             // Classify the statement (batch = strongest tier) so we can gate
             // auto-approval per operation kind and badge the approval card.
-            let tier = classify_batch(&sql);
+            let tier = classify_batch(&sql, command_language);
             if auto_approvals.allows_tier(tier).await {
                 crate::log_line!("ai_tool", "call_query auto-approved (tier={})", tier.label());
             } else {
-                // Ask the UI for approval. Emit + wait with a shared timeout.
-                use tauri::Emitter;
-                let _ = app.emit(
-                    "ai://tool/approval_request",
-                    json!({
-                        "tool_call_id": tool_call_id,
-                        "name": name,
-                        "sql": sql,
-                        "tier": tier,
-                    }),
-                );
-                match approvals.wait(tool_call_id).await {
+                // Ask the UI for approval.
+                let card = json!({
+                    "tool_call_id": tool_call_id,
+                    "name": name,
+                    "sql": sql,
+                    "tier": tier,
+                });
+                match ask_user(approvals, app, ctx, tool_call_id, card).await {
                     Ok(ApprovalDecision::Approve) => {
                         crate::log_line!("ai_tool", "call_query approved (tier={}) after {:?}", tier.label(), started.elapsed());
                     }
@@ -502,20 +663,32 @@ pub async fn dispatch(
             // have no `USE`, and non-SQL stores (Mongo, Redis) would be
             // corrupted by it (`USE ...;\ndb.find()` no longer starts with
             // `db.`, which is what broke Mongo). So gate strictly on MySQL.
-            let sql_dialect = db_registry
-                .manifest(&ctx.connection_id)
-                .await
-                .map(|m| m.capabilities.sql_dialect)
-                .unwrap_or(adapter_api::SqlDialect::None);
             let mut final_sql = sql.clone();
+            let mut prepended_use = false;
             if let Some(schema) = &ctx.default_schema {
-                if matches!(sql_dialect, adapter_api::SqlDialect::Mysql)
-                    && !sql.trim_start().to_ascii_uppercase().starts_with("USE ")
+                if matches!(sql_dialect, SqlDialect::Mysql)
+                    && adapter_api::leading_keyword(&sql, sql_dialect) != "USE"
                 {
-                    final_sql = format!("USE `{schema}`;\n{sql}");
+                    final_sql = format!("USE `{}`;\n{sql}", schema.replace('`', "``"));
+                    prepended_use = true;
                 }
             }
-            match adapter.execute_raw(&final_sql, None).await {
+            // DDL may commit even if this call is stopped or times out before
+            // it returns, so mark the cached schema stale up front too.
+            if matches!(tier, QueryTier::Create | QueryTier::Destructive) {
+                crate::ai::context::note_schema_change();
+            }
+            let outcome = match tokio::time::timeout(QUERY_TIMEOUT, adapter.execute_raw(&final_sql, None)).await {
+                Ok(r) => r,
+                Err(_) => {
+                    return ToolResult::error(format!(
+                        "query did not finish within {}s and was abandoned (it may still be running on the \
+                         server, e.g. waiting on a lock). Use a narrower query or ask the user to run it.",
+                        QUERY_TIMEOUT.as_secs()
+                    ));
+                }
+            };
+            match outcome {
                 Ok(res) => {
                     // Pick the statement whose result we report to the model.
                     //
@@ -549,26 +722,18 @@ pub async fn dispatch(
                         "message": message,
                     }));
 
-                    // Compact representation — the result statement's first 25
-                    // rows. Keeps the feedback to the model under a few KB even on
-                    // wide tables.
-                    match result_stmt {
-                        Some(stmt) if stmt.error.is_none() => {
-                            let rows_shown = stmt.rows.iter().take(25).collect::<Vec<_>>();
-                            let column_names: Vec<&str> = stmt.columns.iter().map(|c| c.name.as_str()).collect();
-                            ToolResult::from_value(json!({
-                                "columns": column_names,
-                                "row_count_shown": rows_shown.len(),
-                                "rows": rows_shown,
-                                "truncated": stmt.rows.len() > rows_shown.len(),
-                                "duration_ms": stmt.duration_ms,
-                            }))
-                        }
-                        // A statement-level error IS an error — use the error
-                        // constructor so is_error is set (not substring-guessed).
-                        Some(stmt) => ToolResult::error(stmt.error.clone().unwrap_or_default()),
-                        None => ToolResult::error("no statements returned"),
+                    // DDL makes the cached schema context stale — rebuild it
+                    // before the next turn so a table the AI just created is
+                    // listed (and a dropped one isn't).
+                    if matches!(tier, QueryTier::Create | QueryTier::Destructive)
+                        && res.statements.iter().any(|s| s.error.is_none())
+                    {
+                        crate::ai::context::note_schema_change();
                     }
+
+                    // Compact, bounded representation of what ran and what came
+                    // back (see `shape_query_result`).
+                    shape_query_result(&res.statements, prepended_use)
                 }
                 Err(e) => ToolResult::error(format!("call_query failed: {e}")),
             }
@@ -598,17 +763,14 @@ pub async fn dispatch(
                 // Reuse the existing approval UI — the tool name lets the
                 // frontend render a tab-aware approval card instead of the
                 // generic SQL-run one.
-                let _ = app.emit(
-                    "ai://tool/approval_request",
-                    json!({
-                        "tool_call_id": tool_call_id,
-                        "name": name,
-                        "sql": sql,
-                        "mode": mode,
-                        "title": title,
-                    }),
-                );
-                match approvals.wait(tool_call_id).await {
+                let card = json!({
+                    "tool_call_id": tool_call_id,
+                    "name": name,
+                    "sql": sql,
+                    "mode": mode,
+                    "title": title,
+                });
+                match ask_user(approvals, app, ctx, tool_call_id, card).await {
                     Ok(ApprovalDecision::Approve) => {
                         crate::log_line!(
                             "ai_tool",
@@ -682,18 +844,15 @@ pub async fn dispatch(
                     "open_object_tab auto-approved (object={object})"
                 );
             } else {
-                let _ = app.emit(
-                    "ai://tool/approval_request",
-                    json!({
-                        "tool_call_id": tool_call_id,
-                        "name": name,
-                        "object": object,
-                        "objectName": obj_name,
-                        "schema": schema,
-                        "sql": prefill_sql,
-                    }),
-                );
-                match approvals.wait(tool_call_id).await {
+                let card = json!({
+                    "tool_call_id": tool_call_id,
+                    "name": name,
+                    "object": object,
+                    "objectName": obj_name,
+                    "schema": schema,
+                    "sql": prefill_sql,
+                });
+                match ask_user(approvals, app, ctx, tool_call_id, card).await {
                     Ok(ApprovalDecision::Approve) => {
                         crate::log_line!(
                             "ai_tool",
@@ -767,22 +926,18 @@ pub async fn dispatch(
                 }
             };
 
-            use tauri::Emitter;
             let started = Instant::now();
             if auto_approvals.allows("publish_notify").await {
                 crate::log_line!("ai_tool", "publish_notify auto-approved");
             } else {
-                let _ = app.emit(
-                    "ai://tool/approval_request",
-                    json!({
-                        "tool_call_id": tool_call_id,
-                        "name": name,
-                        "sql": cmd,
-                        "channel": channel,
-                        "payload": payload,
-                    }),
-                );
-                match approvals.wait(tool_call_id).await {
+                let card = json!({
+                    "tool_call_id": tool_call_id,
+                    "name": name,
+                    "sql": cmd,
+                    "channel": channel,
+                    "payload": payload,
+                });
+                match ask_user(approvals, app, ctx, tool_call_id, card).await {
                     Ok(ApprovalDecision::Approve) => {
                         crate::log_line!(
                             "ai_tool",
@@ -848,16 +1003,13 @@ pub async fn dispatch(
             if auto_approvals.allows("subscribe_channel").await {
                 crate::log_line!("ai_tool", "subscribe_channel auto-approved");
             } else {
-                let _ = app.emit(
-                    "ai://tool/approval_request",
-                    json!({
-                        "tool_call_id": tool_call_id,
-                        "name": name,
-                        "sql": preview,
-                        "channel": channel,
-                    }),
-                );
-                match approvals.wait(tool_call_id).await {
+                let card = json!({
+                    "tool_call_id": tool_call_id,
+                    "name": name,
+                    "sql": preview,
+                    "channel": channel,
+                });
+                match ask_user(approvals, app, ctx, tool_call_id, card).await {
                     Ok(ApprovalDecision::Approve) => {
                         crate::log_line!(
                             "ai_tool",
@@ -951,5 +1103,82 @@ mod tests {
     #[test]
     fn empty_batch_is_none() {
         assert!(select_result_statement(&[]).is_none());
+    }
+
+    fn parse(r: &ToolResult) -> Value {
+        serde_json::from_str(&r.content).unwrap()
+    }
+
+    #[test]
+    fn writes_report_rows_affected() {
+        let mut upd = stmt("UPDATE t SET a = 1 WHERE b = 2", 0, 0, None);
+        upd.rows_affected = Some(500);
+        let r = shape_query_result(&[stmt("USE `db`", 0, 0, None), upd], true);
+        let v = parse(&r);
+        assert!(!r.is_error);
+        assert_eq!(v["rows_affected"], json!(500));
+        assert!(v.get("statements").is_none(), "our USE prefix is hidden");
+    }
+
+    #[test]
+    fn partial_batch_failure_says_what_already_ran() {
+        let mut del = stmt("DELETE FROM t WHERE x < 5", 0, 0, None);
+        del.rows_affected = Some(120);
+        let batch = vec![del, stmt("INSERT INTO t VALUES (1)", 0, 0, Some("Duplicate entry '1'")), stmt("SELECT 1", 1, 1, None)];
+        let r = shape_query_result(&batch, false);
+        let v = parse(&r);
+        assert!(r.is_error);
+        assert!(v["error"].as_str().unwrap().starts_with("statement 2 of 3 failed"));
+        assert_eq!(v["statements"][0]["rows_affected"], json!(120));
+        assert_eq!(v["statements"][2]["status"], json!("ok"));
+    }
+
+    #[test]
+    fn failed_use_prefix_is_reported() {
+        let batch = vec![stmt("USE `nope`", 0, 0, Some("Unknown database 'nope'")), stmt("SELECT 1", 0, 0, Some("No database selected"))];
+        let r = shape_query_result(&batch, true);
+        assert!(r.is_error);
+        assert!(r.content.contains("Unknown database"));
+    }
+
+    #[test]
+    fn results_say_when_rows_were_cut() {
+        let mut s = stmt("SELECT * FROM big", 10_000, 1, None);
+        s.truncated = true;
+        let v = parse(&shape_query_result(&[s], false));
+        assert_eq!(v["row_count"], json!(10_000));
+        assert_eq!(v["row_count_is_capped"], json!(true));
+        assert_eq!(v["rows_shown"], json!(25));
+    }
+
+    #[test]
+    fn huge_cells_and_results_are_bounded() {
+        let mut s = stmt("SELECT body FROM docs", 25, 1, None);
+        for row in s.rows.iter_mut() {
+            row[0] = json!("x".repeat(108_000));
+        }
+        let r = shape_query_result(&[s], false);
+        assert!(r.content.len() <= MAX_RESULT_BYTES, "len {}", r.content.len());
+        let v = parse(&r);
+        assert!(v["rows"][0][0].as_str().unwrap().contains("…(+107500 chars)"));
+        assert_eq!(v["rows_omitted_for_size"], json!(true));
+    }
+
+    #[test]
+    fn cross_database_guard_reads_code_only() {
+        let known = vec!["shop".to_string(), "sakila".to_string(), "test".to_string()];
+        let check = |sql: &str| references_other_database(sql, SqlDialect::Mysql, "shop", &known);
+        // Not references to another database.
+        assert_eq!(check("SELECT * FROM users WHERE email LIKE '%@sakila.com'"), None);
+        assert_eq!(check("SELECT 1 -- compare with sakila.film later"), None);
+        assert_eq!(check("SELECT f.id FROM films f"), None);
+        assert_eq!(check("SELECT * FROM shop.users"), None);
+        // References to another database, however they're dressed up.
+        assert_eq!(check("SELECT * FROM sakila.film").as_deref(), Some("sakila"));
+        assert_eq!(check("SELECT * FROM `Sakila`.`film`").as_deref(), Some("sakila"));
+        assert_eq!(check("USE sakila").as_deref(), Some("sakila"));
+        assert_eq!(check("SELECT 1;\nUSE sakila;\nSELECT * FROM film").as_deref(), Some("sakila"));
+        assert_eq!(check("-- c\nUSE sakila").as_deref(), Some("sakila"));
+        assert_eq!(check("/* x */ USE `sakila`").as_deref(), Some("sakila"));
     }
 }

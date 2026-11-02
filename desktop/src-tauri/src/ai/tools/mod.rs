@@ -35,4 +35,4 @@ pub use dispatch::{dispatch, ToolContext, ToolResult};
 // trips the unused-import lint. Allow it so the public surface stays identical
 // to the pre-split `pub mod tools` without introducing a new warning.
 #[allow(unused_imports)]
-pub use tiers::{classify_batch, classify_sql, QueryTier};
+pub use tiers::{classify_batch, classify_sql, CommandLanguage, QueryTier};

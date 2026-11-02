@@ -54,8 +54,14 @@ pub fn render(template: &str, ctx: &Value) -> String {
                 continue;
             }
         }
-        out.push(c as char);
-        i += 1;
+        // Copy the whole character. `i` is always on a char boundary: it only
+        // ever moves past ASCII braces or whole characters. (Pushing the byte
+        // `as char` turned every multi-byte character, like the em-dashes and
+        // ellipses all over the adapter primers, into Latin-1 garbage in the
+        // text sent to the model.)
+        let ch = template[i..].chars().next().expect("i < len, on a char boundary");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -101,6 +107,15 @@ fn lookup(ctx: &Value, path: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn keeps_non_ascii_text_intact() {
+        let ctx = json!({ "db": "café" });
+        assert_eq!(
+            render("MySQL — a fork… {db} → ok", &ctx),
+            "MySQL — a fork… café → ok"
+        );
+    }
 
     #[test]
     fn substitutes_dotted_paths() {

@@ -1,3 +1,5 @@
 # Repo-wide ignores. Each app keeps its own .gitignore (desktop/.gitignore, mobile/.gitignore).
 .DS_Store
 .claude
+# Landing page (Next.js) — kept out of git for now
+/landing/

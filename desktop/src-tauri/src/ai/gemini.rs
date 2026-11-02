@@ -1,8 +1,9 @@
 //! Google Gemini provider. Uses the public `generativelanguage.googleapis.com`
-//! surface with an API key in the request URL.
+//! surface with the API key in the `x-goog-api-key` header (not the URL, where
+//! a transport error message would carry it into logs and the UI).
 //!
 //! Wire format:
-//!   `POST /v1beta/models/{model}:streamGenerateContent?alt=sse&key={key}`
+//!   `POST /v1beta/models/{model}:streamGenerateContent?alt=sse`
 //!   body: `{ systemInstruction, contents, generationConfig }`
 //!
 //! SSE events (in both paths) ultimately surface the same
@@ -18,9 +19,11 @@ use zeroize::{Zeroize, Zeroizing};
 use super::http::{client, map_reqwest, map_status};
 use super::sse::data_lines;
 use super::{
-    AiError, AiProvider, ChatMessage, ChatRole, CompletionRequest, FinishReason, ProviderKind,
-    TokenChunk,
+    stream_failure, AiError, AiProvider, ChatMessage, ChatRole, CompletionRequest, FinishReason,
+    ProviderKind, TokenChunk,
 };
+
+const API_KEY_HEADER: &str = "x-goog-api-key";
 
 pub struct GeminiProvider {
     api_key: Arc<Mutex<Zeroizing<String>>>,
@@ -35,7 +38,7 @@ impl GeminiProvider {
         }
     }
 
-    /// GET `/v1beta/models?key=…`. Gemini returns entries like `models/gemini-2.0-flash`;
+    /// GET `/v1beta/models`. Gemini returns entries like `models/gemini-2.0-flash`;
     /// we strip the `models/` prefix so the dropdown matches what users pass back in.
     /// Only models that support `generateContent` are returned — lots of the
     /// catalog is embeddings-only and unusable here.
@@ -50,11 +53,12 @@ impl GeminiProvider {
             #[serde(default, rename = "supportedGenerationMethods")]
             methods: Vec<String>,
         }
-        let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models?key={}",
-            api_key,
-        );
-        let res = client()?.get(url).send().await.map_err(map_reqwest)?;
+        let res = client()?
+            .get("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000")
+            .header(API_KEY_HEADER, api_key)
+            .send()
+            .await
+            .map_err(map_reqwest)?;
         let status = res.status();
         if !status.is_success() {
             let body = res.text().await.unwrap_or_default();
@@ -87,10 +91,11 @@ impl GeminiProvider {
             }),
         };
         let (url, body_json) = self.build_request(&inner, false).await?;
-        let req = client()?.post(url).body(body_json).header(
-            reqwest::header::CONTENT_TYPE,
-            "application/json",
-        );
+        let req = client()?
+            .post(url)
+            .body(body_json)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .header(API_KEY_HEADER, self.api_key.lock().await.as_str());
         let res = req.send().await.map_err(map_reqwest)?;
         let status = res.status();
         if !status.is_success() {
@@ -100,24 +105,21 @@ impl GeminiProvider {
         Ok(())
     }
 
-    /// Build (url, json-body) for the public Gemini API.
+    /// Build (url, json-body) for the public Gemini API. The key goes in the
+    /// [`API_KEY_HEADER`] header.
     async fn build_request<'a>(
         &self,
         inner: &GeminiRequest<'a>,
         stream: bool,
     ) -> Result<(String, Vec<u8>), AiError> {
-        let key = self.api_key.lock().await.to_string();
         let method = if stream {
             "streamGenerateContent?alt=sse"
         } else {
             "generateContent"
         };
         let url = format!(
-            "https://generativelanguage.googleapis.com/v1beta/models/{}:{}{}key={}",
-            self.model,
-            method,
-            if stream { "&" } else { "?" },
-            key,
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:{}",
+            self.model, method,
         );
         let body = serde_json::to_vec(inner)
             .map_err(|e| AiError::Other(format!("encode body: {e}")))?;
@@ -183,6 +185,26 @@ fn gemini_thinking_budget(model: &str, effort: Option<crate::ai::ReasoningEffort
 struct StreamPayload {
     #[serde(default)]
     candidates: Vec<Candidate>,
+    /// Set when the prompt itself was refused (no candidates follow).
+    #[serde(rename = "promptFeedback", default)]
+    prompt_feedback: Option<PromptFeedback>,
+    /// A mid-stream failure arrives as an ordinary SSE frame carrying this.
+    #[serde(default)]
+    error: Option<StreamError>,
+}
+
+#[derive(Deserialize)]
+struct PromptFeedback {
+    #[serde(rename = "blockReason", default)]
+    block_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct StreamError {
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    status: String,
 }
 
 #[derive(Deserialize)]
@@ -208,7 +230,9 @@ struct CandidatePart {
 fn split_system(messages: &[ChatMessage]) -> (Option<GeminiContent<'_>>, Vec<GeminiContent<'_>>) {
     let mut system_parts: Vec<&str> = Vec::new();
     let mut contents: Vec<GeminiContent<'_>> = Vec::new();
-    for m in messages {
+    // Gemini rejects empty text parts, so an empty turn (a stopped reply, a
+    // tool turn with no text) is left out rather than failing the request.
+    for m in messages.iter().filter(|m| !m.content.trim().is_empty()) {
         match m.role {
             ChatRole::System => system_parts.push(&m.content),
             ChatRole::User => contents.push(GeminiContent {
@@ -286,15 +310,13 @@ impl AiProvider for GeminiProvider {
         let out = async_stream::stream! {
             let mut lines = Box::pin(lines);
             let mut finish: Option<FinishReason> = None;
+            // Why Gemini cut the reply short (SAFETY, RECITATION, …), if it did.
+            let mut cut_short: Option<String> = None;
             while let Some(line) = lines.next().await {
                 match line {
                     Err(e) => {
                         crate::log_line!("ai_gemini", "{e}");
-                        yield TokenChunk {
-                            request_id: request_id.clone(),
-                            delta: String::new(),
-                            finish_reason: Some(FinishReason::Error),
-                        };
+                        yield stream_failure(&request_id, &e.to_string());
                         return;
                     }
                     Ok(json) => {
@@ -303,12 +325,29 @@ impl AiProvider for GeminiProvider {
                             crate::log_line!("ai_gemini", "parse: {}", json.chars().take(200).collect::<String>());
                             continue;
                         };
+                        if let Some(err) = p.error {
+                            crate::log_line!("ai_gemini", "stream error: {} {}", err.status, err.message);
+                            let msg = if err.message.is_empty() { err.status } else { err.message };
+                            yield stream_failure(&request_id, &format!("Gemini: {msg}"));
+                            return;
+                        }
+                        if let Some(reason) = p.prompt_feedback.and_then(|f| f.block_reason) {
+                            yield stream_failure(&request_id, &format!("Gemini refused the prompt ({reason})"));
+                            return;
+                        }
                         for cand in p.candidates {
                             if let Some(fr) = cand.finish_reason.as_deref() {
                                 finish = Some(match fr {
                                     "STOP" => FinishReason::Stop,
                                     "MAX_TOKENS" => FinishReason::Length,
-                                    _ => FinishReason::Stop,
+                                    // SAFETY, RECITATION, BLOCKLIST, … end the
+                                    // reply early; said at the end (after this
+                                    // frame's text) instead of stopping silently,
+                                    // often with nothing shown.
+                                    other => {
+                                        cut_short = Some(other.to_string());
+                                        FinishReason::Error
+                                    }
                                 });
                             }
                             if let Some(content) = cand.content {
@@ -329,11 +368,15 @@ impl AiProvider for GeminiProvider {
                     }
                 }
             }
-            yield TokenChunk {
-                request_id,
-                delta: String::new(),
-                finish_reason: Some(finish.unwrap_or(FinishReason::Stop)),
-            };
+            // Every complete reply ends with a finishReason; without one the
+            // connection was cut mid-reply.
+            // An error finish keeps a cut-short notice out of the transcript the
+            // model reads back.
+            match (finish, cut_short) {
+                (_, Some(reason)) => yield stream_failure(&request_id, &format!("Gemini stopped the reply ({reason})")),
+                (Some(f), None) => yield TokenChunk { request_id, delta: String::new(), finish_reason: Some(f) },
+                (None, None) => yield stream_failure(&request_id, "the connection closed before the reply finished"),
+            }
         };
         Ok(out.boxed())
     }
