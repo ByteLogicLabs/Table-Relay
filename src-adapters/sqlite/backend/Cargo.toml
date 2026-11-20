@@ -25,4 +25,4 @@ sqlx = { version = "0.8", features = [
     "uuid",
     "json",
 ] }
-libsqlite3-sys = { version = "0.28", features = ["bundled"] }
+libsqlite3-sys = { version = "0.30", features = ["bundled"] }
