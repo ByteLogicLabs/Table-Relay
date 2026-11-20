@@ -960,7 +960,19 @@ impl MysqlDriver {
             }
             log_line!("run_query", "→ {}", trimmed);
             let started = Instant::now();
-            let stmt_result = if is_query(trimmed) {
+            // Editor SQL runs as a prepared statement with nothing to bind, so
+            // a leftover `?` makes MySQL reject the execute packet with the
+            // opaque "Malformed communication packet" (1835). Say what's wrong.
+            let placeholders = adapter_api::count_placeholders(trimmed, adapter_api::SqlDialect::Mysql);
+            let stmt_result = if placeholders > 0 {
+                Err(AdapterError::Syntax {
+                    message: format!(
+                        "query has {placeholders} `?` placeholder(s) but no values to bind — replace each `?` with a literal value"
+                    ),
+                    line: None,
+                    column: None,
+                })
+            } else if is_query(trimmed) {
                 execute_query(&mut conn, trimmed, row_limit).await
             } else {
                 execute_statement(&mut conn, trimmed).await
@@ -1563,6 +1575,7 @@ fn is_query(sql: &str) -> bool {
 /// Does the SQL already contain a top-level `LIMIT` clause? Ignores LIMIT
 /// tokens that appear inside quotes/backticks so we don't misfire on a
 /// column or literal named `LIMIT`.
+#[cfg(test)]
 fn has_limit_clause(sql: &str) -> bool {
     let bytes = sql.as_bytes();
     let mut i = 0;
