@@ -83,8 +83,8 @@ pub use types::{
 };
 pub use query_cap::prepare_capped_query;
 pub use sql_lex::{
-    code_words, has_top_level_keyword, leading_keyword, mask_strings_and_comments,
-    split_sql_statements,
+    code_words, count_placeholders, has_top_level_keyword, leading_keyword,
+    mask_strings_and_comments, split_sql_statements,
 };
 
 /// Contract every built-in adapter implements.

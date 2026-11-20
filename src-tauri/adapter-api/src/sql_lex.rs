@@ -334,6 +334,16 @@ pub fn has_top_level_keyword(sql: &str, dialect: SqlDialect, keyword: &str) -> b
         .any(|w| w.depth == 0 && w.text == keyword)
 }
 
+/// Number of bare `?` outside literals, quoted identifiers and comments — the
+/// positional placeholders a prepared statement would expect values for.
+/// Not meaningful for Postgres, where `?` is also a jsonb operator.
+pub fn count_placeholders(sql: &str, dialect: SqlDialect) -> usize {
+    mask_sql_literals_and_comments(sql, dialect)
+        .iter()
+        .filter(|&&b| b == b'?')
+        .count()
+}
+
 /// Splits a batch into statements at top-level delimiters, honouring the
 /// dialect's literals and comments: a `;` inside a string, quoted identifier,
 /// comment or dollar quote never splits. On top of that:
@@ -497,6 +507,14 @@ mod tests {
         assert!(!has_top_level_keyword("UPDATE t SET note = 'returning' WHERE id = 1", PG, "RETURNING"));
         assert!(!has_top_level_keyword("WITH d AS (DELETE FROM t RETURNING *) SELECT * FROM d", PG, "RETURNING"));
         assert!(!has_top_level_keyword("UPDATE t SET a = 1 -- returning", PG, "RETURNING"));
+    }
+
+    #[test]
+    fn test_count_placeholders() {
+        assert_eq!(count_placeholders("SELECT * FROM t WHERE a = ? AND b=?", MY), 2);
+        assert_eq!(count_placeholders("SELECT 'why?', `what?` FROM t -- ok?\n# x?", MY), 0);
+        assert_eq!(count_placeholders("SELECT \"a?\" /* b? */ FROM t", MY), 0);
+        assert_eq!(count_placeholders("SELECT 1", MY), 0);
     }
 
     #[test]
